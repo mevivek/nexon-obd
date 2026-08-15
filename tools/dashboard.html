@@ -72,6 +72,7 @@
   .value .unit { font-size: 14px; font-weight: 400; color: var(--ink-2); margin-left: 4px; }
   .value.warn { color: var(--warning); }
   .value.crit { color: var(--critical); }
+  .stale { opacity: .45; }
   .flag { font-size: 12px; margin-top: 4px; display: none; }
   .flag.on { display: block; }
   .flag.warn { color: var(--warning); }
@@ -228,8 +229,49 @@
 
 <script>
 const HIST = 120;
+const HOLD_MS = 2500;
 const hist = { rpm: [], boost: [], speed: [], coolant: [] };
-let lastOk = 0, samples = 0, t0 = Date.now();
+const keep = {};
+let lastOk = 0, rate = [];
+
+// A sample can arrive with only some fields filled in: /data reports ok as soon as
+// any one of the batched mode-01 requests answers, so a single batch timing out
+// sends six nulls and used to blank six gauges at once. Re-show the last known
+// value for HOLD_MS instead, dimmed. After that it reverts to '—' rather than
+// showing something indefinitely stale as though it were live.
+// How long a value may be re-shown, scaled to how fast samples actually arrive. A
+// fixed window is wrong on a slow link: holding for less than a few samples means
+// fields blink to an em-dash between updates that are working perfectly well.
+function holdMs() {
+  if (rate.length < 3) return HOLD_MS;
+  const d = (rate[rate.length - 1] - rate[0]) / (rate.length - 1);
+  return Math.max(HOLD_MS, Math.min(15000, d * 4));
+}
+
+function merge(sample) {
+  const now = Date.now(), v = {}, q = {}, w = holdMs();
+  let held = 0;
+  for (const k in sample) {
+    const x = sample[k];
+    if (x !== null && x !== undefined && !isNaN(x)) {
+      keep[k] = { v: x, t: now }; v[k] = x; q[k] = false;
+    } else if (keep[k] && now - keep[k].t <= w) {
+      v[k] = keep[k].v; q[k] = true; held++;
+    } else {
+      v[k] = null; q[k] = true;
+    }
+  }
+  return [v, q, held];
+}
+
+// Rate over a trailing window. The old reading averaged over the whole page
+// lifetime, so it sagged after any rough patch and never recovered - it looked
+// like the refresh was degrading long after it had.
+function hz() {
+  if (rate.length < 2) return '';
+  const secs = (rate[rate.length - 1] - rate[0]) / 1000;
+  return secs > 0 ? '· ' + ((rate.length - 1) / secs).toFixed(1) + ' Hz' : '';
+}
 
 // ---- radial gauge: 270-degree sweep starting bottom-left ----
 function arcPath(cx, cy, r, a0, a1) {
@@ -274,7 +316,11 @@ function push(key, v) {
   if (a.length > HIST) a.shift();
 }
 const n1 = (v, d = 1) => (v === null || v === undefined || isNaN(v)) ? '—' : Number(v).toFixed(d);
-function setTxt(id, s) { const e = document.getElementById(id); if (e) e.textContent = s; }
+function setTxt(id, s, stale) {
+  const e = document.getElementById(id); if (!e) return;
+  e.textContent = s;
+  e.classList.toggle('stale', !!stale);
+}
 function setFlag(id, on, cls, msg) {
   const e = document.getElementById(id); if (!e) return;
   e.className = 'flag' + (on ? ' on ' + cls : '');
@@ -298,9 +344,10 @@ const ROWS = [
   ['2F','Fuel tank level','fuel','%',1], ['1F','Engine run time','runtime','s',0]
 ];
 
-function renderTable(v) {
+function renderTable(v, q) {
   document.getElementById('tbody').innerHTML = ROWS.map(([pid, name, key, unit, dp]) =>
-    `<tr><td>${pid}</td><td>${name}</td><td class="num">${n1(v[key], dp)}</td><td>${unit}</td></tr>`
+    `<tr><td>${pid}</td><td>${name}</td>` +
+    `<td class="num${q[key] ? ' stale' : ''}">${n1(v[key], dp)}</td><td>${unit}</td></tr>`
   ).join('');
 }
 
@@ -310,70 +357,78 @@ function hhmmss(s) {
   return (h ? h + 'h ' : '') + m + 'm ' + String(q).padStart(2, '0') + 's';
 }
 
-function render(v) {
-  setTxt('rpm', v.rpm === null ? '—' : Math.round(v.rpm));
+// q[key] marks a field as held rather than freshly read. Every threshold below is
+// gated on it: a held reading must never raise a warning, and must never keep one
+// lit either, because a stale number cannot tell you whether the engine is still
+// overheating. Held values are dimmed and the header says how many are being held.
+function render(v, q) {
+  setTxt('rpm', v.rpm === null ? '—' : Math.round(v.rpm), q.rpm);
   setGauge('rpmTrack', 'rpmArc', v.rpm / 6500);
-  setFlag('rpmFlag', v.rpm >= 5500, 'warn', '▲ approaching redline');
+  setFlag('rpmFlag', !q.rpm && v.rpm >= 5500, 'warn', '▲ approaching redline');
 
   const boost = (v.map !== null && v.baro !== null) ? (v.map - v.baro) / 100 : null;
-  v.boost = boost;
-  setTxt('boost', boost === null ? '—' : (boost >= 0 ? '+' : '') + boost.toFixed(2));
+  const qBoost = q.map || q.baro;
+  v.boost = boost; q.boost = qBoost;
+  setTxt('boost', boost === null ? '—' : (boost >= 0 ? '+' : '') + boost.toFixed(2), qBoost);
   setGauge('boostTrack', 'boostArc', boost / 1.2);
-  setTxt('map', v.map === null ? '—' : Math.round(v.map));
+  setTxt('map', v.map === null ? '—' : Math.round(v.map), q.map);
 
-  setTxt('speed', v.speed === null ? '—' : Math.round(v.speed));
+  setTxt('speed', v.speed === null ? '—' : Math.round(v.speed), q.speed);
 
-  setTxt('coolant', v.coolant === null ? '—' : Math.round(v.coolant));
-  const cCrit = v.coolant >= 110, cWarn = v.coolant >= 103;
+  setTxt('coolant', v.coolant === null ? '—' : Math.round(v.coolant), q.coolant);
+  const cCrit = !q.coolant && v.coolant >= 110, cWarn = !q.coolant && v.coolant >= 103;
   setVal('coolantV', cCrit ? 'crit' : cWarn ? 'warn' : '');
   setFlag('coolantFlag', cWarn, cCrit ? 'crit' : 'warn',
           cCrit ? '⚠ overheating — stop safely' : '⚠ running hot');
 
-  setTxt('oil', v.oil === null ? '—' : Math.round(v.oil));
-  setVal('oilV', v.oil >= 125 ? 'crit' : v.oil >= 115 ? 'warn' : '');
-  setFlag('oilFlag', v.oil >= 115, v.oil >= 125 ? 'crit' : 'warn', '⚠ oil temperature high');
+  setTxt('oil', v.oil === null ? '—' : Math.round(v.oil), q.oil);
+  setVal('oilV', q.oil ? '' : v.oil >= 125 ? 'crit' : v.oil >= 115 ? 'warn' : '');
+  setFlag('oilFlag', !q.oil && v.oil >= 115, v.oil >= 125 ? 'crit' : 'warn', '⚠ oil temperature high');
 
-  setTxt('iat', v.iat === null ? '—' : Math.round(v.iat));
-  setTxt('load', n1(v.load));
-  setTxt('throttle', n1(v.throttle));
+  setTxt('iat', v.iat === null ? '—' : Math.round(v.iat), q.iat);
+  setTxt('load', n1(v.load), q.load);
+  setTxt('throttle', n1(v.throttle), q.throttle);
 
-  setTxt('lambda', n1(v.lambda, 3));
-  const lean = v.lambda >= 1.10, rich = v.lambda <= 0.85;
+  setTxt('lambda', n1(v.lambda, 3), q.lambda);
+  const lean = !q.lambda && v.lambda >= 1.10, rich = !q.lambda && v.lambda <= 0.85;
   setVal('lambdaV', lean ? 'warn' : '');
   setFlag('lambdaFlag', lean || rich, 'warn', lean ? '⚠ running lean' : '● running rich');
 
-  setTxt('stft', v.stft === null ? '—' : (v.stft > 0 ? '+' : '') + n1(v.stft));
-  setTxt('ltft', v.ltft === null ? '—' : (v.ltft > 0 ? '+' : '') + n1(v.ltft));
-  const trimBad = Math.abs(v.stft + v.ltft) > 20;
+  setTxt('stft', v.stft === null ? '—' : (v.stft > 0 ? '+' : '') + n1(v.stft), q.stft);
+  setTxt('ltft', v.ltft === null ? '—' : (v.ltft > 0 ? '+' : '') + n1(v.ltft), q.ltft);
+  const trimBad = !q.stft && !q.ltft && Math.abs(v.stft + v.ltft) > 20;
   setFlag('trimFlag', trimBad, 'warn', '⚠ total trim beyond ±20% — check for a leak');
 
-  setTxt('cat', n1(v.cat));
-  setVal('catV', v.cat >= 900 ? 'crit' : v.cat >= 800 ? 'warn' : '');
-  setFlag('catFlag', v.cat >= 800, v.cat >= 900 ? 'crit' : 'warn', '⚠ catalyst very hot');
+  setTxt('cat', n1(v.cat), q.cat);
+  setVal('catV', q.cat ? '' : v.cat >= 900 ? 'crit' : v.cat >= 800 ? 'warn' : '');
+  setFlag('catFlag', !q.cat && v.cat >= 800, v.cat >= 900 ? 'crit' : 'warn', '⚠ catalyst very hot');
 
-  setTxt('timing', n1(v.timing));
-  setTxt('fuelRate', n1(v.fuelRate, 2));
-  if (v.speed > 0 && v.fuelRate > 0) {
+  setTxt('timing', n1(v.timing), q.timing);
+  setTxt('fuelRate', n1(v.fuelRate, 2), q.fuelRate);
+  if (!q.speed && !q.fuelRate && v.speed > 0 && v.fuelRate > 0) {
     document.getElementById('econ').textContent = (v.speed / v.fuelRate).toFixed(1) + ' km/L instantaneous';
-  } else if (v.fuelRate > 0) {
+  } else if (!q.fuelRate && v.fuelRate > 0) {
     document.getElementById('econ').textContent = 'idling';
   }
 
-  setTxt('volt', n1(v.volt, 2));
-  const vLow = v.volt < 12.2, vHigh = v.volt > 15.2;
+  setTxt('volt', n1(v.volt, 2), q.volt);
+  const vLow = !q.volt && v.volt < 12.2, vHigh = !q.volt && v.volt > 15.2;
   setVal('voltV', (vLow || vHigh) ? 'warn' : '');
   setFlag('voltFlag', vLow || vHigh, 'warn',
           vLow ? '⚠ not charging' : '⚠ overcharging');
 
-  setTxt('runtime', hhmmss(v.runtime));
+  setTxt('runtime', hhmmss(v.runtime), q.runtime);
 
-  push('rpm', v.rpm); push('boost', boost); push('speed', v.speed); push('coolant', v.coolant);
+  // Only fresh readings enter the history - replaying a held value would draw a
+  // flat run in the sparkline that the car never actually did.
+  push('rpm', q.rpm ? null : v.rpm); push('boost', qBoost ? null : boost);
+  push('speed', q.speed ? null : v.speed); push('coolant', q.coolant ? null : v.coolant);
   spark('sparkRpm', hist.rpm, getComputedStyle(document.documentElement).getPropertyValue('--blue').trim(), true);
   spark('sparkBoost', hist.boost, getComputedStyle(document.documentElement).getPropertyValue('--orange').trim(), false);
   spark('sparkSpeed', hist.speed, getComputedStyle(document.documentElement).getPropertyValue('--aqua').trim(), true);
   spark('sparkCoolant', hist.coolant, getComputedStyle(document.documentElement).getPropertyValue('--yellow').trim(), false);
 
-  renderTable(v);
+  renderTable(v, q);
 }
 
 function status(cls, text) {
@@ -386,11 +441,13 @@ async function tick() {
     const r = await fetch('/data', { cache: 'no-store' });
     const j = await r.json();
     if (j.ok) {
-      lastOk = Date.now(); samples++;
-      render(j.v);
-      status('live', 'live');
-      const secs = (Date.now() - t0) / 1000;
-      document.getElementById('rate').textContent = '· ' + (samples / secs).toFixed(1) + ' Hz';
+      lastOk = Date.now();
+      const [v, q, held] = merge(j.v);
+      render(v, q);
+      rate.push(lastOk);
+      if (rate.length > 20) rate.shift();
+      status('live', held ? 'live · holding ' + held : 'live');
+      document.getElementById('rate').textContent = hz();
     } else {
       status('stale', j.error || 'no data from ECU');
     }

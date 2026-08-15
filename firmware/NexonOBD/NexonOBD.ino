@@ -20,6 +20,8 @@
 #include "driver/twai.h"
 #include "obd_types.h"
 #include "elm_ble.h"
+#include "version.h"
+#include "history.h"
 #include <Update.h>
 #include "dashboard_html.h"
 #include "scan_html.h"
@@ -93,9 +95,20 @@ static bool canBegin() {
   return true;
 }
 
+// Drain until the bus has actually gone quiet, not just until the queue happens to
+// be empty this instant.
+//
+// A request that timed out mid-reassembly leaves its consecutive frames still in
+// flight. A single non-blocking drain returns before they land, so they arrive
+// inside the *next* request's read loop, where a stale CF with the wrong sequence
+// number kills a perfectly good exchange - one failed poll turning into a run of
+// them, which is what made the status text flicker between live and "no response".
 static void canFlush() {
   twai_message_t m;
-  while (twai_receive(&m, 0) == ESP_OK) { /* drop stale frames */ }
+  uint32_t quietSince = millis();
+  while (millis() - quietSince < 4) {
+    if (twai_receive(&m, pdMS_TO_TICKS(1)) == ESP_OK) quietSince = millis();
+  }
 }
 
 static bool canSend(uint32_t id, const uint8_t *d, uint8_t len) {
@@ -108,10 +121,18 @@ static bool canSend(uint32_t id, const uint8_t *d, uint8_t len) {
 
 // One request, one reassembled response. Handles single frame, first frame +
 // flow control + consecutive frames, and the 0x78 "responsePending" negative reply.
-// Returns payload length, or -1 on timeout, or -2 on a real negative response.
+// Returns payload length, or -1 on timeout, -2 on a real negative response, or
+// -3 when reassembly started but never completed.
+//
+// -3 has to be distinct from a short payload. Returning however many bytes did
+// arrive makes a truncated reply indistinguishable from a complete one, so the
+// caller parses half a batch and treats the PIDs that never arrived as absent -
+// which is what blanks the dashboard mid-drive.
 static int canIsoTp(uint32_t reqId, uint32_t rspId,
                     const uint8_t *payload, uint8_t plen,
-                    uint8_t *out, size_t outCap, uint32_t timeoutMs) {
+                    uint8_t *out, size_t outCap, uint32_t timeoutMs,
+                    int *partial = nullptr) {
+  if (partial) *partial = 0;
   uint8_t frame[8] = {0};
   frame[0] = plen;                                  // single-frame PCI
   memcpy(&frame[1], payload, plen);
@@ -138,33 +159,32 @@ static int canIsoTp(uint32_t reqId, uint32_t rspId,
         if (m.data[3] == 0x78) { deadline = millis() + timeoutMs + 200; continue; }  // pending
         return -2;
       }
-      size_t n = min((size_t)len, outCap);
-      memcpy(out, &m.data[1], n);
-      return (int)n;
+      if (len > outCap) return -3;                  // will not fit - do not half-copy it
+      memcpy(out, &m.data[1], len);
+      return (int)len;
     }
     else if (pci == 0x1) {                          // first frame
       total = (((size_t)(m.data[0] & 0x0F)) << 8) | m.data[1];
+      if (total > outCap) return -3;                // would truncate during reassembly
       multi = true;
-      got = 0;
-      size_t n = min((size_t)6, outCap);
-      memcpy(out, &m.data[2], n);
-      got = n;
+      got = min((size_t)6, total);
+      memcpy(out, &m.data[2], got);
       uint8_t fc[3] = {0x30, 0x00, 0x00};           // clear to send, no block, no delay
       canSend(reqId, fc, 3);
       nextSeq = 1;
       deadline = millis() + timeoutMs + 300;
     }
     else if (pci == 0x2 && multi) {                 // consecutive frame
-      if ((m.data[0] & 0x0F) != nextSeq) return -1;
+      if ((m.data[0] & 0x0F) != nextSeq) return -3; // dropped or reordered frame
       nextSeq = (nextSeq + 1) & 0x0F;
-      size_t n = min((size_t)7, (size_t)(total > got ? total - got : 0));
-      n = min(n, outCap - got);
+      size_t n = min((size_t)7, total - got);
       memcpy(out + got, &m.data[1], n);
       got += n;
       if (got >= total) return (int)got;
     }
   }
-  return multi ? (int)got : -1;
+  if (multi && partial) *partial = (int)got;        // salvageable if the caller can verify it
+  return multi ? -3 : -1;                           // a partial reassembly is not a result
 }
 
 // ---------------------------------------------------------------- BLE transport
@@ -183,7 +203,9 @@ static int hexNib(char c) {
 // because this clone's ATCRA receive filter does not actually filter.
 static int bleIsoTp(uint32_t reqId, uint32_t rspId,
                     const uint8_t *payload, uint8_t plen,
-                    uint8_t *out, size_t outCap, uint32_t timeoutMs) {
+                    uint8_t *out, size_t outCap, uint32_t timeoutMs,
+                    int *partial = nullptr) {
+  if (partial) *partial = 0;
   if (!elmConnected) return -1;
 
   if (bleCurHeader != reqId) {
@@ -206,7 +228,8 @@ static int bleIsoTp(uint32_t reqId, uint32_t rspId,
   snprintf(want, sizeof(want), "%03X", (unsigned)rspId);
 
   size_t got = 0, total = 0;
-  bool multi = false, negative = false;
+  bool multi = false, negative = false, broken = false;
+  uint8_t nextSeq = 1;
 
   int start = 0;
   while (start < (int)resp.length()) {
@@ -238,35 +261,43 @@ static int bleIsoTp(uint32_t reqId, uint32_t rspId,
     if ((pci & 0xF0) == 0x00) {                 // single frame
       size_t len = pci & 0x0F;
       if (len >= 3 && tn >= 3 && tmp[0] == 0x7F) { negative = true; continue; }
-      size_t cnt = min(min(len, tn), outCap);
-      memcpy(out, tmp, cnt);
-      return (int)cnt;
+      if (len > tn || len > outCap) { broken = true; continue; }   // line cut short
+      memcpy(out, tmp, len);
+      return (int)len;
     } else if ((pci & 0xF0) == 0x10) {          // first frame: 12-bit length
       if (tn < 1) continue;
       total = (((size_t)(pci & 0x0F)) << 8) | tmp[0];
+      if (total > outCap) { broken = true; continue; }
       multi = true;
-      size_t cnt = min(tn - 1, outCap);
-      memcpy(out, tmp + 1, cnt);
-      got = cnt;
+      got = min(tn - 1, total);
+      memcpy(out, tmp + 1, got);
+      nextSeq = 1;
     } else if ((pci & 0xF0) == 0x20 && multi) { // consecutive frame
-      size_t room = (outCap > got) ? outCap - got : 0;
-      size_t cnt = min(tn, room);
-      if (total > got) cnt = min(cnt, total - got);
+      // Sequence has to be checked here, not just the byte count: this clone drops
+      // whole responses (see FINDINGS), and a missing middle frame otherwise slots
+      // the following frame's bytes into the gap and corrupts everything after it.
+      if ((pci & 0x0F) != nextSeq) { broken = true; continue; }
+      nextSeq = (nextSeq + 1) & 0x0F;
+      size_t cnt = min(tn, total - got);
       memcpy(out + got, tmp, cnt);
       got += cnt;
+      if (got >= total) return (int)got;
     }
   }
 
-  if (multi && got) return (int)got;
-  return negative ? -2 : -1;
+  if (negative) return -2;
+  if (multi && partial) *partial = (int)got;    // salvageable if the caller can verify it
+  return (multi || broken) ? -3 : -1;           // started but never completed
 }
 
 // Dispatcher - everything above the transport layer calls this.
 static int obdIsoTp(uint32_t reqId, uint32_t rspId,
                     const uint8_t *payload, uint8_t plen,
-                    uint8_t *out, size_t outCap, uint32_t timeoutMs) {
-  if (activeTransport == TR_BLE) return bleIsoTp(reqId, rspId, payload, plen, out, outCap, timeoutMs);
-  return canIsoTp(reqId, rspId, payload, plen, out, outCap, timeoutMs);
+                    uint8_t *out, size_t outCap, uint32_t timeoutMs,
+                    int *partial = nullptr) {
+  if (activeTransport == TR_BLE)
+    return bleIsoTp(reqId, rspId, payload, plen, out, outCap, timeoutMs, partial);
+  return canIsoTp(reqId, rspId, payload, plen, out, outCap, timeoutMs, partial);
 }
 
 // ---------------------------------------------------------------- mode 01
@@ -305,51 +336,145 @@ static void applyPid(Live &L, uint8_t pid, const uint8_t *d) {
   }
 }
 
+// Walk a mode-01 reply as (pid, data...) pairs.
+//
+// The payload is self-describing, so a short reply can be *checked* rather than
+// either trusted or thrown away: every pid must be one we asked for, and its data
+// bytes must actually be present. A reply cut off mid-message therefore still
+// yields the pairs that arrived intact, while a misframed one is rejected outright
+// because a pid we never requested means the bytes are not what they claim to be.
+//
+// This matters on the BLE path, where a reply arriving without the ELM's '>' prompt
+// is truncated by definition. Discarding those wholesale left the dashboard with
+// almost nothing to show and dragged polling down to a fraction of a hertz.
+// Applying whichever pairs verify is both safe and far more useful - the dashboard
+// holds the remaining fields at their previous reading.
+static int mode01Walk(const uint8_t *buf, int len,
+                      const uint8_t *pids, uint8_t n, Live *out) {
+  if (len < 2 || buf[0] != 0x41) return -1;
+  int i = 1, applied = 0;
+  while (i < len) {
+    uint8_t pid = buf[i++];
+    bool asked = false;
+    for (uint8_t k = 0; k < n; k++) if (pids[k] == pid) { asked = true; break; }
+    if (!asked) return -1;                 // misframed - none of it is trustworthy
+    uint8_t w = pidLen(pid);
+    if (i + w > len) break;                // cut mid-value: keep the pairs before it
+    if (out) {
+      uint8_t d[4] = {0, 0, 0, 0};
+      memcpy(d, &buf[i], w);
+      applyPid(*out, pid, d);
+    }
+    i += w;
+    applied++;
+  }
+  return applied;
+}
+
 // One batched mode-01 request carrying up to 6 PIDs.
-static bool pollBatch(Live &L, const uint8_t *pids, uint8_t n) {
+//
+// A reply is accepted when at least one (pid, data) pair verifies, whether or not
+// the ISO-TP reassembly completed. Only a reply yielding nothing is retried, and a
+// silent (-1) or refused (-2) ECU is not retried at all: there is nothing to wait
+// for, and a second full timeout on all three batches makes /data crawl with the
+// ignition off.
+static bool pollBatch(Live &L, const uint8_t *pids, uint8_t n,
+                      uint8_t *keep = nullptr, uint8_t *keepLen = nullptr) {
   uint8_t req[7];
   req[0] = 0x01;
   memcpy(&req[1], pids, n);
 
-  uint8_t buf[64];
-  int len = obdIsoTp(ID_ECM_REQ, ID_ECM_RSP, req, n + 1, buf, sizeof(buf),
-                     activeTransport == TR_BLE ? 900 : 200);
-  if (len < 2 || buf[0] != 0x41) return false;
+  const uint32_t tmo = (activeTransport == TR_BLE) ? 1200 : 400;
+  uint8_t buf[64], best[64];
+  int bestLen = 0, bestGot = 0;
 
-  int i = 1;
-  while (i < len) {
-    uint8_t pid = buf[i++];
-    uint8_t w = pidLen(pid);
-    if (i + w > len) break;
-    uint8_t d[4] = {0, 0, 0, 0};
-    memcpy(d, &buf[i], w);
-    applyPid(L, pid, d);
-    i += w;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    int partial = 0;
+    int len = obdIsoTp(ID_ECM_REQ, ID_ECM_RSP, req, n + 1, buf, sizeof(buf), tmo, &partial);
+    if (len == -3 && partial > 0) len = partial;   // truncated, but worth checking
+    if (len == -1 || len == -2) break;             // silent or refused: nothing to wait for
+
+    if (len >= 2) {
+      int got = mode01Walk(buf, len, pids, n, nullptr);
+      if (got >= n) {                              // every pid we asked for
+        mode01Walk(buf, len, pids, n, &L);
+        if (keep && keepLen) { memcpy(keep, buf, (size_t)len); *keepLen = (uint8_t)len; }
+        return true;
+      }
+      if (got > bestGot) {                         // keep the fullest verified reply
+        bestGot = got;
+        bestLen = len;
+        memcpy(best, buf, (size_t)len);
+      }
+    }
   }
-  return true;
+
+  // Retrying did not produce a complete batch, so use the most complete verified
+  // reply we did see rather than reporting nothing at all.
+  if (bestGot > 0) {
+    mode01Walk(best, bestLen, pids, n, &L);
+    if (keep && keepLen) { memcpy(keep, best, (size_t)bestLen); *keepLen = (uint8_t)bestLen; }
+    return true;
+  }
+  return false;
 }
 
 static float g_baro = NAN;
 
-static Live pollAll() {
-  Live L;
-  static const uint8_t b1[] = {0x0C, 0x0D, 0x0B, 0x11, 0x04, 0x05};
-  static const uint8_t b2[] = {0x5C, 0x0F, 0x42, 0x06, 0x07, 0x5E};
-  static const uint8_t b3[] = {0x34, 0x3C, 0x0E, 0x1F, 0x46, 0x2F};
+// The three batched mode-01 requests that make up one sample.
+static const uint8_t PID_B1[6] = {0x0C, 0x0D, 0x0B, 0x11, 0x04, 0x05};
+static const uint8_t PID_B2[6] = {0x5C, 0x0F, 0x42, 0x06, 0x07, 0x5E};
+static const uint8_t PID_B3[6] = {0x34, 0x3C, 0x0E, 0x1F, 0x46, 0x2F};
 
+// Which batch to poll on each turn.
+//
+// b1 carries everything the driver actually watches - rpm, speed, MAP, throttle,
+// load, coolant, and so both sparkline heroes - so it gets half the turns. Oil
+// temperature, battery voltage and catalyst temperature do not move fast enough to
+// justify equal billing, and on BLE every batch is a full ELM round trip, so equal
+// billing is exactly what was holding the interesting numbers to a third of the
+// achievable rate.
+static const uint8_t SAMPLE_ORDER[4] = {0, 1, 0, 2};
+
+// Longest a cached batch may keep contributing to a published sample. Past this it
+// is dropped to NAN rather than presented as current - the dashboard then holds it
+// briefly and finally shows an em-dash, instead of a stale number reading as live.
+//
+// This has to be derived from how often a batch is actually polled, not fixed. b2
+// and b3 come round once every four batches, so a flat 3 s only holds if a batch
+// completes in under 750 ms. Over BLE a batch is comfortably longer than that, and
+// those two batches then expire before their next turn - blanking twelve of the
+// twenty rows on every cycle. Three cycles of headroom, floored so a fast CAN link
+// still drops genuinely dead data promptly, and capped so a stall cannot leave
+// minutes-old numbers on screen.
+static const uint32_t SAMPLE_STALE_MIN_MS = 3000;
+static const uint32_t SAMPLE_STALE_MAX_MS = 20000;
+
+static uint32_t sampleStaleMs(uint32_t cycleMs) {
+  uint32_t w = cycleMs * 3;
+  if (w < SAMPLE_STALE_MIN_MS) w = SAMPLE_STALE_MIN_MS;
+  if (w > SAMPLE_STALE_MAX_MS) w = SAMPLE_STALE_MAX_MS;
+  return w;
+}
+
+static const uint8_t *sampleBatchPids(uint8_t b) {
+  return (b == 0) ? PID_B1 : (b == 1) ? PID_B2 : PID_B3;
+}
+
+// Rebuild a sample from whichever cached batches are still fresh.
+//
+// Caching the accepted bytes rather than merging three Live structs means the
+// staleness rule is one timestamp per batch, and re-walking is the same verified
+// parse that accepted them in the first place.
+static bool sampleMerge(Live &out, const uint8_t bufs[3][40], const uint8_t *lens,
+                        const uint32_t *stamps, uint32_t now, uint32_t staleMs) {
   bool any = false;
-  any |= pollBatch(L, b1, 6);
-  any |= pollBatch(L, b2, 6);
-  any |= pollBatch(L, b3, 6);
-
-  if (any && isnan(g_baro)) {
-    Live tmp;
-    static const uint8_t b0[] = {0x33};
-    if (pollBatch(tmp, b0, 1)) g_baro = tmp.baro;
+  for (uint8_t b = 0; b < 3; b++) {
+    if (!lens[b] || !stamps[b]) continue;
+    if (now - stamps[b] > staleMs) continue;
+    if (mode01Walk(bufs[b], lens[b], sampleBatchPids(b), 6, &out) > 0) any = true;
   }
-  L.baro = g_baro;
-  L.ok = any;
-  return L;
+  return any;
 }
 
 // ---------------------------------------------------------------- DID scanner
@@ -363,11 +488,16 @@ struct ScanState {
   std::vector<Hit> hits;
 } scan;
 
-static void scanStep(uint16_t budget) {
+// Time-boxed rather than counted. A fixed count of identifiers is a wildly
+// different amount of wall-clock per transport - 40 DIDs is about a second on CAN
+// but roughly 22 s over BLE, during which nothing answers the web server and the
+// board looks hung. A millisecond budget behaves the same on both.
+static void scanStep(uint32_t budgetMs) {
   uint32_t reqId = scan.ecu ? ID_TCM_REQ : ID_ECM_REQ;
   uint32_t rspId = scan.ecu ? ID_TCM_RSP : ID_ECM_RSP;
+  uint32_t started = millis();
 
-  for (uint16_t k = 0; k < budget && scan.running; k++) {
+  while (scan.running && millis() - started < budgetMs) {
     if (scan.cur > scan.to) { scan.running = false; break; }
 
     uint16_t did = (uint16_t)scan.cur++;
@@ -376,7 +506,13 @@ static void scanStep(uint16_t budget) {
     uint8_t req[3] = {0x22, (uint8_t)(did >> 8), (uint8_t)(did & 0xFF)};
     uint8_t buf[64];
     int len = obdIsoTp(reqId, rspId, req, 3, buf, sizeof(buf),
-                       activeTransport == TR_BLE ? 130 : 25);
+                       activeTransport == TR_BLE ? 550 : 25);
+
+    // Truncated reply: retry once with a longer window. A DID that answers at all
+    // is the find here, so dropping it over a lost frame would undercount the sweep
+    // exactly the way a single ELM327 pass already does (FINDINGS).
+    if (len == -3) len = obdIsoTp(reqId, rspId, req, 3, buf, sizeof(buf),
+                                  activeTransport == TR_BLE ? 900 : 50);
 
     if (len == -2) { scan.negatives++; continue; }
     if (len < 3) continue;
@@ -402,19 +538,157 @@ static void jsonNum(String &s, const char *k, float v, int dp) {
   s += ",";
 }
 
+static const char *transportName();
+
 static uint32_t lastEcuOkMs;
 static bool     everSawEcu = false;
 
+// The newest complete sample, refreshed by the sampler in loop(). /data serves this
+// rather than polling the ECU inline, so a page request is never stuck behind a bus
+// exchange and switching pages is immediate.
+static Live     g_live;
+static uint32_t g_liveMs = 0;
+static uint32_t g_seq    = 0;      // increments per published sample
+
+// Transport re-pick backoff.
+//
+// The adapter is powered from the OBD port and stays alive with the car switched
+// off; the board is on the accessory socket and does not. So on every start the
+// board comes up against an ELM327 that may still be holding the BLE link to a
+// device that vanished without ever disconnecting, and the first connect can fail
+// through no fault of the wiring. A flat retry interval meant a dead dashboard for
+// that whole interval at every ignition - so start impatient and ease off.
+static const uint32_t PICK_MIN_MS = 2000;
+static const uint32_t PICK_MAX_MS = 20000;
+
+static uint32_t pickBackoff(uint32_t cur) {
+  uint32_t next = cur ? cur * 2 : PICK_MIN_MS;
+  return next > PICK_MAX_MS ? PICK_MAX_MS : next;
+}
+
+static uint32_t pickWaitMs = PICK_MIN_MS;
+
+// One cached reply per batch, with the moment it arrived.
+static uint8_t  sampBuf[3][40];
+static uint8_t  sampLen[3]  = {0, 0, 0};
+static uint32_t sampStamp[3] = {0, 0, 0};
+static uint8_t  sampTurn     = 0;
+static uint32_t sampBatchMs  = 0;    // how long the last batch took, for the log
+static uint32_t sampCycleMs  = 0;    // measured duration of one SAMPLE_ORDER pass
+static uint32_t sampCycleAt  = 0;
+
+// One batch per turn, and a fresh sample published after every one of them.
+//
+// Previously a sample needed all three batches before anything reached the page, so
+// the update rate was one third of the batch rate - under 1 Hz on BLE. Publishing
+// after each batch, with the other two carried forward from cache while they are
+// still fresh, means the page updates at the batch rate and the values in b1 refresh
+// twice as often as the rest.
+// While a scan runs it gets most of the bus, but not all of it. A full 0000-FFFF
+// sweep is over half an hour on CAN and the better part of a day over BLE, and
+// freezing the dashboard for that long is not a reasonable trade for the ~15 % of
+// scan throughput this costs. One batch every couple of seconds keeps the live
+// values moving, slowly, and keeps the page honest about being alive.
+static const uint32_t SCAN_SHARE_MS = 2000;
+static uint32_t sampSharedMs = 0;
+
+static void samplerStep() {
+  if (scan.running) {
+    if (millis() - sampSharedMs < SCAN_SHARE_MS) return;
+    sampSharedMs = millis();
+  }
+
+  const uint8_t turns = sizeof(SAMPLE_ORDER) / sizeof(SAMPLE_ORDER[0]);
+  uint8_t b = SAMPLE_ORDER[sampTurn];
+  sampTurn = (uint8_t)((sampTurn + 1) % turns);
+  if (sampTurn == 0) {                 // a full pass just finished - time it
+    uint32_t now = millis();
+    if (sampCycleAt) sampCycleMs = now - sampCycleAt;
+    sampCycleAt = now;
+  }
+
+  Live scratch;
+  uint8_t buf[40], len = 0;
+  uint32_t t0 = millis();
+  bool okb = pollBatch(scratch, sampleBatchPids(b), 6, buf, &len);
+  sampBatchMs = millis() - t0;
+
+  if (okb && len) {
+    memcpy(sampBuf[b], buf, len);
+    sampLen[b]   = len;
+    sampStamp[b] = millis();
+  }
+
+  Live pub;
+  bool any = sampleMerge(pub, sampBuf, sampLen, sampStamp, millis(),
+                         sampleStaleMs(sampCycleMs));
+
+  if (any && isnan(g_baro)) {
+    Live t;
+    static const uint8_t b0[] = {0x33};
+    if (pollBatch(t, b0, 1)) g_baro = t.baro;
+  }
+  pub.baro = g_baro;
+  pub.ok   = any;
+
+  if (any) {
+    g_live   = pub;
+    g_liveMs = millis();
+    g_seq++;
+    lastEcuOkMs = millis();
+    everSawEcu  = true;
+    histTick(g_live);
+  }
+}
+
+// Scan progress, emitted on both the fresh and stale branches.
+//
+// This used to live only on the ok:true path, which is precisely the path that
+// cannot be taken while a scan is running - so the progress bar sat at 0 % for the
+// entire sweep and the header transport read as an em-dash.
+static void jsonScan(String &s) {
+  uint32_t total = scan.to - scan.from + 1;
+  s += ",\"scan\":";
+  s += scan.running ? "true" : "false";
+  if (scan.running) {
+    s += ",\"scanPct\":";
+    s += String(total ? (scan.tried * 100.0f / total) : 0.0f, 2);
+    s += ",\"scanTried\":";
+    s += scan.tried;
+    s += ",\"scanTotal\":";
+    s += total;
+    s += ",\"scanEcu\":\"";
+    s += scan.ecu ? "TCM" : "ECM";
+    s += "\"";
+  }
+}
+
 static void handleData() {
-  Live L = pollAll();
-  if (L.ok) { lastEcuOkMs = millis(); everSawEcu = true; }   // real reply resets the sleep timer
   String s = "{";
-  if (!L.ok) {
-    s += "\"ok\":false,\"error\":\"no response from ECU (ignition off?)\"}";
+  bool fresh = g_seq && (millis() - g_liveMs < 4000);
+
+  if (!fresh) {
+    s += "\"ok\":false,\"fw\":\"" FW_VERSION "\",\"tr\":\"";
+    s += transportName();
+    s += "\",\"error\":\"";
+    s += scan.running ? "waiting - scanner has the bus"
+                      : "no response from ECU (ignition off?)";
+    s += "\"";
+    jsonScan(s);
+    s += "}";
     server.send(200, "application/json", s);
     return;
   }
-  s += "\"ok\":true,\"v\":{";
+
+  Live L = g_live;
+  s += "\"ok\":true,\"fw\":\"" FW_VERSION "\",\"tr\":\"";
+  s += transportName();
+  s += "\",\"seq\":";
+  s += g_seq;
+  s += ",\"age\":";
+  s += (millis() - g_liveMs);
+  jsonScan(s);
+  s += ",\"v\":{";
   jsonNum(s, "rpm", L.rpm, 0);        jsonNum(s, "speed", L.speed, 0);
   jsonNum(s, "map", L.map_, 0);       jsonNum(s, "baro", L.baro, 0);
   jsonNum(s, "throttle", L.throttle, 1); jsonNum(s, "load", L.load, 1);
@@ -497,6 +771,10 @@ static void handleDtc() {
     uint8_t buf[64];
     int len = obdIsoTp(req[e], rsp[e], req03, 1, buf, sizeof(buf),
                        activeTransport == TR_BLE ? 1500 : 300);
+    // A half-read DTC list would report fewer codes than are actually stored, so a
+    // truncated reply gets one retry rather than being parsed as far as it goes.
+    if (len == -3) len = obdIsoTp(req[e], rsp[e], req03, 1, buf, sizeof(buf),
+                                  activeTransport == TR_BLE ? 2500 : 600);
     bool first = true;
     if (len >= 2 && buf[0] == 0x43) {
       uint8_t count = buf[1];
@@ -517,6 +795,38 @@ static void handleDtc() {
   }
   s += "]}";
   server.send(200, "application/json", s);
+}
+
+// Trend history, oldest first. Chunked because the full hour is ~14 KB of JSON and
+// assembling that in one String risks the heap on a board this size.
+static void handleHistory() {
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json", "");
+
+  char head[96];
+  snprintf(head, sizeof(head), "{\"period\":%lu,\"n\":%u,",
+           (unsigned long)(HIST_PERIOD_MS / 1000), histCount);
+  server.sendContent(head);
+
+  const char *names[4] = {"rpm", "speed", "boost", "coolant"};
+  for (int series = 0; series < 4; series++) {
+    String chunk = "\"";
+    chunk += names[series];
+    chunk += "\":[";
+    for (uint16_t i = 0; i < histCount; i++) {
+      const HistSlot &h = histBuf[histIndex(i)];
+      int16_t raw = series == 0 ? h.rpm : series == 1 ? h.speed
+                  : series == 2 ? h.boost : h.coolant;
+      if (i) chunk += ",";
+      if (raw == HIST_NONE) chunk += "null";
+      else if (series == 2) chunk += String(raw / 100.0f, 2);   // centibar -> bar
+      else chunk += raw;
+      if (chunk.length() > 1024) { server.sendContent(chunk); chunk = ""; }
+    }
+    chunk += (series == 3) ? "]}" : "],";
+    server.sendContent(chunk);
+  }
+  server.sendContent("");
 }
 
 // ---------------------------------------------------------------- OTA
@@ -588,6 +898,7 @@ static void chooseTransport() {
 
 void setup() {
   Serial.begin(115200);
+  Serial.println("[fw] NexonOBD " FW_VERSION);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);        // solid on through boot, so power is visible
   delay(300);
@@ -608,21 +919,24 @@ void setup() {
   server.on("/update", HTTP_POST, handleOtaDone, handleOtaUpload);
   server.on("/data",        handleData);
   server.on("/dtc",         handleDtc);
+  server.on("/history",     handleHistory);
   server.on("/scan/start",  handleScanStart);
   server.on("/scan/stop",   handleScanStop);
   server.on("/scan/status", handleScanStatus);
   server.begin();
 
+  histBegin();
   lastEcuOkMs = millis();
   chooseTransport();
 }
 
 void loop() {
   server.handleClient();
+  samplerStep();          // one batch per turn, so the server keeps its responsiveness
   heartbeat(millis() - lastEcuOkMs < 3000, scan.running);
 
   if (scan.running) {
-    scanStep(40);                 // ~1 s of scanning, then service HTTP again
+    scanStep(250);                // then hand the web server a turn
     lastEcuOkMs = millis();       // scanning counts as activity
   }
 
@@ -632,7 +946,8 @@ void loop() {
   static uint32_t lastLog = 0;
   if (millis() - lastLog > 3000) {
     lastLog = millis();
-    Serial.printf("[alive] up=%lus tr=%s can=%s ble=%s ap=%s clients=%u ecu=%s scan=%s\n",
+    Serial.printf("[alive] up=%lus tr=%s can=%s ble=%s ap=%s clients=%u ecu=%s scan=%s "
+                  "batch=%lums cycle=%lums stale=%lums\n",
                   millis() / 1000UL,
                   transportName(),
                   canUp ? "ok" : "FAIL",
@@ -640,15 +955,22 @@ void loop() {
                   WiFi.softAPIP().toString().c_str(),
                   WiFi.softAPgetStationNum(),
                   (millis() - lastEcuOkMs < 3000) ? "ok" : "silent",
-                  scan.running ? "running" : "idle");
+                  scan.running ? "running" : "idle",
+                  (unsigned long)sampBatchMs,
+                  (unsigned long)sampCycleMs,
+                  (unsigned long)sampleStaleMs(sampCycleMs));
   }
 
-  // Re-pick the transport periodically while nothing is answering: covers the
-  // ELM327 dropping its BLE link, or a transceiver being wired in later.
+  // Re-pick the transport while nothing is answering: covers the ELM327 dropping
+  // its BLE link, a stale link held over from before the board lost power, or a
+  // transceiver being wired in later.
   static uint32_t lastPick = 0;
-  if (!scan.running && millis() - lastEcuOkMs > 15000 && millis() - lastPick > 20000) {
+  if (!scan.running && millis() - lastEcuOkMs > 3000 && millis() - lastPick > pickWaitMs) {
     lastPick = millis();
+    Serial.printf("[obd] no data for %lums - re-picking transport (next in %lums)\n",
+                  (unsigned long)(millis() - lastEcuOkMs), (unsigned long)pickWaitMs);
     chooseTransport();
+    pickWaitMs = pickBackoff(pickWaitMs);
   }
 
   // Battery guard: nothing from the car for a while means the ignition is off.
@@ -656,6 +978,7 @@ void loop() {
   // bench board with no transceiver wired would sleep mid-test and look dead.
   if (everSawEcu && millis() - lastEcuOkMs > IDLE_SLEEP_MS) {
     Serial.println("[pwr] idle - deep sleep");
+    histSave();
     twai_stop();
     twai_driver_uninstall();
     esp_sleep_enable_timer_wakeup(SLEEP_WAKE_US);

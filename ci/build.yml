@@ -9,14 +9,26 @@ on:
     branches: [main]
     paths:
       - 'firmware/**'
+      - 'tools/dashboard.html'
       - '.github/workflows/build.yml'
   pull_request:
     paths:
       - 'firmware/**'
+      - 'tools/dashboard.html'
   workflow_dispatch:
 
 jobs:
+  # Host-side tests for the ISO-TP layer and the dashboard's hold-last-value
+  # logic. Needs no ESP32 core, so it finishes in seconds and gates the build.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run host tests
+        run: firmware/test/run.sh
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
