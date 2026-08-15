@@ -42,7 +42,7 @@ static String elmCommand(const String &cmd, uint32_t timeoutMs = 1500) {
   uint32_t deadline = millis() + timeoutMs;
   while (millis() < deadline) {
     if (elmBuf.indexOf('>') >= 0) break;
-    delay(2);
+    delay(1);
   }
   String r = elmBuf;
   r.replace(">", "");
@@ -54,10 +54,24 @@ static bool elmConnect() {
 
   if (!elmClient) {
     BLEDevice::init("");
+    // A batched mode-01 reply is ~80 characters, which at the 23-byte default MTU is
+    // four or five notifications, each waiting for its own connection event. A
+    // larger MTU collapses that into one or two.
+    BLEDevice::setMTU(247);
     elmClient = BLEDevice::createClient();
     elmClient->setClientCallbacks(new ElmClientCb());
   }
-  if (!elmClient->connect(BLEAddress(ELM_BLE_ADDR, BLE_ADDR_PUBLIC))) return false;
+  BLEAddress addr(ELM_BLE_ADDR, BLE_ADDR_PUBLIC);
+  if (!elmClient->connect(addr)) return false;
+
+  // The connection interval is the floor on every round trip: at a default of
+  // 40-50 ms a request and its reply cannot beat about a tenth of a second no matter
+  // how quickly the ECU answers, and a sample is several of those. Ask for
+  // 7.5-15 ms. The adapter is free to refuse, in which case nothing is worse than
+  // it was. Units are 1.25 ms for the intervals and 10 ms for the supervision
+  // timeout.
+  elmClient->updateConnParams(6, 12, 0, 400);
+  elmClient->setMTU(247);
 
   BLERemoteService *svc = elmClient->getService(ELM_SVC);
   if (!svc) { elmClient->disconnect(); return false; }

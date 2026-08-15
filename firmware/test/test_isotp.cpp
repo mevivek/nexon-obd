@@ -283,38 +283,83 @@ static void test_batch_silent_does_not_retry() {
 
 // ------------------------------------------------------------------ sampler
 
-static void test_sampler_rotates() {
-  printf("sampleAdvance: one batch per call\n");
-  resetBus();
-  Live acc; bool any = false; uint8_t batch = 0;
-
-  queueGoodBatch();                                   // only b1 will answer
-  ok(!sampleAdvance(acc, any, batch), "first call does not complete a sample");
-  eq((int)batch, 1, "and advances to the next batch");
-  ok(any, "b1 answered");
-  ok(!isnan(acc.rpm), "b1 fields are in the accumulator");
-
-  ok(!sampleAdvance(acc, any, batch), "second call still incomplete");
-  ok(sampleAdvance(acc, any, batch), "third call completes the rotation");
-  eq((int)batch, 0, "and wraps back to the start");
-
-  // The point of splitting the sample across loop turns: the web server gets a turn
-  // between batches, so a page request never waits on a whole three-batch poll.
-  ok(!isnan(acc.rpm), "the completed sample keeps what b1 provided");
-  ok(isnan(acc.oil), "and leaves absent fields alone");
+static void test_sample_order_favours_live_values() {
+  printf("SAMPLE_ORDER: b1 gets the most turns\n");
+  int count[3] = {0, 0, 0};
+  for (size_t i = 0; i < sizeof(SAMPLE_ORDER) / sizeof(SAMPLE_ORDER[0]); i++)
+    count[SAMPLE_ORDER[i]]++;
+  // b1 is rpm, speed, MAP, throttle, load, coolant - everything with a sparkline.
+  // On BLE each batch is a full round trip, so giving all three equal billing held
+  // the values that actually move to a third of the achievable rate.
+  ok(count[0] > count[1] && count[0] > count[2], "b1 is polled more often than b2/b3");
+  ok(count[1] > 0 && count[2] > 0, "the slower batches are still polled");
 }
 
-static void test_sampler_partial_still_publishes() {
-  printf("sampleAdvance: only one batch of three answers\n");
+static void test_sample_merge_combines_batches() {
+  printf("sampleMerge: a published sample carries every fresh batch\n");
+  uint8_t bufs[3][40] = {};
+  uint8_t lens[3] = {0, 0, 0};
+  uint32_t stamps[3] = {0, 0, 0};
+
+  // b1 answered: 41 0C 0AF0 0D 00
+  const uint8_t r1[] = {0x41, 0x0C, 0x0A, 0xF0, 0x0D, 0x00};
+  memcpy(bufs[0], r1, sizeof(r1)); lens[0] = sizeof(r1); stamps[0] = 1000;
+  // b2 answered on an earlier turn: 41 5C 96 (oil 110 C)
+  const uint8_t r2[] = {0x41, 0x5C, 0x96};
+  memcpy(bufs[1], r2, sizeof(r2)); lens[1] = sizeof(r2); stamps[1] = 900;
+
+  Live L;
+  ok(sampleMerge(L, bufs, lens, stamps, 1000, 3000), "reports data");
+  eq((int)L.rpm, 700, "the batch polled this turn is present");
+  eq((int)L.oil, 110, "and so is one carried forward from cache");
+  ok(isnan(L.lambda), "a batch never received stays absent");
+}
+
+static void test_sample_merge_drops_stale() {
+  printf("sampleMerge: a batch that stopped answering is dropped\n");
+  uint8_t bufs[3][40] = {};
+  uint8_t lens[3] = {0, 0, 0};
+  uint32_t stamps[3] = {0, 0, 0};
+
+  const uint8_t r1[] = {0x41, 0x0C, 0x0A, 0xF0};
+  memcpy(bufs[0], r1, sizeof(r1)); lens[0] = sizeof(r1); stamps[0] = 10000;
+  const uint8_t r2[] = {0x41, 0x5C, 0x96};
+  memcpy(bufs[1], r2, sizeof(r2)); lens[1] = sizeof(r2); stamps[1] = 1000;   // long ago
+
+  Live L;
+  // Carrying a batch forward is what makes publishing after every turn possible, so
+  // the staleness bound is what stops it becoming "show an old number as current".
+  ok(sampleMerge(L, bufs, lens, stamps, 10000, 3000), "still reports the fresh batch");
+  eq((int)L.rpm, 700, "the fresh batch is published");
+  ok(isnan(L.oil), "the stale one is dropped rather than shown as current");
+}
+
+static void test_sample_merge_nothing_fresh() {
+  printf("sampleMerge: everything stale\n");
+  uint8_t bufs[3][40] = {};
+  uint8_t lens[3] = {0, 0, 0};
+  uint32_t stamps[3] = {0, 0, 0};
+  const uint8_t r1[] = {0x41, 0x0C, 0x0A, 0xF0};
+  memcpy(bufs[0], r1, sizeof(r1)); lens[0] = sizeof(r1); stamps[0] = 1000;
+
+  Live L;
+  ok(!sampleMerge(L, bufs, lens, stamps, 99000, 3000), "reports no data at all");
+  ok(isnan(L.rpm), "and publishes nothing");
+}
+
+static void test_pollbatch_keeps_bytes() {
+  printf("pollBatch: hands back the bytes it accepted\n");
   resetBus();
-  Live acc; bool any = false; uint8_t batch = 0;
+  Live L;
+  uint8_t keep[40], keepLen = 0;
   queueGoodBatch();
-  for (int i = 0; i < 3; i++) sampleAdvance(acc, any, batch);
-  ok(any, "the sample is still flagged usable");
-  ok(!isnan(acc.speed), "the batch that answered is present");
-  // This is what reaches the browser as null, and why the client holds the previous
-  // value rather than painting an em-dash over a good reading.
-  ok(isnan(acc.lambda), "the batches that did not are absent, not invented");
+  ok(pollBatch(L, B1, 6, keep, &keepLen), "returns true");
+  ok(keepLen > 0, "and reports a length");
+  // The sampler caches these and re-walks them on later turns, so they have to be
+  // the verified reply rather than whatever was left in the scratch buffer.
+  Live again;
+  eq(mode01Walk(keep, keepLen, B1, 6, &again), 6, "the kept bytes re-walk cleanly");
+  eq((int)again.rpm, 700, "and decode to the same values");
 }
 
 // ------------------------------------------------------------------
@@ -345,8 +390,11 @@ int main() {
   test_batch_rejects_misframed();
   test_batch_silent_does_not_retry();
 
-  test_sampler_rotates();
-  test_sampler_partial_still_publishes();
+  test_sample_order_favours_live_values();
+  test_sample_merge_combines_batches();
+  test_sample_merge_drops_stale();
+  test_sample_merge_nothing_fresh();
+  test_pollbatch_keeps_bytes();
 
   printf("\n%d checks, %d failed\n", g_ran, g_fail);
   return g_fail ? 1 : 0;

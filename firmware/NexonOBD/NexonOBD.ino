@@ -378,7 +378,8 @@ static int mode01Walk(const uint8_t *buf, int len,
 // silent (-1) or refused (-2) ECU is not retried at all: there is nothing to wait
 // for, and a second full timeout on all three batches makes /data crawl with the
 // ignition off.
-static bool pollBatch(Live &L, const uint8_t *pids, uint8_t n) {
+static bool pollBatch(Live &L, const uint8_t *pids, uint8_t n,
+                      uint8_t *keep = nullptr, uint8_t *keepLen = nullptr) {
   uint8_t req[7];
   req[0] = 0x01;
   memcpy(&req[1], pids, n);
@@ -397,6 +398,7 @@ static bool pollBatch(Live &L, const uint8_t *pids, uint8_t n) {
       int got = mode01Walk(buf, len, pids, n, nullptr);
       if (got >= n) {                              // every pid we asked for
         mode01Walk(buf, len, pids, n, &L);
+        if (keep && keepLen) { memcpy(keep, buf, (size_t)len); *keepLen = (uint8_t)len; }
         return true;
       }
       if (got > bestGot) {                         // keep the fullest verified reply
@@ -411,6 +413,7 @@ static bool pollBatch(Live &L, const uint8_t *pids, uint8_t n) {
   // reply we did see rather than reporting nothing at all.
   if (bestGot > 0) {
     mode01Walk(best, bestLen, pids, n, &L);
+    if (keep && keepLen) { memcpy(keep, best, (size_t)bestLen); *keepLen = (uint8_t)bestLen; }
     return true;
   }
   return false;
@@ -423,19 +426,39 @@ static const uint8_t PID_B1[6] = {0x0C, 0x0D, 0x0B, 0x11, 0x04, 0x05};
 static const uint8_t PID_B2[6] = {0x5C, 0x0F, 0x42, 0x06, 0x07, 0x5E};
 static const uint8_t PID_B3[6] = {0x34, 0x3C, 0x0E, 0x1F, 0x46, 0x2F};
 
-// Advance the sampler by exactly one batch. Returns true when a rotation finished
-// and `acc` is a complete sample.
+// Which batch to poll on each turn.
 //
-// One batch per call, not three: the web server is single threaded, so whatever the
-// poller is doing is time the board cannot answer a page request. Polling all three
-// inline meant a tap on "DID scanner" could sit behind ~3.6 s of BLE timeouts before
-// the server even looked at it.
-static bool sampleAdvance(Live &acc, bool &any, uint8_t &batch) {
-  const uint8_t *pids = (batch == 0) ? PID_B1 : (batch == 1) ? PID_B2 : PID_B3;
-  any |= pollBatch(acc, pids, 6);
-  if (++batch < 3) return false;
-  batch = 0;
-  return true;
+// b1 carries everything the driver actually watches - rpm, speed, MAP, throttle,
+// load, coolant, and so both sparkline heroes - so it gets half the turns. Oil
+// temperature, battery voltage and catalyst temperature do not move fast enough to
+// justify equal billing, and on BLE every batch is a full ELM round trip, so equal
+// billing is exactly what was holding the interesting numbers to a third of the
+// achievable rate.
+static const uint8_t SAMPLE_ORDER[4] = {0, 1, 0, 2};
+
+// Longest a cached batch may keep contributing to a published sample. Past this it
+// is dropped to NAN rather than presented as current - the dashboard then holds it
+// briefly and finally shows an em-dash, instead of a stale number reading as live.
+static const uint32_t SAMPLE_STALE_MS = 3000;
+
+static const uint8_t *sampleBatchPids(uint8_t b) {
+  return (b == 0) ? PID_B1 : (b == 1) ? PID_B2 : PID_B3;
+}
+
+// Rebuild a sample from whichever cached batches are still fresh.
+//
+// Caching the accepted bytes rather than merging three Live structs means the
+// staleness rule is one timestamp per batch, and re-walking is the same verified
+// parse that accepted them in the first place.
+static bool sampleMerge(Live &out, const uint8_t bufs[3][40], const uint8_t *lens,
+                        const uint32_t *stamps, uint32_t now, uint32_t staleMs) {
+  bool any = false;
+  for (uint8_t b = 0; b < 3; b++) {
+    if (!lens[b] || !stamps[b]) continue;
+    if (now - stamps[b] > staleMs) continue;
+    if (mode01Walk(bufs[b], lens[b], sampleBatchPids(b), 6, &out) > 0) any = true;
+  }
+  return any;
 }
 
 // ---------------------------------------------------------------- DID scanner
@@ -511,32 +534,56 @@ static Live     g_live;
 static uint32_t g_liveMs = 0;
 static uint32_t g_seq    = 0;      // increments per published sample
 
-static Live    sampAcc;
-static bool    sampAny   = false;
-static uint8_t sampBatch = 0;
+// One cached reply per batch, with the moment it arrived.
+static uint8_t  sampBuf[3][40];
+static uint8_t  sampLen[3]  = {0, 0, 0};
+static uint32_t sampStamp[3] = {0, 0, 0};
+static uint8_t  sampTurn    = 0;
+static uint32_t sampBatchMs = 0;     // how long the last batch took, for the log
 
+// One batch per turn, and a fresh sample published after every one of them.
+//
+// Previously a sample needed all three batches before anything reached the page, so
+// the update rate was one third of the batch rate - under 1 Hz on BLE. Publishing
+// after each batch, with the other two carried forward from cache while they are
+// still fresh, means the page updates at the batch rate and the values in b1 refresh
+// twice as often as the rest.
 static void samplerStep() {
-  // The scanner owns the bus while it runs; interleaving would just halve both.
-  if (scan.running) return;
+  if (scan.running) return;          // the scanner owns the bus while it runs
 
-  if (sampleAdvance(sampAcc, sampAny, sampBatch)) {
-    if (sampAny && isnan(g_baro)) {
-      Live t;
-      static const uint8_t b0[] = {0x33};
-      if (pollBatch(t, b0, 1)) g_baro = t.baro;
-    }
-    sampAcc.baro = g_baro;
-    sampAcc.ok   = sampAny;
-    if (sampAny) {
-      g_live   = sampAcc;
-      g_liveMs = millis();
-      g_seq++;
-      lastEcuOkMs = millis();
-      everSawEcu  = true;
-      histTick(g_live);
-    }
-    sampAcc = Live();
-    sampAny = false;
+  uint8_t b = SAMPLE_ORDER[sampTurn];
+  sampTurn = (uint8_t)((sampTurn + 1) % (sizeof(SAMPLE_ORDER) / sizeof(SAMPLE_ORDER[0])));
+
+  Live scratch;
+  uint8_t buf[40], len = 0;
+  uint32_t t0 = millis();
+  bool okb = pollBatch(scratch, sampleBatchPids(b), 6, buf, &len);
+  sampBatchMs = millis() - t0;
+
+  if (okb && len) {
+    memcpy(sampBuf[b], buf, len);
+    sampLen[b]   = len;
+    sampStamp[b] = millis();
+  }
+
+  Live pub;
+  bool any = sampleMerge(pub, sampBuf, sampLen, sampStamp, millis(), SAMPLE_STALE_MS);
+
+  if (any && isnan(g_baro)) {
+    Live t;
+    static const uint8_t b0[] = {0x33};
+    if (pollBatch(t, b0, 1)) g_baro = t.baro;
+  }
+  pub.baro = g_baro;
+  pub.ok   = any;
+
+  if (any) {
+    g_live   = pub;
+    g_liveMs = millis();
+    g_seq++;
+    lastEcuOkMs = millis();
+    everSawEcu  = true;
+    histTick(g_live);
   }
 }
 
@@ -827,7 +874,7 @@ void loop() {
   static uint32_t lastLog = 0;
   if (millis() - lastLog > 3000) {
     lastLog = millis();
-    Serial.printf("[alive] up=%lus tr=%s can=%s ble=%s ap=%s clients=%u ecu=%s scan=%s\n",
+    Serial.printf("[alive] up=%lus tr=%s can=%s ble=%s ap=%s clients=%u ecu=%s scan=%s batch=%lums\n",
                   millis() / 1000UL,
                   transportName(),
                   canUp ? "ok" : "FAIL",
@@ -835,7 +882,8 @@ void loop() {
                   WiFi.softAPIP().toString().c_str(),
                   WiFi.softAPgetStationNum(),
                   (millis() - lastEcuOkMs < 3000) ? "ok" : "silent",
-                  scan.running ? "running" : "idle");
+                  scan.running ? "running" : "idle",
+                  (unsigned long)sampBatchMs);
   }
 
   // Re-pick the transport periodically while nothing is answering: covers the

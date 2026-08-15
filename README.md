@@ -60,6 +60,30 @@ One batch per turn matters: the web server is single threaded, so any time spent
 the bus is time the board cannot answer a request. Polling all three batches inline
 could leave a tap on a nav link sitting behind seconds of BLE timeouts.
 
+A sample is published after **every** batch, not after all three. The other two are
+carried forward from cache while they are still fresh (3 s), so the page updates at
+the bus transaction rate rather than a third of it. Batches are not polled equally
+either — `b1` carries everything with a sparkline (rpm, speed, MAP, throttle, load,
+coolant) and gets half the turns, because oil temperature and battery voltage do not
+move fast enough to deserve equal billing:
+
+| | Refresh |
+|---|---|
+| `b1` — rpm, speed, MAP, throttle, load, coolant | every 2 batches |
+| `b2` — oil, IAT, voltage, trims, fuel rate | every 4 batches |
+| `b3` — lambda, catalyst, timing, run time, ambient, fuel | every 4 batches |
+
+A batch older than 3 s is dropped to `null` rather than published as current, so
+carrying values forward can never present a stale number as live.
+
+**On BLE, the bus transaction rate is the limit**, and it is mostly round-trip
+latency rather than the ECU. The connection interval is the floor: at a default of
+40–50 ms a request and its reply cannot beat about a tenth of a second however fast
+the car answers. The firmware asks for 7.5–15 ms and a 247-byte MTU, which collapses
+a ~80-character reply from four or five notifications into one or two. The adapter
+may refuse either, in which case nothing is worse than before. The serial log prints
+`batch=NNNms` so the real cost is visible rather than guessed at.
+
 The dashboard stops requesting while the page is off screen, and the Hz readout
 counts *published samples* rather than fetches — the same cached sample can be
 fetched several times and must not inflate the rate.
