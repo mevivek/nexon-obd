@@ -281,24 +281,38 @@ async function suiteScanBanner(label, file) {
   console.log(`\n${label} — scan visibility`);
   const m = load(file);
 
-  m.queue.push({ ok: true, seq: 1, v: { rpm: 800 } });
+  m.queue.push({ ok: true, seq: 1, tr: 'ble', scan: false, v: { rpm: 800 } });
   await m.step();
-  eq(m.el('scanBar').style === undefined ? 'none' : m.el('scanBar').style.display,
-     'none', 'no banner when nothing is scanning');
+  eq(m.el('scanBar').style.display, 'none', 'no banner when nothing is scanning');
+  eq(m.el('tr').textContent, 'ble', 'the transport is shown');
 
-  // A scan owns the bus, so live values stop. That has to read as "scanning", not
-  // as the ECU having gone away.
-  m.queue.push({ ok: false, scan: true, error: 'paused - DID scan running' });
+  // The bug this suite exists for: progress was only emitted on the ok:true branch,
+  // which is exactly the branch that cannot be taken while the scanner holds the
+  // bus. The bar sat at 0 % for an entire sweep and the transport read as a dash.
+  m.queue.push({ ok: false, scan: true, tr: 'ble', error: 'waiting - scanner has the bus',
+                 scanPct: 12.5, scanTried: 8192, scanTotal: 65536, scanEcu: 'ECM' });
   await m.step();
-  eq(m.el('st').textContent, 'paused · scanning', 'status says scanning, not no-response');
   eq(m.el('scanBar').style.display, 'block', 'the banner appears on the Live page');
+  eq(m.el('scanProg').style.width, '12.5%', 'progress is shown even with no live sample');
+  eq(m.el('tr').textContent, 'ble', 'and the transport survives a stale sample');
+  ok(m.el('scanNum').textContent.includes('8,192'),
+     `counts are shown, not just a percentage (${m.el('scanNum').textContent})`);
+  eq(m.el('st').textContent, 'waiting · scanning', 'status says scanning, not no-response');
 
-  // ...and it must not trip the no-response hysteresis either.
+  // ...and scanning must not trip the no-response hysteresis however long it runs.
   for (let i = 0; i < 8; i++) {
-    m.queue.push({ ok: false, scan: true, error: 'paused - DID scan running' });
+    m.queue.push({ ok: false, scan: true, error: 'waiting - scanner has the bus',
+                   scanPct: 20, scanTried: 13107, scanTotal: 65536 });
     await m.step();
   }
-  eq(m.el('st').textContent, 'paused · scanning', 'and stays that way while it runs');
+  eq(m.el('st').textContent, 'waiting · scanning', 'and stays that way while it runs');
+
+  // The board shares the bus, so live samples still arrive during a scan.
+  m.queue.push({ ok: true, seq: 2, tr: 'ble', scan: true, scanPct: 21,
+                 scanTried: 13800, scanTotal: 65536, v: { rpm: 900 } });
+  await m.step();
+  eq(m.el('st').textContent, 'live · scanning', 'a sample arriving mid-scan reads as live');
+  eq(m.el('scanBar').style.display, 'block', 'and the banner stays up');
 }
 
 async function suiteSeed(label, file) {

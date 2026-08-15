@@ -48,10 +48,11 @@ letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 <div class="wrap">
 
 <div class="card" id="scanBar" style="display:none;border-color:var(--blue)">
-<div class="label" style="margin:0 0 3px">DID scan running</div>
-<div style="font-size:13px;color:var(--ink2)">Live values are paused &mdash; the
-scanner has the bus. It keeps going if you leave this page.</div>
+<div class="label" style="margin:0 0 3px">DID scan running &mdash; <span id="scanEcu">ECM</span></div>
+<div style="font-size:13px;color:var(--ink2)">The scanner has most of the bus, so
+live values update slowly. It keeps going if you leave this page.</div>
 <div class="bar2"><i id="scanProg"></i></div>
+<div class="note" id="scanNum" style="margin-top:7px"></div>
 <div style="margin-top:8px"><a href="/scan" style="color:var(--blue);font-size:13px">Open the scanner &rarr;</a></div>
 </div>
 
@@ -250,23 +251,29 @@ document.getElementById('dot').className='dot '+c;document.getElementById('st').
 // a second, which reads as a fault when nothing is actually wrong.
 const MISS_MAX=5;
 async function tick(){try{const r=await fetch('/data',{cache:'no-store'});const j=await r.json();
-scanBar(j.scan,j.scanPct);
+if(j.tr)T('tr',j.tr);
+scanBar(j);
 if(j.ok){miss=0;const[v,q,held]=merge(j.v);render(v,q);
 // Count published samples, not fetches: /data serves a cached sample now, so the
 // same one can be fetched several times and must not inflate the rate.
 if(j.seq!==lastSeq){lastSeq=j.seq;rate.push(Date.now());if(rate.length>20)rate.shift()}
-if(j.tr)T('tr',j.tr);
-st('live',held?'live · holding '+held:'live');
+st('live',j.scan?'live · scanning':(held?'live · holding '+held:'live'));
 document.getElementById('hz').textContent=hz()}
-else if(j.scan){miss=0;st('stale','paused · scanning');
+else if(j.scan){miss=0;st('stale','waiting · scanning');
 document.getElementById('hz').textContent=''}
 else if(++miss>=MISS_MAX){rate.length=0;st('stale',j.error||'no data');
 document.getElementById('hz').textContent=''}}
 catch(e){if(++miss>=MISS_MAX)st('dead','ESP32 unreachable')}
 finally{if(alive)setTimeout(tick,120)}}
-function scanBar(on,pct){const e=document.getElementById('scanBar');if(!e)return;
-e.style.display=on?'block':'none';
-if(on)document.getElementById('scanProg').style.width=(pct||0)+'%'}
+function scanBar(j){const e=document.getElementById('scanBar');if(!e)return;
+e.style.display=j.scan?'block':'none';
+if(!j.scan)return;
+document.getElementById('scanProg').style.width=(j.scanPct||0)+'%';
+T('scanEcu',j.scanEcu||'ECM');
+// A sweep of the whole identifier space is tens of thousands of requests, so a
+// percentage alone rounds to zero for a long time and reads as "stuck".
+const t=j.scanTried||0,n=j.scanTotal||0;
+T('scanNum',n?t.toLocaleString()+' of '+n.toLocaleString()+' · '+(j.scanPct||0)+'%':'')}
 // Stop polling while the page is not on screen. The board keeps sampling either
 // way, and a backgrounded tab hammering /data just costs battery and bus time.
 document.addEventListener('visibilitychange',()=>{

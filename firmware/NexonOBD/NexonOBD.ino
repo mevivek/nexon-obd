@@ -548,8 +548,19 @@ static uint32_t sampBatchMs = 0;     // how long the last batch took, for the lo
 // after each batch, with the other two carried forward from cache while they are
 // still fresh, means the page updates at the batch rate and the values in b1 refresh
 // twice as often as the rest.
+// While a scan runs it gets most of the bus, but not all of it. A full 0000-FFFF
+// sweep is over half an hour on CAN and the better part of a day over BLE, and
+// freezing the dashboard for that long is not a reasonable trade for the ~15 % of
+// scan throughput this costs. One batch every couple of seconds keeps the live
+// values moving, slowly, and keeps the page honest about being alive.
+static const uint32_t SCAN_SHARE_MS = 2000;
+static uint32_t sampSharedMs = 0;
+
 static void samplerStep() {
-  if (scan.running) return;          // the scanner owns the bus while it runs
+  if (scan.running) {
+    if (millis() - sampSharedMs < SCAN_SHARE_MS) return;
+    sampSharedMs = millis();
+  }
 
   uint8_t b = SAMPLE_ORDER[sampTurn];
   sampTurn = (uint8_t)((sampTurn + 1) % (sizeof(SAMPLE_ORDER) / sizeof(SAMPLE_ORDER[0])));
@@ -587,16 +598,40 @@ static void samplerStep() {
   }
 }
 
+// Scan progress, emitted on both the fresh and stale branches.
+//
+// This used to live only on the ok:true path, which is precisely the path that
+// cannot be taken while a scan is running - so the progress bar sat at 0 % for the
+// entire sweep and the header transport read as an em-dash.
+static void jsonScan(String &s) {
+  uint32_t total = scan.to - scan.from + 1;
+  s += ",\"scan\":";
+  s += scan.running ? "true" : "false";
+  if (scan.running) {
+    s += ",\"scanPct\":";
+    s += String(total ? (scan.tried * 100.0f / total) : 0.0f, 2);
+    s += ",\"scanTried\":";
+    s += scan.tried;
+    s += ",\"scanTotal\":";
+    s += total;
+    s += ",\"scanEcu\":\"";
+    s += scan.ecu ? "TCM" : "ECM";
+    s += "\"";
+  }
+}
+
 static void handleData() {
   String s = "{";
   bool fresh = g_seq && (millis() - g_liveMs < 4000);
 
   if (!fresh) {
-    s += "\"ok\":false,\"error\":\"";
-    s += scan.running ? "paused - DID scan running"
+    s += "\"ok\":false,\"fw\":\"" FW_VERSION "\",\"tr\":\"";
+    s += transportName();
+    s += "\",\"error\":\"";
+    s += scan.running ? "waiting - scanner has the bus"
                       : "no response from ECU (ignition off?)";
-    s += "\",\"scan\":";
-    s += scan.running ? "true" : "false";
+    s += "\"";
+    jsonScan(s);
     s += "}";
     server.send(200, "application/json", s);
     return;
@@ -609,13 +644,7 @@ static void handleData() {
   s += g_seq;
   s += ",\"age\":";
   s += (millis() - g_liveMs);
-  s += ",\"scan\":";
-  s += scan.running ? "true" : "false";
-  if (scan.running) {
-    uint32_t total = scan.to - scan.from + 1;
-    s += ",\"scanPct\":";
-    s += (total ? (scan.tried * 100UL / total) : 0);
-  }
+  jsonScan(s);
   s += ",\"v\":{";
   jsonNum(s, "rpm", L.rpm, 0);        jsonNum(s, "speed", L.speed, 0);
   jsonNum(s, "map", L.map_, 0);       jsonNum(s, "baro", L.baro, 0);

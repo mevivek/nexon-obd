@@ -52,6 +52,7 @@ R"rawliteral(
 <span>negatives <b id="neg">0</b></span>
 <span>elapsed <b id="el">0</b>s</span>
 <span>rate <b id="rate">&mdash;</b>/s</span>
+<span>left <b id="eta">&mdash;</b></span>
 </div>
 <div class="hint">A scan keeps running if you leave this page or close the browser &mdash;
 it is driven by the board, not by this tab. Live dashboard values pause while it runs,
@@ -72,6 +73,8 @@ Run it parked.</div>
 <script>
 let timer=null,last=[];
 const $=i=>document.getElementById(i);
+function hms(s){s=Math.round(s);const h=Math.floor(s/3600),m=Math.floor(s%3600/60);
+return h>48?Math.round(h/24)+'d':h?h+'h '+m+'m':m?m+'m':s+'s'}
 function dot(c){$('dot').className='dot '+c}
 async function poll(){
  try{
@@ -82,7 +85,11 @@ async function poll(){
   $('cur').textContent=j.cur;$('tried').textContent=j.tried;
   $('nhits').textContent=last.length;$('neg').textContent=j.negatives;
   $('el').textContent=j.elapsed;
-  $('rate').textContent=j.elapsed>0?(j.tried/j.elapsed).toFixed(0):'—';
+  const rps=j.elapsed>0?j.tried/j.elapsed:0;
+  $('rate').textContent=rps?rps.toFixed(rps<10?1:0):'—';
+  // A full sweep is 65,536 requests. On BLE that is the better part of a day, which
+  // is worth knowing before walking away rather than after.
+  $('eta').textContent=(rps>0&&j.total>j.tried)?hms((j.total-j.tried)/rps):'—';
   $('prog').style.width=(j.total?100*j.tried/j.total:0).toFixed(1)+'%';
   $('tb').innerHTML=last.length?last.map(h=>
    `<tr><td>${h.ecu}</td><td class="mono">${h.did}</td><td class="num">${h.len}</td>

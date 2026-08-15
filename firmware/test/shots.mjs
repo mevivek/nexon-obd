@@ -78,8 +78,11 @@ const server = http.createServer((req, res) => {
   if (url === '/data') {
     res.writeHead(200, { 'content-type': 'application/json' });
     if (scanning) {
-      return res.end(JSON.stringify({ ok: false, scan: true,
-                                      error: 'paused - DID scan running' }));
+      // The board keeps sampling slowly during a scan, so the shot shows the state
+      // that actually persists: live values present, banner up, progress moving.
+      return res.end(JSON.stringify({ ok: true, fw: 'test', tr: 'ble', seq: ++seq,
+        age: 1800, scan: true, scanPct: 12.5, scanTried: 8192, scanTotal: 65536,
+        scanEcu: 'ECM', v: sample }));
     }
     return res.end(JSON.stringify(ok
       ? { ok: true, fw: 'test', tr: 'can', seq: ++seq, age: 40, scan: false, v: sample }

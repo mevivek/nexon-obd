@@ -94,9 +94,14 @@ A scan is driven by the board, so it continues if you navigate away, close the
 browser, or lock the phone. Only **Stop** — or an OTA upload, which never flashes
 mid-scan — ends it.
 
-While it runs, the scanner has the bus and live values pause. The Live page says so
-explicitly rather than looking dead, and shows the sweep's progress with a link back
-to the scanner.
+While it runs the scanner takes most of the bus, but not all of it — the sampler
+still gets one batch every two seconds, so live values keep moving slowly rather
+than freezing. That costs roughly 15 % of scan throughput, which is a good trade
+against a dashboard that is dead for the length of a sweep.
+
+The Live page shows the sweep's progress with counts as well as a percentage — a
+full pass is 65,536 requests, so a percentage alone rounds to zero for a long time
+and reads as stuck — and the scanner page estimates the time remaining.
 
 Scanning is time-boxed to 250 ms per turn rather than a fixed identifier count. A
 count behaves wildly differently per transport — 40 identifiers is about a second on
