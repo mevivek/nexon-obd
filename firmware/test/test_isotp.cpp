@@ -305,6 +305,56 @@ static void test_batch_silent_does_not_retry() {
   ok(g_millis - t0 < 800, "did not burn a second timeout");
 }
 
+// ------------------------------------------------------------------ mode 06
+
+static void test_mon_mask() {
+  printf("monMaskMids: support masks and how the ranges chain\n");
+  uint8_t out[32];
+
+  // The exact reply FINDINGS records from this car: 46 00 C0 00 00 01.
+  // C0 is the top two bits of the first byte - monitors 01 and 02 - and the very
+  // last bit is id 20, which is not a monitor but the marker saying the next range
+  // has its own mask.
+  uint8_t real[] = {0x46, 0x00, 0xC0, 0x00, 0x00, 0x01};
+  uint8_t n = monMaskMids(real, sizeof(real), 0x00, out, 32);
+  eq(n, 3, "three bits set");
+  eq(out[0], 0x01, "monitor 01");
+  eq(out[1], 0x02, "monitor 02");
+  eq(out[2], 0x20, "and the next-range marker");
+
+  // Bit ordering is most significant first, and the range is relative to the base.
+  uint8_t hi[] = {0x46, 0x20, 0x80, 0x00, 0x00, 0x00};
+  eq(monMaskMids(hi, sizeof(hi), 0x20, out, 32), 1, "one bit set in the 20 range");
+  eq(out[0], 0x21, "the first id of that range, not of the first range");
+
+  // A reply for a different base than we asked about is not ours to read.
+  eq(monMaskMids(real, sizeof(real), 0x20, out, 32), 0, "a mismatched base is rejected");
+  uint8_t stub[] = {0x46, 0x00, 0xC0};
+  eq(monMaskMids(stub, sizeof(stub), 0x00, out, 32), 0, "a short mask is rejected");
+}
+
+static void test_mon_parse() {
+  printf("monParse: nine-byte test records\n");
+  MonRec r[12];
+  uint8_t reply[] = {0x46,
+                     0x01, 0x01, 0x0B, 0x02, 0x30, 0x01, 0x00, 0x03, 0x00,
+                     0x01, 0x02, 0x0B, 0x00, 0x90, 0x00, 0x40, 0x01, 0x80};
+  eq(monParse(reply, sizeof(reply), r, 12), 2, "both records are read");
+  eq(r[0].mid, 0x01, "monitor id");
+  eq(r[0].tid, 0x01, "test id");
+  eq(r[0].uas, 0x0B, "unit and scaling id is kept, not interpreted");
+  eq((int)r[0].value, 0x0230, "value is a 16-bit word");
+  eq((int)r[0].lo, 0x0100, "as is the lower limit");
+  eq((int)r[0].hi, 0x0300, "and the upper");
+  eq(r[1].tid, 0x02, "the second record follows on");
+
+  // A reply cut mid-record must drop the fragment rather than read past it.
+  eq(monParse(reply, 14, r, 12), 1, "a trailing part-record is ignored");
+  uint8_t wrong[] = {0x41, 0x01, 0x01, 0x0B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  eq(monParse(wrong, sizeof(wrong), r, 12), 0, "a reply that is not mode 06 is rejected");
+  eq(monParse(reply, sizeof(reply), r, 1), 1, "the caller's capacity is respected");
+}
+
 // ------------------------------------------------------------------ reconnect
 
 static void test_pick_backoff() {
@@ -452,6 +502,8 @@ int main() {
   test_batch_rejects_misframed();
   test_batch_silent_does_not_retry();
 
+  test_mon_mask();
+  test_mon_parse();
   test_pick_backoff();
   test_sample_order_favours_live_values();
   test_stale_window_tracks_the_cycle();

@@ -423,7 +423,7 @@ console.log('\nversion stamp');
   ok(/^\d+\.\d+\.\d+$/.test(v), `version.h holds a version (${v})`);
 
   for (const f of ['../NexonOBD/dashboard_html.h', '../NexonOBD/scan_html.h',
-                   '../NexonOBD/ota_html.h']) {
+                   '../NexonOBD/ota_html.h', '../NexonOBD/mon_html.h']) {
     const html = pageSource(f);
     const name = f.split('/').pop();
     const sub = (html.match(/<span class="sub">([\s\S]*?)<\/span>/) || [, ''])[1];
@@ -475,7 +475,8 @@ console.log('\nversion stamp');
 // dashboard on the car. Compile each page's script without running it.
 console.log('syntax');
 for (const f of ['../NexonOBD/dashboard_html.h', '../NexonOBD/scan_html.h',
-                 '../NexonOBD/ota_html.h', '../../tools/dashboard.html']) {
+                 '../NexonOBD/ota_html.h', '../NexonOBD/mon_html.h',
+                 '../../tools/dashboard.html']) {
   const blocks = scriptsOf(pageSource(f));
   ok(blocks.length > 0, `${f}: has a script block`);
   for (const js of blocks) {

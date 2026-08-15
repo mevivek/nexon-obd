@@ -18,6 +18,17 @@ struct Live {
   bool  ok = false;
 };
 
+// One on-board monitor test result from mode 06.
+//
+// Values and limits are kept raw. The unit-and-scaling id (uas) says how to convert
+// them, and that table is long and only partly documented - but the useful reading
+// does not need it: a test passes when its value sits between its own limits, and
+// how much room is left is a fraction of that window. Both are unit-free.
+struct MonRec {
+  uint8_t  mid, tid, uas;
+  uint16_t value, lo, hi;
+};
+
 // One UDS identifier that answered service 0x22 with a positive (0x62) response.
 struct Hit {
   uint16_t did;

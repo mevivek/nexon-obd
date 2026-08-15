@@ -25,6 +25,7 @@
 #include <Update.h>
 #include "dashboard_html.h"
 #include "scan_html.h"
+#include "mon_html.h"
 #include "ota_html.h"
 
 // Two ways to reach the car, picked at runtime:
@@ -501,6 +502,41 @@ static bool sampleMerge(Live &out, const uint8_t bufs[4][40], const uint8_t *len
   return any;
 }
 
+// ---------------------------------------------------------------- mode 06 monitors
+
+// Mode 06 reports the ECU's own on-board test results: what each monitor measured
+// and the limits it is judged against. The car supports it (FINDINGS records
+// `46 00 C0000001`) and nothing has ever asked for it.
+//
+// A support mask comes back as `46 MM b0 b1 b2 b3` - 32 bits covering the next 32
+// monitor ids, most significant bit first. The last bit is the id of the *next*
+// support mask, which is how the ranges chain: 00 -> 20 -> 40 and so on.
+static uint8_t monMaskMids(const uint8_t *buf, int len, uint8_t base,
+                           uint8_t *out, uint8_t cap) {
+  if (len < 6 || buf[0] != 0x46 || buf[1] != base) return 0;
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < 32 && n < cap; i++)
+    if (buf[2 + (i >> 3)] & (uint8_t)(0x80 >> (i & 7))) out[n++] = (uint8_t)(base + 1 + i);
+  return n;
+}
+
+// Results are repeating nine-byte records: mid, tid, uas, then value, min and max
+// as 16-bit words. A reply can carry several, and a trailing part-record is
+// ignored rather than half-read.
+static uint8_t monParse(const uint8_t *buf, int len, MonRec *out, uint8_t cap) {
+  if (len < 1 || buf[0] != 0x46) return 0;
+  uint8_t n = 0;
+  for (int i = 1; i + 8 < len && n < cap; i += 9, n++) {
+    out[n].mid   = buf[i];
+    out[n].tid   = buf[i + 1];
+    out[n].uas   = buf[i + 2];
+    out[n].value = (uint16_t)((buf[i + 3] << 8) | buf[i + 4]);
+    out[n].lo    = (uint16_t)((buf[i + 5] << 8) | buf[i + 6]);
+    out[n].hi    = (uint16_t)((buf[i + 7] << 8) | buf[i + 8]);
+  }
+  return n;
+}
+
 // ---------------------------------------------------------------- DID scanner
 
 struct ScanState {
@@ -550,6 +586,74 @@ static void scanStep(uint32_t budgetMs) {
     memcpy(h.data, &buf[3], h.len);
     if (scan.hits.size() < 3000) scan.hits.push_back(h);
   }
+}
+
+// Monitor discovery and refresh run in loop() like everything else that touches the
+// bus, and only while someone is actually looking at the page - a request to /mon
+// arms it for MON_WANTED_MS. Polling monitors continuously would spend bus time on
+// values that change over minutes, at the expense of the ones that change now.
+static const uint8_t  MON_MAX        = 24;
+static const uint8_t  MON_MIDS_MAX   = 16;
+static const uint32_t MON_PERIOD_MS  = 1500;
+static const uint32_t MON_WANTED_MS  = 30000;
+
+static MonRec   monRec[MON_MAX];
+static uint8_t  monCount = 0;
+static uint8_t  monMids[MON_MIDS_MAX];
+static uint8_t  monMidCount = 0;
+static uint8_t  monNext = 0;
+static uint8_t  monDiscBase = 0x00;
+static bool     monDiscovered = false;
+static uint32_t monWantedMs = 0;
+static uint32_t monLastMs = 0;
+
+// Replace this monitor's records rather than appending, so a refresh updates in
+// place instead of growing the table every pass.
+static void monStore(uint8_t mid, const MonRec *recs, uint8_t n) {
+  uint8_t w = 0;
+  for (uint8_t i = 0; i < monCount; i++)
+    if (monRec[i].mid != mid) monRec[w++] = monRec[i];
+  monCount = w;
+  for (uint8_t i = 0; i < n && monCount < MON_MAX; i++) monRec[monCount++] = recs[i];
+}
+
+static void monStep() {
+  if (scan.running) return;
+  if (!monWantedMs || millis() - monWantedMs > MON_WANTED_MS) return;
+  if (millis() - monLastMs < MON_PERIOD_MS) return;
+  if (activeTransport == TR_NONE) return;
+  monLastMs = millis();
+
+  uint8_t buf[128];
+  const uint32_t tmo = (activeTransport == TR_BLE) ? 1200 : 400;
+
+  if (!monDiscovered) {
+    uint8_t req[2] = {0x06, monDiscBase};
+    int len = obdIsoTp(ID_ECM_REQ, ID_ECM_RSP, req, 2, buf, sizeof(buf), tmo);
+    uint8_t got[32];
+    uint8_t n = (len > 0) ? monMaskMids(buf, len, monDiscBase, got, 32) : 0;
+    bool more = false;
+    for (uint8_t i = 0; i < n; i++) {
+      if (got[i] == (uint8_t)(monDiscBase + 0x20)) { more = true; continue; }  // range marker
+      if (monMidCount < MON_MIDS_MAX) monMids[monMidCount++] = got[i];
+    }
+    if (more && monDiscBase < 0xA0) monDiscBase = (uint8_t)(monDiscBase + 0x20);
+    else { monDiscovered = true; monNext = 0; }
+    Serial.printf("[mon] base %02X -> %u ids (%u total)%s\n",
+                  monDiscBase, n, monMidCount, monDiscovered ? " done" : "");
+    return;
+  }
+
+  if (!monMidCount) return;
+  uint8_t mid = monMids[monNext];
+  monNext = (uint8_t)((monNext + 1) % monMidCount);
+
+  uint8_t req[2] = {0x06, mid};
+  int len = obdIsoTp(ID_ECM_REQ, ID_ECM_RSP, req, 2, buf, sizeof(buf), tmo);
+  if (len < 1) return;
+  MonRec recs[12];
+  uint8_t n = monParse(buf, len, recs, 12);
+  if (n) monStore(mid, recs, n);
 }
 
 // ---------------------------------------------------------------- HTTP
@@ -825,6 +929,29 @@ static void handleDtc() {
   server.send(200, "application/json", s);
 }
 
+static void handleMonitors() {
+  monWantedMs = millis();          // arms monStep() for the next half minute
+  String s = "{\"ready\":";
+  s += monDiscovered ? "true" : "false";
+  s += ",\"ids\":";
+  s += monMidCount;
+  s += ",\"recs\":[";
+  for (uint8_t i = 0; i < monCount; i++) {
+    const MonRec &m = monRec[i];
+    if (i) s += ",";
+    char hex[8];
+    s += "{\"mid\":\"";  snprintf(hex, sizeof(hex), "%02X", m.mid); s += hex;
+    s += "\",\"tid\":\""; snprintf(hex, sizeof(hex), "%02X", m.tid); s += hex;
+    s += "\",\"uas\":\""; snprintf(hex, sizeof(hex), "%02X", m.uas); s += hex;
+    s += "\",\"v\":";  s += m.value;
+    s += ",\"lo\":";    s += m.lo;
+    s += ",\"hi\":";    s += m.hi;
+    s += "}";
+  }
+  s += "]}";
+  server.send(200, "application/json", s);
+}
+
 // Trend history, oldest first. Chunked because the full hour is ~14 KB of JSON and
 // assembling that in one String risks the heap on a board this size.
 static void handleHistory() {
@@ -948,6 +1075,8 @@ void setup() {
   server.on("/data",        handleData);
   server.on("/dtc",         handleDtc);
   server.on("/history",     handleHistory);
+  server.on("/mon",         handleMonitors);
+  server.on("/monitors",    []() { server.send_P(200, "text/html", MON_HTML); });
   server.on("/scan/start",  handleScanStart);
   server.on("/scan/stop",   handleScanStop);
   server.on("/scan/status", handleScanStatus);
@@ -961,6 +1090,7 @@ void setup() {
 void loop() {
   server.handleClient();
   samplerStep();          // one batch per turn, so the server keeps its responsiveness
+  monStep();              // only does anything while the monitors page is open
   heartbeat(millis() - lastEcuOkMs < 3000, scan.running);
 
   if (scan.running) {

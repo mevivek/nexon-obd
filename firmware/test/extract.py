@@ -10,7 +10,8 @@ import sys
 import pathlib
 
 WANT = ["hexNib", "canIsoTp", "bleIsoTp", "obdIsoTp",
-        "pidLen", "applyPid", "mode01Walk", "pollBatch", "sampleBatchPids", "sampleStaleMs", "sampleMerge", "pickBackoff"]
+        "pidLen", "applyPid", "mode01Walk", "pollBatch", "sampleBatchPids", "sampleStaleMs", "sampleMerge", "pickBackoff",
+        "monMaskMids", "monParse"]
 
 # File-scope data the extracted functions reference. Pulled verbatim so the tests
 # exercise the real PID lists rather than a copy that can drift.

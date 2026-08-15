@@ -27,6 +27,7 @@ it says so.
 | Page | What it does |
 |---|---|
 | `/` | Live gauges — RPM, boost, temps, trims, lambda, catalyst, driver demand |
+| `/monitors` | Mode 06 on-board monitor test results, with the ECU's own limits |
 | `/scan` | UDS service `0x22` identifier sweep, with CSV export |
 | `/update` | Upload a new `.bin` over Wi-Fi |
 | `/dtc` | Stored + pending fault codes as JSON |
@@ -115,6 +116,28 @@ are derived rather than read.
 > needs data under load. A wrong data *length* is caught (`mode01Walk` rejects the
 > batch), but a wrong *scaling* would not be. Treat the numbers as provisional until
 > they have been watched under load and found sane.
+
+### On-board monitors (mode 06)
+
+Mode 06 is the ECU's own test results: what each monitor measured, and the limits it
+is judged against. `FINDINGS.md` recorded it as supported (`46 00 C0000001`) and
+never explored — so `/monitors` reads it.
+
+The value of it over `/dtc` is that a fault code only appears once a system has
+already failed. Mode 06 shows how much room is left, so a catalyst drifting toward
+its threshold is visible while it is still passing.
+
+**Pass and headroom do not require knowing the units.** A test passes when its value
+sits inside its own limits, and the headroom is a fraction of that window — both
+unit-free. The unit-and-scaling table is long and only partly documented, so values
+are shown raw with their scaling id, decoded only where the multiplier is
+unambiguous. Monitor names likewise: only unambiguous J1979 ids are named, the rest
+keep their raw id rather than being given a label that might be wrong.
+
+Discovery walks the support masks (`00` → `20` → `40` …, each mask's last bit
+pointing at the next), then each monitor is read one at a time. It runs only while
+the page is open — monitors move over minutes, and polling them continuously would
+take bus time from the values that move now.
 
 ### The DID scan runs in the background
 

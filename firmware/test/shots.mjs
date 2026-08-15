@@ -62,6 +62,7 @@ const PAGES = [
   ['dashboard', '../NexonOBD/dashboard_html.h'],
   ['scan', '../NexonOBD/scan_html.h'],
   ['update', '../NexonOBD/ota_html.h'],
+  ['monitors', '../NexonOBD/mon_html.h'],
 ];
 
 const WIDTHS = [[390, 'phone'], [768, 'tablet']];
@@ -101,6 +102,17 @@ const server = http.createServer((req, res) => {
     }
     res.writeHead(200, { 'content-type': 'application/json' });
     return res.end(JSON.stringify(h));
+  }
+  if (url === '/mon') {
+    // Two O2 monitors, which is what this car's support mask implies: one comfortably
+    // inside its window, one close enough to a limit to be worth seeing.
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ ready: true, ids: 2, recs: [
+      { mid: '01', tid: '01', uas: '0B', v: 560, lo: 200, hi: 900 },
+      { mid: '01', tid: '02', uas: '0B', v: 143, lo: 120, hi: 700 },
+      { mid: '02', tid: '01', uas: '03', v: 4100, lo: 1000, hi: 8000 },
+      { mid: '02', tid: '81', uas: '01', v: 12, lo: 0, hi: 40 },
+    ] }));
   }
   if (url === '/dtc') {
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -157,7 +169,7 @@ for (const [width, wname] of WIDTHS) {
   }
 
   ok = true; scanning = false; sample = CRUISING;
-  for (const p of ['scan', 'update']) {
+  for (const p of ['scan', 'update', 'monitors']) {
     await page.goto(`${base}/${p}`);
     await page.waitForTimeout(500);
     const f = join(outDir, `${p}-${wname}.png`);

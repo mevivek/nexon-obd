@@ -23,7 +23,7 @@ color:var(--ink2);font-size:14px}
 <header>
 <div class="bar"><h1>Firmware Update</h1>
 <span class="sub">running v)rawliteral" FW_VERSION R"rawliteral(</span></div>
-<nav><a href="/">Live</a><a href="/scan">DID scanner</a><a class="on" href="/update">Firmware</a></nav>
+<nav><a href="/">Live</a><a href="/monitors">Monitors</a><a href="/scan">Scanner</a><a class="on" href="/update">Firmware</a></nav>
 </header>
 
 <div class="wrap">
