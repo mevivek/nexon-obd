@@ -10,7 +10,7 @@ import sys
 import pathlib
 
 WANT = ["hexNib", "canIsoTp", "bleIsoTp", "obdIsoTp",
-        "pidLen", "applyPid", "pollBatch", "pollAll"]
+        "pidLen", "applyPid", "mode01Walk", "pollBatch", "pollAll"]
 
 
 def extract(src: str, name: str) -> str:

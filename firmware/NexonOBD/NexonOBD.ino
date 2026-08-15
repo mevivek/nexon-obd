@@ -130,7 +130,9 @@ static bool canSend(uint32_t id, const uint8_t *d, uint8_t len) {
 // which is what blanks the dashboard mid-drive.
 static int canIsoTp(uint32_t reqId, uint32_t rspId,
                     const uint8_t *payload, uint8_t plen,
-                    uint8_t *out, size_t outCap, uint32_t timeoutMs) {
+                    uint8_t *out, size_t outCap, uint32_t timeoutMs,
+                    int *partial = nullptr) {
+  if (partial) *partial = 0;
   uint8_t frame[8] = {0};
   frame[0] = plen;                                  // single-frame PCI
   memcpy(&frame[1], payload, plen);
@@ -181,6 +183,7 @@ static int canIsoTp(uint32_t reqId, uint32_t rspId,
       if (got >= total) return (int)got;
     }
   }
+  if (multi && partial) *partial = (int)got;        // salvageable if the caller can verify it
   return multi ? -3 : -1;                           // a partial reassembly is not a result
 }
 
@@ -200,7 +203,9 @@ static int hexNib(char c) {
 // because this clone's ATCRA receive filter does not actually filter.
 static int bleIsoTp(uint32_t reqId, uint32_t rspId,
                     const uint8_t *payload, uint8_t plen,
-                    uint8_t *out, size_t outCap, uint32_t timeoutMs) {
+                    uint8_t *out, size_t outCap, uint32_t timeoutMs,
+                    int *partial = nullptr) {
+  if (partial) *partial = 0;
   if (!elmConnected) return -1;
 
   if (bleCurHeader != reqId) {
@@ -281,15 +286,18 @@ static int bleIsoTp(uint32_t reqId, uint32_t rspId,
   }
 
   if (negative) return -2;
+  if (multi && partial) *partial = (int)got;    // salvageable if the caller can verify it
   return (multi || broken) ? -3 : -1;           // started but never completed
 }
 
 // Dispatcher - everything above the transport layer calls this.
 static int obdIsoTp(uint32_t reqId, uint32_t rspId,
                     const uint8_t *payload, uint8_t plen,
-                    uint8_t *out, size_t outCap, uint32_t timeoutMs) {
-  if (activeTransport == TR_BLE) return bleIsoTp(reqId, rspId, payload, plen, out, outCap, timeoutMs);
-  return canIsoTp(reqId, rspId, payload, plen, out, outCap, timeoutMs);
+                    uint8_t *out, size_t outCap, uint32_t timeoutMs,
+                    int *partial = nullptr) {
+  if (activeTransport == TR_BLE)
+    return bleIsoTp(reqId, rspId, payload, plen, out, outCap, timeoutMs, partial);
+  return canIsoTp(reqId, rspId, payload, plen, out, outCap, timeoutMs, partial);
 }
 
 // ---------------------------------------------------------------- mode 01
@@ -328,45 +336,84 @@ static void applyPid(Live &L, uint8_t pid, const uint8_t *d) {
   }
 }
 
+// Walk a mode-01 reply as (pid, data...) pairs.
+//
+// The payload is self-describing, so a short reply can be *checked* rather than
+// either trusted or thrown away: every pid must be one we asked for, and its data
+// bytes must actually be present. A reply cut off mid-message therefore still
+// yields the pairs that arrived intact, while a misframed one is rejected outright
+// because a pid we never requested means the bytes are not what they claim to be.
+//
+// This matters on the BLE path, where a reply arriving without the ELM's '>' prompt
+// is truncated by definition. Discarding those wholesale left the dashboard with
+// almost nothing to show and dragged polling down to a fraction of a hertz.
+// Applying whichever pairs verify is both safe and far more useful - the dashboard
+// holds the remaining fields at their previous reading.
+static int mode01Walk(const uint8_t *buf, int len,
+                      const uint8_t *pids, uint8_t n, Live *out) {
+  if (len < 2 || buf[0] != 0x41) return -1;
+  int i = 1, applied = 0;
+  while (i < len) {
+    uint8_t pid = buf[i++];
+    bool asked = false;
+    for (uint8_t k = 0; k < n; k++) if (pids[k] == pid) { asked = true; break; }
+    if (!asked) return -1;                 // misframed - none of it is trustworthy
+    uint8_t w = pidLen(pid);
+    if (i + w > len) break;                // cut mid-value: keep the pairs before it
+    if (out) {
+      uint8_t d[4] = {0, 0, 0, 0};
+      memcpy(d, &buf[i], w);
+      applyPid(*out, pid, d);
+    }
+    i += w;
+    applied++;
+  }
+  return applied;
+}
+
 // One batched mode-01 request carrying up to 6 PIDs.
 //
-// A truncated reply is retried once rather than parsed. Six PIDs is 14-ish payload
-// bytes, so every batch is a multi-frame exchange, and applying the half that
-// arrived leaves the rest of Live at NAN - which the dashboard renders as blanks
-// on top of readings that were good a moment earlier.
-//
-// A silent ECU (-1) or a refusal (-2) is not retried: there is nothing to wait for,
-// and a second full timeout on all three batches makes /data crawl with the
-// ignition off. 400 ms on CAN rather than 200 covers first frame + flow control +
-// two consecutive frames with margin for ECU turnaround.
+// A reply is accepted when at least one (pid, data) pair verifies, whether or not
+// the ISO-TP reassembly completed. Only a reply yielding nothing is retried, and a
+// silent (-1) or refused (-2) ECU is not retried at all: there is nothing to wait
+// for, and a second full timeout on all three batches makes /data crawl with the
+// ignition off.
 static bool pollBatch(Live &L, const uint8_t *pids, uint8_t n) {
   uint8_t req[7];
   req[0] = 0x01;
   memcpy(&req[1], pids, n);
 
-  const uint32_t tmo = (activeTransport == TR_BLE) ? 900 : 400;
-  uint8_t buf[64];
-  int len = -1;
+  const uint32_t tmo = (activeTransport == TR_BLE) ? 1200 : 400;
+  uint8_t buf[64], best[64];
+  int bestLen = 0, bestGot = 0;
 
   for (int attempt = 0; attempt < 2; attempt++) {
-    len = obdIsoTp(ID_ECM_REQ, ID_ECM_RSP, req, n + 1, buf, sizeof(buf), tmo);
-    if (len >= 2 && buf[0] == 0x41) break;
-    if (len == -1 || len == -2) return false;
-    len = -1;
-  }
-  if (len < 2) return false;
+    int partial = 0;
+    int len = obdIsoTp(ID_ECM_REQ, ID_ECM_RSP, req, n + 1, buf, sizeof(buf), tmo, &partial);
+    if (len == -3 && partial > 0) len = partial;   // truncated, but worth checking
+    if (len == -1 || len == -2) break;             // silent or refused: nothing to wait for
 
-  int i = 1;
-  while (i < len) {
-    uint8_t pid = buf[i++];
-    uint8_t w = pidLen(pid);
-    if (i + w > len) break;
-    uint8_t d[4] = {0, 0, 0, 0};
-    memcpy(d, &buf[i], w);
-    applyPid(L, pid, d);
-    i += w;
+    if (len >= 2) {
+      int got = mode01Walk(buf, len, pids, n, nullptr);
+      if (got >= n) {                              // every pid we asked for
+        mode01Walk(buf, len, pids, n, &L);
+        return true;
+      }
+      if (got > bestGot) {                         // keep the fullest verified reply
+        bestGot = got;
+        bestLen = len;
+        memcpy(best, buf, (size_t)len);
+      }
+    }
   }
-  return true;
+
+  // Retrying did not produce a complete batch, so use the most complete verified
+  // reply we did see rather than reporting nothing at all.
+  if (bestGot > 0) {
+    mode01Walk(best, bestLen, pids, n, &L);
+    return true;
+  }
+  return false;
 }
 
 static float g_baro = NAN;
@@ -416,13 +463,13 @@ static void scanStep(uint16_t budget) {
     uint8_t req[3] = {0x22, (uint8_t)(did >> 8), (uint8_t)(did & 0xFF)};
     uint8_t buf[64];
     int len = obdIsoTp(reqId, rspId, req, 3, buf, sizeof(buf),
-                       activeTransport == TR_BLE ? 130 : 25);
+                       activeTransport == TR_BLE ? 550 : 25);
 
     // Truncated reply: retry once with a longer window. A DID that answers at all
     // is the find here, so dropping it over a lost frame would undercount the sweep
     // exactly the way a single ELM327 pass already does (FINDINGS).
     if (len == -3) len = obdIsoTp(reqId, rspId, req, 3, buf, sizeof(buf),
-                                  activeTransport == TR_BLE ? 260 : 50);
+                                  activeTransport == TR_BLE ? 900 : 50);
 
     if (len == -2) { scan.negatives++; continue; }
     if (len < 3) continue;

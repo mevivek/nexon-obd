@@ -212,29 +212,62 @@ static void test_batch_complete() {
   eq((int)L.map_, 40, "map decoded");           // 0x28
 }
 
-static void test_batch_retries_truncated() {
-  printf("pollBatch: first attempt truncated, retry succeeds\n");
+static void test_batch_retries_for_a_complete_reply() {
+  printf("pollBatch: first attempt truncated, retry completes it\n");
   resetBus();
   Live L;
   rx(0x7E8, {0x10, 0x0E, 0x41, 0x0C, 0x0A, 0xF0, 0x0D, 0x00});   // truncated attempt
   queueGoodBatch();                                              // retry answers fully
-  ok(pollBatch(L, B1, 6), "returns true after the retry");
-  eq((int)L.rpm, 700, "rpm decoded from the retry");
-  eq((int)L.coolant, 50, "coolant decoded from the retry");
+  ok(pollBatch(L, B1, 6), "returns true");
+  eq((int)L.rpm, 700, "rpm from the complete retry");
+  ok(!isnan(L.coolant), "coolant, present only in the complete reply, is decoded");
 }
 
-static void test_batch_discards_partial() {
-  printf("pollBatch: truncated twice\n");
+static void test_batch_salvages_verified_partial() {
+  printf("pollBatch: truncated twice, but the fragment verifies\n");
   resetBus();
   Live L;
+  // Both attempts stop after the first frame. Those six bytes are still a valid
+  // mode-01 message - 41, then 0C with two data bytes, then 0D with one - so the
+  // pairs that did arrive are provably correct and worth keeping. Discarding them
+  // is what left the BLE dashboard blank at a third of a hertz.
   rx(0x7E8, {0x10, 0x0E, 0x41, 0x0C, 0x0A, 0xF0, 0x0D, 0x00});
   rx(0x7E8, {0x10, 0x0E, 0x41, 0x0C, 0x0A, 0xF0, 0x0D, 0x00});
+  ok(pollBatch(L, B1, 6), "returns true on a verified fragment");
+  eq((int)L.rpm, 700, "the pid that arrived intact is applied");
+  eq((int)L.speed, 0, "and the next one");
+  // Everything past the cut is left alone rather than guessed at; the dashboard
+  // holds those fields at their previous reading.
+  ok(isnan(L.coolant), "pids past the cut are left untouched");
+  ok(isnan(L.load), "and so are the rest");
+}
+
+static void test_batch_rejects_misframed() {
+  printf("pollBatch: reply containing a pid we never asked for\n");
+  resetBus();
+  Live L;
+  // 0x99 was not in the request, so the bytes are not the message they claim to be
+  // and none of them can be trusted - not even the pair before the bad pid.
+  rx(0x7E8, {0x05, 0x41, 0x0C, 0x0A, 0xF0, 0x99, 0x55, 0x55});
+  rx(0x7E8, {0x05, 0x41, 0x0C, 0x0A, 0xF0, 0x99, 0x55, 0x55});
   ok(!pollBatch(L, B1, 6), "returns false");
-  // The point of the fix: half a batch is not applied. Previously rpm would have
-  // been set from the first frame while coolant stayed NAN, so the dashboard drew
-  // a live rpm next to five freshly blanked gauges.
-  ok(isnan(L.rpm), "rpm left untouched");
-  ok(isnan(L.coolant), "coolant left untouched");
+  ok(isnan(L.rpm), "nothing from a misframed reply is applied");
+}
+
+static void test_mode01_walk() {
+  printf("mode01Walk: verification\n");
+  static const uint8_t pids[2] = {0x0C, 0x05};
+  uint8_t good[] = {0x41, 0x0C, 0x0A, 0xF0, 0x05, 0x5A};
+  eq(mode01Walk(good, 6, pids, 2, nullptr), 2, "a complete reply verifies both pairs");
+
+  uint8_t cut[] = {0x41, 0x0C, 0x0A, 0xF0, 0x05};          // 0x05 has no data byte
+  eq(mode01Walk(cut, 5, pids, 2, nullptr), 1, "a value cut in half is not counted");
+
+  uint8_t alien[] = {0x41, 0x0C, 0x0A, 0xF0, 0x99, 0x01};  // 0x99 never requested
+  eq(mode01Walk(alien, 6, pids, 2, nullptr), -1, "an unrequested pid rejects the reply");
+
+  uint8_t wrongMode[] = {0x43, 0x0C, 0x0A, 0xF0};
+  eq(mode01Walk(wrongMode, 4, pids, 2, nullptr), -1, "a non-0x41 reply is rejected");
 }
 
 static void test_batch_silent_does_not_retry() {
@@ -284,9 +317,11 @@ int main() {
   test_ble_no_data();
   test_ble_negative();
 
+  test_mode01_walk();
   test_batch_complete();
-  test_batch_retries_truncated();
-  test_batch_discards_partial();
+  test_batch_retries_for_a_complete_reply();
+  test_batch_salvages_verified_partial();
+  test_batch_rejects_misframed();
   test_batch_silent_does_not_retry();
 
   test_pollall_partial_marks_ok();

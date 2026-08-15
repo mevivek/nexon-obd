@@ -38,8 +38,22 @@ but every request returns `NO DATA`. Forcing the protocol works first time:
 ```
 ATSP6      # CAN 11-bit 500k
 ATAT2      # adaptive timing, aggressive
-ATST FF    # max timeout
+ATST 64    # 100 x 4 ms = 400 ms
 ```
+
+### `ATST` must be shorter than the reader's own timeout
+
+`ATST` is how long the *adapter* waits for the ECU, and it has to be comfortably
+below however long the host waits for the adapter. Set the other way round — `ATST FF`
+is 255 × 4 ms = 1020 ms — the host gives up first and reads a buffer with no `>`
+prompt, which is a truncated reply by definition. Every such reply is then lost, even
+though the ECU answered perfectly well a moment later.
+
+On the firmware's BLE transport this showed up as a dashboard that was almost
+entirely blank at **0.3 Hz**: a 900 ms read window against a 1020 ms adapter timeout,
+so slow replies were cut off, discarded, and retried until the poll rate collapsed.
+`ATST 64` (400 ms) against a 1200 ms read window leaves the adapter room to answer —
+even if the answer is `NO DATA` — before the host stops listening.
 
 ### `ATCRA` does not filter
 
