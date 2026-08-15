@@ -24,3 +24,7 @@ desktop.ini
 
 # Local toolchain installed by firmware/build.sh
 firmware/.toolchain/
+
+# Python bytecode, created when the test tooling imports extract.py
+__pycache__/
+*.pyc
