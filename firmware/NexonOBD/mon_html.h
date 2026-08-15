@@ -36,7 +36,7 @@ font-variant-numeric:tabular-nums}
 <div class="bar"><h1>Monitors</h1>
 <span class="sub">v)rawliteral" FW_VERSION R"rawliteral( &middot; mode 06</span>
 <div class="status"><span class="dot" id="dot"></span><span id="state">reading&hellip;</span></div></div>
-<nav><a href="/">Live</a><a class="on" href="/monitors">Monitors</a><a href="/scan">Scanner</a><a href="/update">Firmware</a></nav>
+<nav><a href="/">Live</a><a class="on" href="/monitors">Monitors</a><a href="/trips">Trips</a><a href="/scan">Scanner</a><a href="/update">Firmware</a></nav>
 </header>
 
 <div class="wrap">

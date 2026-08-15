@@ -32,6 +32,7 @@ it says so.
 | `/update` | Upload a new `.bin` over Wi-Fi |
 | `/dtc` | Stored + pending fault codes as JSON |
 | `/data` | Current sample as JSON, plus firmware version and active transport |
+| `/trips` | Per-drive CSV logs — list, download, delete |
 | `/history` | The stored trend buffer as JSON |
 
 The header shows the running firmware version and which transport is actually live
@@ -158,6 +159,41 @@ Scanning is time-boxed to 250 ms per turn rather than a fixed identifier count. 
 count behaves wildly differently per transport — 40 identifiers is about a second on
 CAN but roughly 22 s over BLE, during which nothing answers the web server and the
 board appears hung.
+
+### Trip logs
+
+A CSV row a second while the ECU is answering, written to the 1.5 MB filesystem
+partition. Twenty-two columns, wall-clock time and uptime on every row, and empty
+cells rather than zeros where a value was not read — so a gap is a gap, not a
+reading of nought.
+
+Roughly half a megabyte an hour, so the partition holds a few hours and the oldest
+trip is deleted automatically when space runs short. LittleFS rather than SPIFFS:
+the board loses power the instant the ignition goes off, mid-write as often as not,
+and LittleFS is built to survive exactly that.
+
+The clock comes from whichever page you open, so a drive that starts before you open
+one has an unset clock for its first rows. Each file's header records whether the
+clock was set rather than implying a timestamp it does not have.
+
+### Scans survive being switched off
+
+A sweep is tens of thousands of requests — the better part of a day over BLE — so it
+has to outlast the car being switched off. Position goes to NVS as it runs, hits are
+appended to the filesystem the moment they are found, and an interrupted sweep
+resumes on the next boot rather than starting over.
+
+It also stops sweeping when the ECU stops answering. **A timeout and a negative
+response mean opposite things:** a negative response is the ECU saying "no such
+identifier", which is a result worth recording; a timeout is no answer at all. After
+25 consecutive timeouts the sweep holds its position and probes every few seconds
+until the car answers again.
+
+Without that, switching the ignition off mid-sweep would record thousands of
+identifiers as "no response" — turning an unswept range into one that looks swept
+and empty. That is the same class of silent wrong answer as the `ATCRA` bug in
+[FINDINGS](docs/FINDINGS.md), and it matters here because the whole value of the
+sweep is its negative result.
 
 ### Trend history
 

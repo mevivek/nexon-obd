@@ -370,10 +370,12 @@ async function suiteSeed(label, file) {
 async function suiteScanControls() {
   console.log('\nDID scanner (scan_html.h) — controls follow the scan');
   const idle = { running: false, cur: '0000', tried: 0, total: 65536, negatives: 0,
-                 elapsed: 0, hits: [] };
+                 elapsed: 0, hits: [], stalled: false };
   const busy = { running: true, cur: 'F1A4', tried: 420, total: 65536, negatives: 415,
-                 elapsed: 37, hits: [{ did: 'F18A', ecu: 'ECM', len: 13,
-                                       hex: '424F534348', ascii: 'BOSCH' }] };
+                 elapsed: 37, stalled: false,
+                 hits: [{ did: 'F18A', ecu: 'ECM', len: 13,
+                          hex: '424F534348', ascii: 'BOSCH' }] };
+  const stalled = { ...busy, stalled: true };
 
   const m = load('../NexonOBD/scan_html.h', { exports: '{ poll }' });
 
@@ -401,8 +403,19 @@ async function suiteScanControls() {
   ok(m.interval(), 'the page schedules its own polling');
   eq(m.interval().ms, 1000, 'and polls quickly while a scan runs');
 
+  // A stalled sweep is neither scanning nor idle - it is alive and deliberately not
+  // progressing, because the ECU went quiet. Reporting "scanning" would imply it is
+  // still sweeping, and "idle" would suggest it had given up.
+  m.queue.push(stalled);
+  await m.poll();
+  eq(m.el('state').textContent, 'waiting for ECU', 'stalled reads as waiting');
+  eq(m.el('stall').style.display, 'block', 'and explains itself');
+  eq(m.el('go').disabled, true, 'Start stays disabled - the sweep has not ended');
+  eq(m.el('stop').disabled, false, 'and Stop is still how you end it');
+
   m.queue.push(idle);
   await m.poll();
+  eq(m.el('stall').style.display, 'none', 'the notice clears when it is not stalled');
   eq(m.el('go').disabled, false, 'finishing re-enables Start');
   eq(m.el('ecu').disabled, false, 'and unlocks the inputs');
   eq(m.interval().ms, 4000, 'and backs the polling off when idle');

@@ -23,10 +23,12 @@
 #include "version.h"
 #include "history.h"
 #include "clock.h"
+#include "triplog.h"
 #include <Update.h>
 #include "dashboard_html.h"
 #include "scan_html.h"
 #include "mon_html.h"
+#include "trip_html.h"
 #include "ota_html.h"
 
 // Two ways to reach the car, picked at runtime:
@@ -542,11 +544,27 @@ static uint8_t monParse(const uint8_t *buf, int len, MonRec *out, uint8_t cap) {
 
 struct ScanState {
   bool     running = false;
+  bool     stalled = false;      // ECU stopped answering; holding position
   uint8_t  ecu = 0;
   uint32_t cur = 0, from = 0, to = 0xFFFF;
   uint32_t tried = 0, negatives = 0;
   uint32_t startedMs = 0;
 } scan;
+
+// A sweep is tens of thousands of requests - the better part of a day over BLE - so
+// it has to survive the car being switched off, and it must not keep sweeping when
+// the ECU has stopped answering.
+//
+// A timeout and a negative response mean opposite things here. A negative response
+// is the ECU saying "no such identifier", which is a result worth recording. A
+// timeout is no answer at all, and a run of them means the ignition went off. Those
+// identifiers were never actually asked, and writing them down as "no response"
+// would turn an unswept range into one that looks swept and empty - the same class
+// of silent wrong answer as the ATCRA bug in FINDINGS.
+static const uint16_t SCAN_STALL_AFTER = 25;    // consecutive timeouts
+static const uint32_t SCAN_PROBE_MS    = 3000;  // how often to test a stalled bus
+static uint16_t scanSilent = 0;
+static uint32_t scanProbeAt = 0;
 
 // The hit list used to be a std::vector on the heap, capped at 3000 entries - about
 // 84 KB of a 320 KB heap, competing with the web server and the TLS-free but still
@@ -574,6 +592,78 @@ static void scanHitsBegin() {
                 scanHitsPsram ? "psram" : "heap");
 }
 
+static Preferences scanPrefs;
+static const char *SCAN_HITS_FILE = "/scanhits.csv";
+
+// Position is tiny and goes to NVS. Hits go to the filesystem as they are found, so
+// they are durable the moment they exist rather than at the end of a sweep that may
+// never come.
+static void scanSaveState() {
+  if (!scanPrefs.begin("nexonscan", false)) return;
+  scanPrefs.putBool("run", scan.running);
+  scanPrefs.putUChar("ecu", scan.ecu);
+  scanPrefs.putULong("from", scan.from);
+  scanPrefs.putULong("to", scan.to);
+  scanPrefs.putULong("cur", scan.cur);
+  scanPrefs.putULong("tried", scan.tried);
+  scanPrefs.putULong("neg", scan.negatives);
+  scanPrefs.end();
+}
+
+static void scanAppendHit(const Hit &h) {
+  if (!tripFsUp) return;
+  File f = LittleFS.open(SCAN_HITS_FILE, FILE_APPEND);
+  if (!f) return;
+  f.printf("%c,%04X,%u,", h.ecu ? 'T' : 'E', h.did, h.len);
+  for (uint8_t k = 0; k < h.len; k++) f.printf("%02X", h.data[k]);
+  f.print('\n');
+  f.close();
+}
+
+static void scanLoadHits() {
+  if (!tripFsUp || !LittleFS.exists(SCAN_HITS_FILE)) return;
+  File f = LittleFS.open(SCAN_HITS_FILE, FILE_READ);
+  if (!f) return;
+  while (f.available() && scanHitN < scanHitCap) {
+    String line = f.readStringUntil('\n');
+    if (line.length() < 6) continue;
+    Hit h;
+    h.ecu = (line[0] == 'T') ? 1 : 0;
+    h.did = (uint16_t)strtoul(line.substring(2, 6).c_str(), nullptr, 16);
+    int c2 = line.indexOf(',', 7);
+    if (c2 < 0) continue;
+    String hex = line.substring(c2 + 1);
+    h.len = (uint8_t)min((size_t)(hex.length() / 2), sizeof(h.data));
+    for (uint8_t k = 0; k < h.len; k++)
+      h.data[k] = (uint8_t)strtoul(hex.substring(k * 2, k * 2 + 2).c_str(), nullptr, 16);
+    scanHits[scanHitN++] = h;
+  }
+  f.close();
+  Serial.printf("[scan] %u hits restored from flash\n", scanHitN);
+}
+
+static void scanBegin() {
+  if (!scanPrefs.begin("nexonscan", true)) return;
+  bool wasRunning = scanPrefs.getBool("run", false);
+  scan.ecu       = scanPrefs.getUChar("ecu", 0);
+  scan.from      = scanPrefs.getULong("from", 0);
+  scan.to        = scanPrefs.getULong("to", 0xFFFF);
+  scan.cur       = scanPrefs.getULong("cur", 0);
+  scan.tried     = scanPrefs.getULong("tried", 0);
+  scan.negatives = scanPrefs.getULong("neg", 0);
+  scanPrefs.end();
+  if (!wasRunning || scan.cur > scan.to) { scan.running = false; return; }
+
+  // Resume rather than wait to be asked. A sweep is started deliberately and takes
+  // hours; having it silently abandon itself every time the car is switched off
+  // would make finishing one impossible. The Live page shows it is running.
+  scanLoadHits();
+  scan.running = true;
+  scan.startedMs = millis();
+  Serial.printf("[scan] resuming %s at %04X (%lu already tried)\n",
+                scan.ecu ? "TCM" : "ECM", (unsigned)scan.cur, (unsigned long)scan.tried);
+}
+
 // Time-boxed rather than counted. A fixed count of identifiers is a wildly
 // different amount of wall-clock per transport - 40 DIDs is about a second on CAN
 // but roughly 22 s over BLE, during which nothing answers the web server and the
@@ -582,6 +672,22 @@ static void scanStep(uint32_t budgetMs) {
   uint32_t reqId = scan.ecu ? ID_TCM_REQ : ID_ECM_REQ;
   uint32_t rspId = scan.ecu ? ID_TCM_RSP : ID_ECM_RSP;
   uint32_t started = millis();
+
+  // Stalled means the ECU stopped answering. Hold position and probe occasionally
+  // rather than sweeping thousands of identifiers that were never really asked.
+  if (scan.stalled) {
+    if (millis() - scanProbeAt < SCAN_PROBE_MS) return;
+    scanProbeAt = millis();
+    uint8_t probe[2] = {0x01, 0x00};
+    uint8_t pbuf[16];
+    if (obdIsoTp(reqId, rspId, probe, 2, pbuf, sizeof(pbuf),
+                 activeTransport == TR_BLE ? 1200 : 400) > 0) {
+      scan.stalled = false;
+      scanSilent = 0;
+      Serial.println("[scan] ECU answering again - resuming");
+    }
+    return;
+  }
 
   while (scan.running && millis() - started < budgetMs) {
     if (scan.cur > scan.to) { scan.running = false; break; }
@@ -600,7 +706,23 @@ static void scanStep(uint32_t budgetMs) {
     if (len == -3) len = obdIsoTp(reqId, rspId, req, 3, buf, sizeof(buf),
                                   activeTransport == TR_BLE ? 900 : 50);
 
-    if (len == -2) { scan.negatives++; continue; }
+    // A negative response is the ECU answering; a timeout is not. Only the former
+    // counts as having swept this identifier.
+    if (len == -2) { scanSilent = 0; scan.negatives++; continue; }
+    if (len == -1) {
+      if (++scanSilent >= SCAN_STALL_AFTER) {
+        scan.cur = did;                 // un-consume it: it was never really asked
+        scan.tried--;
+        scan.stalled = true;
+        scanProbeAt = millis();
+        scanSaveState();
+        Serial.printf("[scan] %u silent in a row at %04X - stalling, not recording\n",
+                      scanSilent, (unsigned)did);
+        return;
+      }
+      continue;
+    }
+    scanSilent = 0;
     if (len < 3) continue;
     if (buf[0] != 0x62) continue;
     if (((buf[1] << 8) | buf[2]) != did) continue;
@@ -611,6 +733,7 @@ static void scanStep(uint32_t budgetMs) {
     h.len = (uint8_t)min((size_t)(len - 3), sizeof(h.data));
     memcpy(h.data, &buf[3], h.len);
     if (scanHitN < scanHitCap) scanHits[scanHitN++] = h;
+    scanAppendHit(h);                   // durable the moment it is found
   }
 }
 
@@ -886,12 +1009,18 @@ static void handleScanStart() {
   scan.tried     = 0;
   scan.negatives = 0;
   scan.startedMs = millis();
+  scan.stalled   = false;
+  scanSilent     = 0;
   scanHitN = 0;
+  if (tripFsUp) LittleFS.remove(SCAN_HITS_FILE);   // a new sweep starts a new record
+  scanSaveState();
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
 static void handleScanStop() {
   scan.running = false;
+  scan.stalled = false;
+  scanSaveState();
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -915,6 +1044,8 @@ static void handleScanStatus() {
   head += ",\"negatives\":"; head += scan.negatives;
   head += ",\"elapsed\":";   head += (millis() - scan.startedMs) / 1000;
   head += ",\"cap\":";       head += scanHitCap;
+  head += ",\"stalled\":";   head += scan.stalled ? "true" : "false";
+  head += ",\"resumed\":";   head += scan.tried > scanHitN ? "true" : "false";
   head += ",\"hits\":[";
   server.sendContent(head);
 
@@ -1005,6 +1136,60 @@ static void handleMonitors() {
   server.send(200, "application/json", s);
 }
 
+static void handleTripList() {
+  String s = "{\"fs\":";
+  s += tripFsUp ? "true" : "false";
+  s += ",\"used\":";  s += (uint32_t)(tripFsUp ? LittleFS.usedBytes() : 0);
+  s += ",\"total\":"; s += (uint32_t)(tripFsUp ? LittleFS.totalBytes() : 0);
+  s += ",\"live\":\"";
+  s += tripName[0] ? tripName : "";
+  s += "\",\"trips\":[";
+  if (tripFsUp) {
+    File dir = LittleFS.open("/");
+    bool first = true;
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+      if (!f.name() || !strstr(f.name(), ".csv")) continue;
+      if (!first) s += ",";
+      first = false;
+      s += "{\"name\":\"";
+      if (f.name()[0] != '/') s += "/";
+      s += f.name();
+      s += "\",\"size\":";
+      s += (uint32_t)f.size();
+      s += "}";
+    }
+    dir.close();
+  }
+  s += "]}";
+  server.send(200, "application/json", s);
+}
+
+// Only files this firmware wrote are servable, and only from the root - the name
+// comes from a query string, so it is checked rather than trusted.
+static bool tripNameOk(const String &n) {
+  if (n.length() < 6 || n.length() > 20) return false;
+  if (n[0] != '/' || n.indexOf("..") >= 0 || n.lastIndexOf('/') != 0) return false;
+  return n.endsWith(".csv");
+}
+
+static void handleTripGet() {
+  String n = server.arg("f");
+  if (!tripNameOk(n) || !LittleFS.exists(n)) { server.send(404, "text/plain", "no such trip"); return; }
+  File f = LittleFS.open(n, FILE_READ);
+  if (!f) { server.send(500, "text/plain", "open failed"); return; }
+  server.sendHeader("Content-Disposition", "attachment; filename=\"" + n.substring(1) + "\"");
+  server.streamFile(f, "text/csv");
+  f.close();
+}
+
+static void handleTripDelete() {
+  String n = server.arg("f");
+  if (!tripNameOk(n)) { server.send(400, "application/json", "{\"ok\":false}"); return; }
+  if (tripName[0] && n == tripName) tripClose();     // never delete the open file
+  bool ok = LittleFS.remove(n);
+  server.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
 // Trend history, oldest first. Chunked because the full hour is ~14 KB of JSON and
 // assembling that in one String risks the heap on a board this size.
 static void handleHistory() {
@@ -1049,6 +1234,7 @@ static void handleOtaUpload() {
   HTTPUpload &up = server.upload();
   if (up.status == UPLOAD_FILE_START) {
     scan.running = false;                       // never flash mid-scan
+    tripClose();                                // and land the log before rebooting
     Serial.printf("[ota] start: %s\n", up.filename.c_str());
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
   } else if (up.status == UPLOAD_FILE_WRITE) {
@@ -1133,6 +1319,10 @@ void setup() {
   server.on("/history",     handleHistory);
   server.on("/mon",         handleMonitors);
   server.on("/time",        handleTime);
+  server.on("/trips/list",  handleTripList);
+  server.on("/trips/get",   handleTripGet);
+  server.on("/trips/del",   handleTripDelete);
+  server.on("/trips",       []() { server.send_P(200, "text/html", TRIP_HTML); });
   server.on("/monitors",    []() { server.send_P(200, "text/html", MON_HTML); });
   server.on("/scan/start",  handleScanStart);
   server.on("/scan/stop",   handleScanStop);
@@ -1140,6 +1330,8 @@ void setup() {
   server.begin();
 
   scanHitsBegin();
+  tripBegin();
+  scanBegin();          // resumes an interrupted sweep, needs the filesystem up
   histBegin();
   lastEcuOkMs = millis();
   chooseTransport();
@@ -1152,8 +1344,10 @@ void loop() {
   heartbeat(millis() - lastEcuOkMs < 3000, scan.running);
 
   if (scan.running) {
+    if (!scan.stalled) lastEcuOkMs = millis();   // a stalled scan is not activity
     scanStep(250);                // then hand the web server a turn
-    lastEcuOkMs = millis();       // scanning counts as activity
+    static uint32_t scanCkpt = 0;
+    if (millis() - scanCkpt > 5000) { scanCkpt = millis(); scanSaveState(); }
   }
 
   // Periodic status line. setup() output is lost because the USB CDC
@@ -1195,6 +1389,7 @@ void loop() {
   if (everSawEcu && millis() - lastEcuOkMs > IDLE_SLEEP_MS) {
     Serial.println("[pwr] idle - deep sleep");
     histSave();
+    tripClose();
     twai_stop();
     twai_driver_uninstall();
     esp_sleep_enable_timer_wakeup(SLEEP_WAKE_US);

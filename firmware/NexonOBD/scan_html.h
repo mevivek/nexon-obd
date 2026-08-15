@@ -26,7 +26,7 @@ R"rawliteral(
 <div class="bar"><h1>DID Scanner</h1>
 <span class="sub">v)rawliteral" FW_VERSION R"rawliteral( &middot; service 0x22</span>
 <div class="status"><span class="dot" id="dot"></span><span id="state">idle</span></div></div>
-<nav><a href="/">Live</a><a href="/monitors">Monitors</a><a class="on" href="/scan">Scanner</a><a href="/update">Firmware</a></nav>
+<nav><a href="/">Live</a><a href="/monitors">Monitors</a><a href="/trips">Trips</a><a class="on" href="/scan">Scanner</a><a href="/update">Firmware</a></nav>
 </header>
 
 <div class="wrap">
@@ -45,6 +45,10 @@ R"rawliteral(
 <button id="csv" class="ghost">CSV</button>
 </div>
 <div class="bar2"><i id="prog"></i></div>
+<div class="hint" id="stall" style="display:none;color:var(--warning)">
+The ECU has stopped answering &mdash; ignition off, most likely. The sweep is holding
+its place rather than recording identifiers it never really asked, and picks up again
+on its own when the car answers. Progress is saved, so switching off is safe.</div>
 <div class="meta">
 <span>at <b id="cur">&mdash;</b></span>
 <span>tried <b id="tried">0</b></span>
@@ -57,8 +61,10 @@ R"rawliteral(
 <div class="hint">A scan keeps running if you leave this page or close the browser &mdash;
 it is driven by the board, not by this tab. The scanner takes most of the bus, so
 live dashboard values keep updating but slowly. Use Stop to end it &mdash; starting a
-new scan discards the identifiers found so far, and nothing is saved across a
-restart, so export the CSV before you stop.<br><br>
+new scan discards the identifiers found so far.<br><br>
+Progress and hits are saved as the sweep runs, so it resumes where it left off after
+the car is switched off or the board is reflashed &mdash; a full pass no longer has to
+happen in one sitting.<br><br>
 Service 0x22 is a read. This page never sends 0x2E (write), 0x31 (routine),
 0x11 (reset) or 0x10 (session change). A full 0000&ndash;FFFF pass is 65,536 requests.
 Run it parked.</div>
@@ -99,8 +105,12 @@ async function poll(){
  try{
   const j=await(await fetch('/scan/status',{cache:'no-store'})).json();
   last=j.hits||[];
-  $('state').textContent=j.running?'scanning':'idle';
-  dot(j.running?'live':'');
+  // Stalled is not idle and not scanning: the sweep is alive and holding position
+  // because the ECU stopped answering. Saying "scanning" would imply progress that
+  // is deliberately not happening.
+  $('state').textContent=j.stalled?'waiting for ECU':(j.running?'scanning':'idle');
+  dot(j.stalled?'stale':(j.running?'live':''));
+  $('stall').style.display=j.stalled?'block':'none';
   $('cur').textContent=j.cur;$('tried').textContent=j.tried;
   $('nhits').textContent=last.length;$('neg').textContent=j.negatives;
   $('el').textContent=j.elapsed;
