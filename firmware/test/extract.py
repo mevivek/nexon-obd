@@ -10,12 +10,13 @@ import sys
 import pathlib
 
 WANT = ["hexNib", "canIsoTp", "bleIsoTp", "obdIsoTp",
-        "pidLen", "applyPid", "mode01Walk", "pollBatch", "sampleBatchPids", "sampleStaleMs", "sampleMerge"]
+        "pidLen", "applyPid", "mode01Walk", "pollBatch", "sampleBatchPids", "sampleStaleMs", "sampleMerge", "pickBackoff"]
 
 # File-scope data the extracted functions reference. Pulled verbatim so the tests
 # exercise the real PID lists rather than a copy that can drift.
 WANT_VARS = ["PID_B1", "PID_B2", "PID_B3", "SAMPLE_ORDER",
-             "SAMPLE_STALE_MIN_MS", "SAMPLE_STALE_MAX_MS"]
+             "SAMPLE_STALE_MIN_MS", "SAMPLE_STALE_MAX_MS",
+             "PICK_MIN_MS", "PICK_MAX_MS"]
 
 
 def extract(src: str, name: str) -> str:

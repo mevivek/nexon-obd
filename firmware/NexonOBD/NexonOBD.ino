@@ -550,6 +550,24 @@ static Live     g_live;
 static uint32_t g_liveMs = 0;
 static uint32_t g_seq    = 0;      // increments per published sample
 
+// Transport re-pick backoff.
+//
+// The adapter is powered from the OBD port and stays alive with the car switched
+// off; the board is on the accessory socket and does not. So on every start the
+// board comes up against an ELM327 that may still be holding the BLE link to a
+// device that vanished without ever disconnecting, and the first connect can fail
+// through no fault of the wiring. A flat retry interval meant a dead dashboard for
+// that whole interval at every ignition - so start impatient and ease off.
+static const uint32_t PICK_MIN_MS = 2000;
+static const uint32_t PICK_MAX_MS = 20000;
+
+static uint32_t pickBackoff(uint32_t cur) {
+  uint32_t next = cur ? cur * 2 : PICK_MIN_MS;
+  return next > PICK_MAX_MS ? PICK_MAX_MS : next;
+}
+
+static uint32_t pickWaitMs = PICK_MIN_MS;
+
 // One cached reply per batch, with the moment it arrived.
 static uint8_t  sampBuf[3][40];
 static uint8_t  sampLen[3]  = {0, 0, 0};
@@ -943,12 +961,16 @@ void loop() {
                   (unsigned long)sampleStaleMs(sampCycleMs));
   }
 
-  // Re-pick the transport periodically while nothing is answering: covers the
-  // ELM327 dropping its BLE link, or a transceiver being wired in later.
+  // Re-pick the transport while nothing is answering: covers the ELM327 dropping
+  // its BLE link, a stale link held over from before the board lost power, or a
+  // transceiver being wired in later.
   static uint32_t lastPick = 0;
-  if (!scan.running && millis() - lastEcuOkMs > 15000 && millis() - lastPick > 20000) {
+  if (!scan.running && millis() - lastEcuOkMs > 3000 && millis() - lastPick > pickWaitMs) {
     lastPick = millis();
+    Serial.printf("[obd] no data for %lums - re-picking transport (next in %lums)\n",
+                  (unsigned long)(millis() - lastEcuOkMs), (unsigned long)pickWaitMs);
     chooseTransport();
+    pickWaitMs = pickBackoff(pickWaitMs);
   }
 
   // Battery guard: nothing from the car for a while means the ignition is off.

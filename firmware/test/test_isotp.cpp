@@ -281,6 +281,26 @@ static void test_batch_silent_does_not_retry() {
   ok(g_millis - t0 < 800, "did not burn a second timeout");
 }
 
+// ------------------------------------------------------------------ reconnect
+
+static void test_pick_backoff() {
+  printf("pickBackoff: impatient first, then eases off\n");
+  // The adapter is powered from the OBD port and outlives the board, which runs off
+  // the accessory socket. Every start therefore meets an ELM327 that may still be
+  // holding the link to a device that vanished without disconnecting, so the first
+  // connect can fail for reasons that will clear on their own in seconds. Waiting a
+  // flat twenty seconds to find that out meant a dead dashboard at every ignition.
+  eq((int)pickBackoff(0), (int)PICK_MIN_MS, "starts at the minimum");
+  eq((int)pickBackoff(PICK_MIN_MS), 4000, "then doubles");
+  eq((int)pickBackoff(4000), 8000, "and again");
+  eq((int)pickBackoff(8000), 16000, "and again");
+  // Doubling has to stop somewhere, or a car left in accessory position would end up
+  // checking once an hour and take that long to notice the engine had started.
+  eq((int)pickBackoff(16000), (int)PICK_MAX_MS, "capping at the maximum");
+  eq((int)pickBackoff(PICK_MAX_MS), (int)PICK_MAX_MS, "and staying there");
+  ok(PICK_MIN_MS < 5000, "the first retry is quick enough to feel immediate");
+}
+
 // ------------------------------------------------------------------ sampler
 
 static void test_sample_order_favours_live_values() {
@@ -403,6 +423,7 @@ int main() {
   test_batch_rejects_misframed();
   test_batch_silent_does_not_retry();
 
+  test_pick_backoff();
   test_sample_order_favours_live_values();
   test_stale_window_tracks_the_cycle();
   test_sample_merge_combines_batches();

@@ -123,10 +123,12 @@ The board keeps one hour of RPM, speed, boost and coolant at 6-second resolution
 serves it at `/history`, so the sparklines have shape the moment the page loads
 instead of starting flat.
 
-It survives restarts, which matters more than it sounds: OBD pin 16 is permanently
-live, so the board never really power-cycles — it deep-sleeps after 10 minutes idle
-and wakes every 30 s, running `setup()` each time. History in ordinary RAM would be
-wiped every time you got back in the car.
+It survives restarts, which matters more than it sounds — the board restarts
+constantly in normal use, so history in ordinary RAM would be wiped every time you
+got back in the car. How it restarts depends on how it is powered: from the
+accessory socket the power is simply cut when the car goes off; from the
+permanently-live OBD pin 16 it deep-sleeps after 10 idle minutes and wakes every
+30 s, running `setup()` each time.
 
 | Store | Survives | Written |
 |---|---|---|
@@ -199,8 +201,15 @@ Power from OBD pin 16 (+12 V) and pin 4/5 (GND) into the buck, 5 V out to the XI
 > **Remove the 120 Ω termination resistor** on the transceiver breakout. The vehicle bus
 > is already terminated at both ends; a third terminator causes bus errors.
 
-> **OBD pin 16 is permanently live.** The firmware deep-sleeps after 10 minutes with no
-> ECU response, but unplug it if the car is parked for days.
+> **OBD pin 16 is permanently live**, so anything plugged into the OBD port draws
+> from the battery whether the car is running or not. That includes a BLE ELM327
+> adapter — clones typically pull 20–50 mA, roughly 0.5–1 Ah a day — so unplug the
+> adapter if the car is parked for more than a few days. This applies to the adapter
+> even when the board itself is powered from the accessory socket and switches off
+> with the ignition; the two are independent.
+>
+> The board deep-sleeps after 10 minutes with no ECU response, which protects the
+> battery only if the board is itself wired to a permanently-live supply.
 
 ---
 
@@ -329,8 +338,16 @@ here is from the unit this was developed against.
 Both transports implement the same contract — request bytes in, reassembled ISO-TP
 payload out — so mode 01, mode 03 and UDS `0x22` are written once and work on either.
 
-`chooseTransport()` prefers CAN when the transceiver answers, else falls back to BLE, and
-re-evaluates every 20 s while the ECU is silent.
+`chooseTransport()` prefers CAN when the transceiver answers, else falls back to BLE.
+While the ECU is silent it re-evaluates on a backoff — 2 s, then 4, 8, 16, settling
+at 20 — resetting to impatient as soon as data arrives.
+
+That matters when the adapter outlives the board, which is the usual split: the OBD
+port is always live but an accessory-socket supply is not. Every start then meets an
+ELM327 that may still be holding the BLE link to a board that vanished without
+disconnecting, so the first connect can fail for a reason that clears itself within
+seconds. A flat retry interval meant a dead dashboard for that whole interval at
+every ignition.
 
 ---
 
