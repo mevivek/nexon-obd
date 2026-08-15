@@ -19,12 +19,19 @@
 #include <vector>
 #include "driver/twai.h"
 #include "obd_types.h"
+#include "bus_yield.h"
 #include "elm_ble.h"
 #include "version.h"
 #include "history.h"
+#include "clock.h"
+#include "didwatch.h"
+#include "triplog.h"
 #include <Update.h>
 #include "dashboard_html.h"
 #include "scan_html.h"
+#include "mon_html.h"
+#include "trip_html.h"
+#include "watch_html.h"
 #include "ota_html.h"
 
 // Two ways to reach the car, picked at runtime:
@@ -78,6 +85,34 @@ static void heartbeat(bool ecuOk, bool scanning) {
 }
 
 WebServer server(80);
+
+// ---------------------------------------------------------------- HTTP fairness
+
+// Set while inside a request handler. WebServer keeps a single current client, so
+// re-entering handleClient() from within a handler would corrupt it. handleDtc is
+// the one handler that waits on the bus, and it therefore does not yield - which is
+// why its timeouts are kept short.
+static bool g_inHandler = false;
+
+// Set for the duration of one ISO-TP exchange. A handler reached from webYield() is
+// running underneath a half-finished reassembly, so it must not start a second
+// exchange on top of it.
+static bool g_busBusy = false;
+
+static void serveHttp() {
+  g_inHandler = true;
+  server.handleClient();
+  g_inHandler = false;
+}
+
+// Called from the transports' wait loops - see bus_yield.h for why the time is
+// given back to the response deadline.
+uint32_t webYield() {
+  if (g_inHandler) return 0;
+  uint32_t t0 = millis();
+  serveHttp();
+  return millis() - t0;
+}
 
 // ---------------------------------------------------------------- CAN / ISO-TP
 
@@ -143,10 +178,13 @@ static int canIsoTp(uint32_t reqId, uint32_t rspId,
   bool multi = false;
   uint8_t nextSeq = 1;
   uint32_t deadline = millis() + timeoutMs;
+  uint32_t extended = 0;
 
   while ((int32_t)(deadline - millis()) > 0) {
     twai_message_t m;
-    if (twai_receive(&m, pdMS_TO_TICKS(5)) != ESP_OK) continue;
+    // Nothing on the bus this instant: serve any waiting HTTP request rather than
+    // spinning, and give the deadline back the time that took.
+    if (twai_receive(&m, pdMS_TO_TICKS(5)) != ESP_OK) { busWaitYield(deadline, extended); continue; }
     if (m.identifier != rspId) continue;
 
     uint8_t pci = m.data[0] >> 4;
@@ -295,9 +333,15 @@ static int obdIsoTp(uint32_t reqId, uint32_t rspId,
                     const uint8_t *payload, uint8_t plen,
                     uint8_t *out, size_t outCap, uint32_t timeoutMs,
                     int *partial = nullptr) {
-  if (activeTransport == TR_BLE)
-    return bleIsoTp(reqId, rspId, payload, plen, out, outCap, timeoutMs, partial);
-  return canIsoTp(reqId, rspId, payload, plen, out, outCap, timeoutMs, partial);
+  // One exchange at a time. The wait loops below serve HTTP, so a handler can run
+  // underneath a half-finished reassembly; a second request issued from there would
+  // interleave its frames with ours and corrupt both.
+  g_busBusy = true;
+  int r = (activeTransport == TR_BLE)
+        ? bleIsoTp(reqId, rspId, payload, plen, out, outCap, timeoutMs, partial)
+        : canIsoTp(reqId, rspId, payload, plen, out, outCap, timeoutMs, partial);
+  g_busBusy = false;
+  return r;
 }
 
 // ---------------------------------------------------------------- mode 01
@@ -305,7 +349,8 @@ static int obdIsoTp(uint32_t reqId, uint32_t rspId,
 // Data-field byte count per SAE J1979 PID.
 static uint8_t pidLen(uint8_t pid) {
   switch (pid) {
-    case 0x0C: case 0x1F: case 0x3C: case 0x42: case 0x5E: return 2;
+    case 0x0C: case 0x1F: case 0x3C: case 0x42: case 0x5E:
+    case 0x43: case 0x63: return 2;
     case 0x34: return 4;
     default:   return 1;
   }
@@ -333,6 +378,18 @@ static void applyPid(Live &L, uint8_t pid, const uint8_t *d) {
     case 0x46: L.ambient  = A - 40;              break;
     case 0x5C: L.oil      = A - 40;              break;
     case 0x5E: L.fuelRate = (256 * A + B) / 20.0f; break;
+    // Driver demand -> ECU decision -> delivered torque. Scalings are the J1979
+    // ones; they have not been checked against this car, which is what the torque
+    // question in FINDINGS is about. A wrong *length* would be caught by
+    // mode01Walk, but a wrong scaling would not, so treat the numbers as
+    // provisional until they have been watched under load.
+    case 0x43: L.absLoad     = (256 * A + B) * 100.0f / 255.0f; break;
+    case 0x49: L.pedalD      = A * 100.0f / 255.0f; break;
+    case 0x4A: L.pedalE      = A * 100.0f / 255.0f; break;
+    case 0x4C: L.cmdThrottle = A * 100.0f / 255.0f; break;
+    case 0x61: L.torqDem     = A - 125.0f;          break;
+    case 0x62: L.torqAct     = A - 125.0f;          break;
+    case 0x63: L.torqRef     = 256 * A + B;         break;
   }
 }
 
@@ -420,11 +477,19 @@ static bool pollBatch(Live &L, const uint8_t *pids, uint8_t n,
 }
 
 static float g_baro = NAN;
+// Engine reference torque (PID 63) is a constant for the engine, and PIDs 61/62
+// report torque as a percentage of it - so it is read once and cached, like baro,
+// rather than spending a slot in every rotation.
+static float g_torqRef = NAN;
 
 // The three batched mode-01 requests that make up one sample.
 static const uint8_t PID_B1[6] = {0x0C, 0x0D, 0x0B, 0x11, 0x04, 0x05};
 static const uint8_t PID_B2[6] = {0x5C, 0x0F, 0x42, 0x06, 0x07, 0x5E};
 static const uint8_t PID_B3[6] = {0x34, 0x3C, 0x0E, 0x1F, 0x46, 0x2F};
+// Driver demand and the engine's answer to it. Grouped together and polled at b1's
+// cadence because these are the fastest-moving values on the car - a pedal input
+// sampled every few seconds tells you nothing.
+static const uint8_t PID_B4[6] = {0x49, 0x4A, 0x4C, 0x61, 0x62, 0x43};
 
 // Which batch to poll on each turn.
 //
@@ -434,7 +499,9 @@ static const uint8_t PID_B3[6] = {0x34, 0x3C, 0x0E, 0x1F, 0x46, 0x2F};
 // justify equal billing, and on BLE every batch is a full ELM round trip, so equal
 // billing is exactly what was holding the interesting numbers to a third of the
 // achievable rate.
-static const uint8_t SAMPLE_ORDER[4] = {0, 1, 0, 2};
+// b1 and b4 are the fast pair - what the car is doing and what the driver asked for.
+// b2 and b3 are temperatures, trims and the like, which do not need equal billing.
+static const uint8_t SAMPLE_ORDER[6] = {0, 3, 1, 0, 3, 2};
 
 // Longest a cached batch may keep contributing to a published sample. Past this it
 // is dropped to NAN rather than presented as current - the dashboard then holds it
@@ -458,18 +525,19 @@ static uint32_t sampleStaleMs(uint32_t cycleMs) {
 }
 
 static const uint8_t *sampleBatchPids(uint8_t b) {
-  return (b == 0) ? PID_B1 : (b == 1) ? PID_B2 : PID_B3;
+  return (b == 0) ? PID_B1 : (b == 1) ? PID_B2 : (b == 2) ? PID_B3 : PID_B4;
 }
+static const uint8_t SAMPLE_BATCHES = 4;
 
 // Rebuild a sample from whichever cached batches are still fresh.
 //
 // Caching the accepted bytes rather than merging three Live structs means the
 // staleness rule is one timestamp per batch, and re-walking is the same verified
 // parse that accepted them in the first place.
-static bool sampleMerge(Live &out, const uint8_t bufs[3][40], const uint8_t *lens,
+static bool sampleMerge(Live &out, const uint8_t bufs[4][40], const uint8_t *lens,
                         const uint32_t *stamps, uint32_t now, uint32_t staleMs) {
   bool any = false;
-  for (uint8_t b = 0; b < 3; b++) {
+  for (uint8_t b = 0; b < SAMPLE_BATCHES; b++) {
     if (!lens[b] || !stamps[b]) continue;
     if (now - stamps[b] > staleMs) continue;
     if (mode01Walk(bufs[b], lens[b], sampleBatchPids(b), 6, &out) > 0) any = true;
@@ -477,16 +545,164 @@ static bool sampleMerge(Live &out, const uint8_t bufs[3][40], const uint8_t *len
   return any;
 }
 
+// ---------------------------------------------------------------- mode 06 monitors
+
+// Mode 06 reports the ECU's own on-board test results: what each monitor measured
+// and the limits it is judged against. The car supports it (FINDINGS records
+// `46 00 C0000001`) and nothing has ever asked for it.
+//
+// A support mask comes back as `46 MM b0 b1 b2 b3` - 32 bits covering the next 32
+// monitor ids, most significant bit first. The last bit is the id of the *next*
+// support mask, which is how the ranges chain: 00 -> 20 -> 40 and so on.
+static uint8_t monMaskMids(const uint8_t *buf, int len, uint8_t base,
+                           uint8_t *out, uint8_t cap) {
+  if (len < 6 || buf[0] != 0x46 || buf[1] != base) return 0;
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < 32 && n < cap; i++)
+    if (buf[2 + (i >> 3)] & (uint8_t)(0x80 >> (i & 7))) out[n++] = (uint8_t)(base + 1 + i);
+  return n;
+}
+
+// Results are repeating nine-byte records: mid, tid, uas, then value, min and max
+// as 16-bit words. A reply can carry several, and a trailing part-record is
+// ignored rather than half-read.
+static uint8_t monParse(const uint8_t *buf, int len, MonRec *out, uint8_t cap) {
+  if (len < 1 || buf[0] != 0x46) return 0;
+  uint8_t n = 0;
+  for (int i = 1; i + 8 < len && n < cap; i += 9, n++) {
+    out[n].mid   = buf[i];
+    out[n].tid   = buf[i + 1];
+    out[n].uas   = buf[i + 2];
+    out[n].value = (uint16_t)((buf[i + 3] << 8) | buf[i + 4]);
+    out[n].lo    = (uint16_t)((buf[i + 5] << 8) | buf[i + 6]);
+    out[n].hi    = (uint16_t)((buf[i + 7] << 8) | buf[i + 8]);
+  }
+  return n;
+}
+
 // ---------------------------------------------------------------- DID scanner
 
 struct ScanState {
   bool     running = false;
+  bool     stalled = false;      // ECU stopped answering; holding position
   uint8_t  ecu = 0;
   uint32_t cur = 0, from = 0, to = 0xFFFF;
   uint32_t tried = 0, negatives = 0;
   uint32_t startedMs = 0;
-  std::vector<Hit> hits;
 } scan;
+
+// A sweep is tens of thousands of requests - the better part of a day over BLE - so
+// it has to survive the car being switched off, and it must not keep sweeping when
+// the ECU has stopped answering.
+//
+// A timeout and a negative response mean opposite things here. A negative response
+// is the ECU saying "no such identifier", which is a result worth recording. A
+// timeout is no answer at all, and a run of them means the ignition went off. Those
+// identifiers were never actually asked, and writing them down as "no response"
+// would turn an unswept range into one that looks swept and empty - the same class
+// of silent wrong answer as the ATCRA bug in FINDINGS.
+static const uint16_t SCAN_STALL_AFTER = 25;    // consecutive timeouts
+static const uint32_t SCAN_PROBE_MS    = 3000;  // how often to test a stalled bus
+static uint16_t scanSilent = 0;
+static uint32_t scanProbeAt = 0;
+
+// The hit list used to be a std::vector on the heap, capped at 3000 entries - about
+// 84 KB of a 320 KB heap, competing with the web server and the TLS-free but still
+// hungry Wi-Fi stack. It lives in PSRAM now, where 8 MB sits otherwise unused, and
+// the cap can be generous instead of a compromise. Without PSRAM it falls back to a
+// modest heap allocation rather than refusing to scan.
+static Hit     *scanHits   = nullptr;
+static uint16_t scanHitCap = 0;
+static uint16_t scanHitN   = 0;
+static bool     scanHitsPsram = false;
+
+static void scanHitsBegin() {
+  const uint16_t want = 4000;
+  if (psramFound()) {
+    scanHits = (Hit *)ps_malloc(sizeof(Hit) * want);
+    if (scanHits) { scanHitCap = want; scanHitsPsram = true; }
+  }
+  if (!scanHits) {
+    const uint16_t fallback = 400;
+    scanHits = (Hit *)malloc(sizeof(Hit) * fallback);
+    scanHitCap = scanHits ? fallback : 0;
+  }
+  Serial.printf("[mem] psram %s, scan hits cap %u (%s)\n",
+                psramFound() ? "present" : "absent", scanHitCap,
+                scanHitsPsram ? "psram" : "heap");
+}
+
+static Preferences scanPrefs;
+static const char *SCAN_HITS_FILE = "/scanhits.csv";
+
+// Position is tiny and goes to NVS. Hits go to the filesystem as they are found, so
+// they are durable the moment they exist rather than at the end of a sweep that may
+// never come.
+static void scanSaveState() {
+  if (!scanPrefs.begin("nexonscan", false)) return;
+  scanPrefs.putBool("run", scan.running);
+  scanPrefs.putUChar("ecu", scan.ecu);
+  scanPrefs.putULong("from", scan.from);
+  scanPrefs.putULong("to", scan.to);
+  scanPrefs.putULong("cur", scan.cur);
+  scanPrefs.putULong("tried", scan.tried);
+  scanPrefs.putULong("neg", scan.negatives);
+  scanPrefs.end();
+}
+
+static void scanAppendHit(const Hit &h) {
+  if (!tripFsUp) return;
+  File f = LittleFS.open(SCAN_HITS_FILE, FILE_APPEND);
+  if (!f) return;
+  f.printf("%c,%04X,%u,", h.ecu ? 'T' : 'E', h.did, h.len);
+  for (uint8_t k = 0; k < h.len; k++) f.printf("%02X", h.data[k]);
+  f.print('\n');
+  f.close();
+}
+
+static void scanLoadHits() {
+  if (!tripFsUp || !LittleFS.exists(SCAN_HITS_FILE)) return;
+  File f = LittleFS.open(SCAN_HITS_FILE, FILE_READ);
+  if (!f) return;
+  while (f.available() && scanHitN < scanHitCap) {
+    String line = f.readStringUntil('\n');
+    if (line.length() < 6) continue;
+    Hit h;
+    h.ecu = (line[0] == 'T') ? 1 : 0;
+    h.did = (uint16_t)strtoul(line.substring(2, 6).c_str(), nullptr, 16);
+    int c2 = line.indexOf(',', 7);
+    if (c2 < 0) continue;
+    String hex = line.substring(c2 + 1);
+    h.len = (uint8_t)min((size_t)(hex.length() / 2), sizeof(h.data));
+    for (uint8_t k = 0; k < h.len; k++)
+      h.data[k] = (uint8_t)strtoul(hex.substring(k * 2, k * 2 + 2).c_str(), nullptr, 16);
+    scanHits[scanHitN++] = h;
+  }
+  f.close();
+  Serial.printf("[scan] %u hits restored from flash\n", scanHitN);
+}
+
+static void scanBegin() {
+  if (!scanPrefs.begin("nexonscan", true)) return;
+  bool wasRunning = scanPrefs.getBool("run", false);
+  scan.ecu       = scanPrefs.getUChar("ecu", 0);
+  scan.from      = scanPrefs.getULong("from", 0);
+  scan.to        = scanPrefs.getULong("to", 0xFFFF);
+  scan.cur       = scanPrefs.getULong("cur", 0);
+  scan.tried     = scanPrefs.getULong("tried", 0);
+  scan.negatives = scanPrefs.getULong("neg", 0);
+  scanPrefs.end();
+  if (!wasRunning || scan.cur > scan.to) { scan.running = false; return; }
+
+  // Resume rather than wait to be asked. A sweep is started deliberately and takes
+  // hours; having it silently abandon itself every time the car is switched off
+  // would make finishing one impossible. The Live page shows it is running.
+  scanLoadHits();
+  scan.running = true;
+  scan.startedMs = millis();
+  Serial.printf("[scan] resuming %s at %04X (%lu already tried)\n",
+                scan.ecu ? "TCM" : "ECM", (unsigned)scan.cur, (unsigned long)scan.tried);
+}
 
 // Time-boxed rather than counted. A fixed count of identifiers is a wildly
 // different amount of wall-clock per transport - 40 DIDs is about a second on CAN
@@ -496,6 +712,22 @@ static void scanStep(uint32_t budgetMs) {
   uint32_t reqId = scan.ecu ? ID_TCM_REQ : ID_ECM_REQ;
   uint32_t rspId = scan.ecu ? ID_TCM_RSP : ID_ECM_RSP;
   uint32_t started = millis();
+
+  // Stalled means the ECU stopped answering. Hold position and probe occasionally
+  // rather than sweeping thousands of identifiers that were never really asked.
+  if (scan.stalled) {
+    if (millis() - scanProbeAt < SCAN_PROBE_MS) return;
+    scanProbeAt = millis();
+    uint8_t probe[2] = {0x01, 0x00};
+    uint8_t pbuf[16];
+    if (obdIsoTp(reqId, rspId, probe, 2, pbuf, sizeof(pbuf),
+                 activeTransport == TR_BLE ? 1200 : 400) > 0) {
+      scan.stalled = false;
+      scanSilent = 0;
+      Serial.println("[scan] ECU answering again - resuming");
+    }
+    return;
+  }
 
   while (scan.running && millis() - started < budgetMs) {
     if (scan.cur > scan.to) { scan.running = false; break; }
@@ -514,7 +746,23 @@ static void scanStep(uint32_t budgetMs) {
     if (len == -3) len = obdIsoTp(reqId, rspId, req, 3, buf, sizeof(buf),
                                   activeTransport == TR_BLE ? 900 : 50);
 
-    if (len == -2) { scan.negatives++; continue; }
+    // A negative response is the ECU answering; a timeout is not. Only the former
+    // counts as having swept this identifier.
+    if (len == -2) { scanSilent = 0; scan.negatives++; continue; }
+    if (len == -1) {
+      if (++scanSilent >= SCAN_STALL_AFTER) {
+        scan.cur = did;                 // un-consume it: it was never really asked
+        scan.tried--;
+        scan.stalled = true;
+        scanProbeAt = millis();
+        scanSaveState();
+        Serial.printf("[scan] %u silent in a row at %04X - stalling, not recording\n",
+                      scanSilent, (unsigned)did);
+        return;
+      }
+      continue;
+    }
+    scanSilent = 0;
     if (len < 3) continue;
     if (buf[0] != 0x62) continue;
     if (((buf[1] << 8) | buf[2]) != did) continue;
@@ -524,8 +772,141 @@ static void scanStep(uint32_t budgetMs) {
     h.ecu = scan.ecu;
     h.len = (uint8_t)min((size_t)(len - 3), sizeof(h.data));
     memcpy(h.data, &buf[3], h.len);
-    if (scan.hits.size() < 3000) scan.hits.push_back(h);
+    if (scanHitN < scanHitCap) scanHits[scanHitN++] = h;
+    scanAppendHit(h);                   // durable the moment it is found
   }
+}
+
+// ---------------------------------------------------------------- DID watch
+
+static Preferences watchPrefs;
+
+static void watchSave() {
+  if (!watchPrefs.begin("nexonwatch", false)) return;
+  uint8_t blob[WATCH_MAX * 3];
+  size_t n = watchEncode(watch, watchN, blob, sizeof(blob));
+  watchPrefs.putBytes("set", blob, n);
+  watchPrefs.putULong("period", watchPeriodMs);
+  watchPrefs.end();
+}
+
+static void watchLoad() {
+  if (!watchPrefs.begin("nexonwatch", true)) return;
+  uint8_t blob[WATCH_MAX * 3];
+  size_t n = watchPrefs.getBytes("set", blob, sizeof(blob));
+  watchN = watchDecode(blob, n, watch, WATCH_MAX);
+  watchPeriodMs = watchPrefs.getULong("period", 1000);
+  watchPrefs.end();
+  if (watchPeriodMs < WATCH_PERIOD_MIN) watchPeriodMs = WATCH_PERIOD_MIN;
+  if (watchPeriodMs > WATCH_PERIOD_MAX) watchPeriodMs = WATCH_PERIOD_MAX;
+  if (watchN) Serial.printf("[watch] %u identifiers, every %lums\n",
+                            watchN, (unsigned long)watchPeriodMs);
+}
+
+// One identifier per period, round robin. Deliberately modest: every read is an
+// extra bus exchange, and BLE only affords about six a second in total, so a set of
+// eight at the default 1 s costs roughly a sixth of the budget. The page states
+// that cost rather than leaving the live rate to quietly sag.
+//
+// Paused entirely while a sweep runs. A sweep is already hours long and shares the
+// bus with the sampler; adding a third claimant would do both jobs badly.
+static void watchStep() {
+  if (!watchN || scan.running) return;
+  if (millis() - watchLastMs < watchPeriodMs) return;
+  watchLastMs = millis();
+
+  if (watchTurn >= watchN) watchTurn = 0;
+  WatchDid &w = watch[watchTurn];
+  watchTurn = (uint8_t)((watchTurn + 1) % watchN);
+
+  uint32_t reqId = w.ecu ? ID_TCM_REQ : ID_ECM_REQ;
+  uint32_t rspId = w.ecu ? ID_TCM_RSP : ID_ECM_RSP;
+  uint8_t req[3] = {0x22, (uint8_t)(w.did >> 8), (uint8_t)(w.did & 0xFF)};
+  uint8_t buf[40];
+  int len = obdIsoTp(reqId, rspId, req, 3, buf, sizeof(buf),
+                     activeTransport == TR_BLE ? 550 : 25);
+  if (len == -3) len = obdIsoTp(reqId, rspId, req, 3, buf, sizeof(buf),
+                                activeTransport == TR_BLE ? 900 : 50);
+
+  // 62 <did hi> <did lo> <data...>. A reply about a different identifier is this
+  // adapter demultiplexing badly, not an answer - drop it rather than filing the
+  // bytes under the wrong name, which would poison the correlation silently.
+  if (len < 4 || buf[0] != 0x62) return;
+  if ((((uint16_t)buf[1] << 8) | buf[2]) != w.did) return;
+
+  uint8_t n = (uint8_t)(len - 3);
+  if (n > sizeof(w.data)) n = sizeof(w.data);
+  memcpy(w.data, &buf[3], n);
+  w.len   = n;
+  w.stamp = millis();
+}
+
+// Monitor discovery and refresh run in loop() like everything else that touches the
+// bus, and only while someone is actually looking at the page - a request to /mon
+// arms it for MON_WANTED_MS. Polling monitors continuously would spend bus time on
+// values that change over minutes, at the expense of the ones that change now.
+static const uint8_t  MON_MAX        = 24;
+static const uint8_t  MON_MIDS_MAX   = 16;
+static const uint32_t MON_PERIOD_MS  = 1500;
+static const uint32_t MON_WANTED_MS  = 30000;
+
+static MonRec   monRec[MON_MAX];
+static uint8_t  monCount = 0;
+static uint8_t  monMids[MON_MIDS_MAX];
+static uint8_t  monMidCount = 0;
+static uint8_t  monNext = 0;
+static uint8_t  monDiscBase = 0x00;
+static bool     monDiscovered = false;
+static uint32_t monWantedMs = 0;
+static uint32_t monLastMs = 0;
+
+// Replace this monitor's records rather than appending, so a refresh updates in
+// place instead of growing the table every pass.
+static void monStore(uint8_t mid, const MonRec *recs, uint8_t n) {
+  uint8_t w = 0;
+  for (uint8_t i = 0; i < monCount; i++)
+    if (monRec[i].mid != mid) monRec[w++] = monRec[i];
+  monCount = w;
+  for (uint8_t i = 0; i < n && monCount < MON_MAX; i++) monRec[monCount++] = recs[i];
+}
+
+static void monStep() {
+  if (scan.running) return;
+  if (!monWantedMs || millis() - monWantedMs > MON_WANTED_MS) return;
+  if (millis() - monLastMs < MON_PERIOD_MS) return;
+  if (activeTransport == TR_NONE) return;
+  monLastMs = millis();
+
+  uint8_t buf[128];
+  const uint32_t tmo = (activeTransport == TR_BLE) ? 1200 : 400;
+
+  if (!monDiscovered) {
+    uint8_t req[2] = {0x06, monDiscBase};
+    int len = obdIsoTp(ID_ECM_REQ, ID_ECM_RSP, req, 2, buf, sizeof(buf), tmo);
+    uint8_t got[32];
+    uint8_t n = (len > 0) ? monMaskMids(buf, len, monDiscBase, got, 32) : 0;
+    bool more = false;
+    for (uint8_t i = 0; i < n; i++) {
+      if (got[i] == (uint8_t)(monDiscBase + 0x20)) { more = true; continue; }  // range marker
+      if (monMidCount < MON_MIDS_MAX) monMids[monMidCount++] = got[i];
+    }
+    if (more && monDiscBase < 0xA0) monDiscBase = (uint8_t)(monDiscBase + 0x20);
+    else { monDiscovered = true; monNext = 0; }
+    Serial.printf("[mon] base %02X -> %u ids (%u total)%s\n",
+                  monDiscBase, n, monMidCount, monDiscovered ? " done" : "");
+    return;
+  }
+
+  if (!monMidCount) return;
+  uint8_t mid = monMids[monNext];
+  monNext = (uint8_t)((monNext + 1) % monMidCount);
+
+  uint8_t req[2] = {0x06, mid};
+  int len = obdIsoTp(ID_ECM_REQ, ID_ECM_RSP, req, 2, buf, sizeof(buf), tmo);
+  if (len < 1) return;
+  MonRec recs[12];
+  uint8_t n = monParse(buf, len, recs, 12);
+  if (n) monStore(mid, recs, n);
 }
 
 // ---------------------------------------------------------------- HTTP
@@ -566,12 +947,45 @@ static uint32_t pickBackoff(uint32_t cur) {
   return next > PICK_MAX_MS ? PICK_MAX_MS : next;
 }
 
+// ---------------------------------------------------------------- trip totals
+//
+// Fuel economy is the number that says something about a drive, and it cannot be
+// read off the bus - it has to be integrated, from speed (PID 0D) and fuel rate
+// (PID 5E), both of which this ECU supports. Accumulated on the board rather than
+// on the page, so closing the browser or locking the phone does not lose the drive.
+//
+// Totals start at zero every time the board powers up. Given the accessory-socket
+// supply that is exactly one drive, which is the span an average is worth over.
+static float    g_tripKm  = 0.0f;
+static float    g_tripL   = 0.0f;
+static uint32_t tripIntAt = 0;
+
+// A longer gap than this is not an interval anything is known about - a BLE
+// dropout, a scan taking the bus, a wake from sleep. Integrating across it would
+// invent distance and fuel that were never measured.
+static const uint32_t TRIP_INT_MAX_MS = 5000;
+
+// Both inputs or neither. Counting distance while the fuel rate is missing would
+// quietly bias the average optimistic, and that is the one direction a mileage
+// figure must never drift.
+static void tripIntegrate(float speedKmh, float rateLph, uint32_t now) {
+  uint32_t prev = tripIntAt;
+  tripIntAt = now;
+  if (!prev) return;                          // first sample: no interval yet
+  uint32_t dt = now - prev;
+  if (dt == 0 || dt > TRIP_INT_MAX_MS) return;
+  if (isnan(speedKmh) || isnan(rateLph)) return;
+  if (speedKmh < 0 || rateLph < 0) return;    // a decode that went wrong
+  g_tripKm += speedKmh * dt / 3600000.0f;
+  g_tripL  += rateLph  * dt / 3600000.0f;
+}
+
 static uint32_t pickWaitMs = PICK_MIN_MS;
 
 // One cached reply per batch, with the moment it arrived.
-static uint8_t  sampBuf[3][40];
-static uint8_t  sampLen[3]  = {0, 0, 0};
-static uint32_t sampStamp[3] = {0, 0, 0};
+static uint8_t  sampBuf[4][40];
+static uint8_t  sampLen[4]   = {0, 0, 0, 0};
+static uint32_t sampStamp[4] = {0, 0, 0, 0};
 static uint8_t  sampTurn     = 0;
 static uint32_t sampBatchMs  = 0;    // how long the last batch took, for the log
 static uint32_t sampCycleMs  = 0;    // measured duration of one SAMPLE_ORDER pass
@@ -631,6 +1045,10 @@ static void samplerStep() {
   pub.baro = g_baro;
   pub.ok   = any;
 
+  if (any) tripIntegrate(pub.speed, pub.fuelRate, millis());
+  pub.tripKm = g_tripKm;
+  pub.tripL  = g_tripL;
+
   if (any) {
     g_live   = pub;
     g_liveMs = millis();
@@ -687,6 +1105,8 @@ static void handleData() {
   s += g_seq;
   s += ",\"age\":";
   s += (millis() - g_liveMs);
+  s += ",\"epoch\":";
+  s += (long long)clockNowMs();
   jsonScan(s);
   s += ",\"v\":{";
   jsonNum(s, "rpm", L.rpm, 0);        jsonNum(s, "speed", L.speed, 0);
@@ -699,8 +1119,26 @@ static void handleData() {
   jsonNum(s, "cat", L.cat, 1);        jsonNum(s, "timing", L.timing, 1);
   jsonNum(s, "fuelRate", L.fuelRate, 2); jsonNum(s, "fuel", L.fuel, 1);
   jsonNum(s, "runtime", L.runtime, 0);
+  jsonNum(s, "pedalD", L.pedalD, 1);  jsonNum(s, "pedalE", L.pedalE, 1);
+  jsonNum(s, "cmdThrottle", L.cmdThrottle, 1);
+  jsonNum(s, "torqDem", L.torqDem, 1);jsonNum(s, "torqAct", L.torqAct, 1);
+  jsonNum(s, "torqRef", L.torqRef, 0);jsonNum(s, "absLoad", L.absLoad, 1);
+  jsonNum(s, "tripKm", L.tripKm, 3);  jsonNum(s, "tripL",   L.tripL, 4);
   s.remove(s.length() - 1);           // trailing comma
   s += "}}";
+  server.send(200, "application/json", s);
+}
+
+// The browser hands over the time on every page load, so the board can stamp what
+// it records. Re-sent each load rather than once, because the internal oscillator
+// drifts and correcting it costs nothing.
+static void handleTime() {
+  if (server.hasArg("ms")) clockSetFrom(strtoll(server.arg("ms").c_str(), nullptr, 10));
+  String s = "{\"set\":";
+  s += clockSet() ? "true" : "false";
+  s += ",\"epoch\":";
+  s += (long long)clockNowMs();
+  s += "}";
   server.send(200, "application/json", s);
 }
 
@@ -713,52 +1151,81 @@ static void handleScanStart() {
   scan.tried     = 0;
   scan.negatives = 0;
   scan.startedMs = millis();
-  scan.hits.clear();
+  scan.stalled   = false;
+  scanSilent     = 0;
+  scanHitN = 0;
+  if (tripFsUp) LittleFS.remove(SCAN_HITS_FILE);   // a new sweep starts a new record
+  scanSaveState();
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
 static void handleScanStop() {
   scan.running = false;
+  scan.stalled = false;
+  scanSaveState();
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
+// Chunked, like /history and for the same reason: a completed sweep can hold
+// thousands of hits, and building that into one String would need more contiguous
+// heap than the board has to spare while also serving the page that asked for it.
 static void handleScanStatus() {
-  String s = "{\"running\":";
-  s += scan.running ? "true" : "false";
-  s += ",\"ecu\":\"";
-  s += scan.ecu ? "TCM" : "ECM";
-  s += "\",\"cur\":\"";
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json", "");
+
   char hex[8];
   snprintf(hex, sizeof(hex), "%04X", (unsigned)(scan.cur > 0xFFFF ? 0xFFFF : scan.cur));
-  s += hex;
-  s += "\",\"tried\":";  s += scan.tried;
-  s += ",\"total\":";    s += (scan.to - scan.from + 1);
-  s += ",\"negatives\":";s += scan.negatives;
-  s += ",\"elapsed\":";  s += (millis() - scan.startedMs) / 1000;
-  s += ",\"hits\":[";
-  for (size_t i = 0; i < scan.hits.size(); i++) {
-    const Hit &h = scan.hits[i];
-    if (i) s += ",";
+  String head = "{\"running\":";
+  head += scan.running ? "true" : "false";
+  head += ",\"ecu\":\"";
+  head += scan.ecu ? "TCM" : "ECM";
+  head += "\",\"cur\":\"";
+  head += hex;
+  head += "\",\"tried\":";  head += scan.tried;
+  head += ",\"total\":";     head += (scan.to - scan.from + 1);
+  head += ",\"negatives\":"; head += scan.negatives;
+  head += ",\"elapsed\":";   head += (millis() - scan.startedMs) / 1000;
+  head += ",\"cap\":";       head += scanHitCap;
+  head += ",\"stalled\":";   head += scan.stalled ? "true" : "false";
+  head += ",\"resumed\":";   head += scan.tried > scanHitN ? "true" : "false";
+  head += ",\"hits\":[";
+  server.sendContent(head);
+
+  String chunk;
+  for (uint16_t i = 0; i < scanHitN; i++) {
+    const Hit &h = scanHits[i];
+    if (i) chunk += ",";
     snprintf(hex, sizeof(hex), "%04X", h.did);
-    s += "{\"did\":\"";  s += hex;
-    s += "\",\"ecu\":\""; s += (h.ecu ? "TCM" : "ECM");
-    s += "\",\"len\":";   s += h.len;
-    s += ",\"hex\":\"";
-    for (uint8_t k = 0; k < h.len; k++) { char b[4]; snprintf(b, sizeof(b), "%02X", h.data[k]); s += b; }
-    s += "\",\"ascii\":\"";
+    chunk += "{\"did\":\"";  chunk += hex;
+    chunk += "\",\"ecu\":\""; chunk += (h.ecu ? "TCM" : "ECM");
+    chunk += "\",\"len\":";   chunk += h.len;
+    chunk += ",\"hex\":\"";
+    for (uint8_t k = 0; k < h.len; k++) { char b[4]; snprintf(b, sizeof(b), "%02X", h.data[k]); chunk += b; }
+    chunk += "\",\"ascii\":\"";
     for (uint8_t k = 0; k < h.len; k++) {
       char c = (char)h.data[k];
-      if (c == '"' || c == '\\') s += '.';
-      else s += (c >= 32 && c < 127) ? c : '.';
+      if (c == '"' || c == '\\') chunk += '.';
+      else chunk += (c >= 32 && c < 127) ? c : '.';
     }
-    s += "\"}";
+    chunk += "\"}";
+    if (chunk.length() > 1024) { server.sendContent(chunk); chunk = ""; }
   }
-  s += "]}";
-  server.send(200, "application/json", s);
+  chunk += "]}";
+  server.sendContent(chunk);
+  server.sendContent("");
 }
 
 // Stored + pending DTCs, both ECUs.
+// The only handler that talks to the bus, which makes it the only one that can
+// block the server for as long as an ECU is willing to stay silent. It runs inside
+// handleClient(), so it cannot yield (see bus_yield.h) - hence the short timeouts.
+// Two ECUs x request + retry used to add up to eight seconds of an unresponsive
+// board, which is most of what made a tab switch feel like a page load.
 static void handleDtc() {
+  if (g_busBusy) {                 // reached from webYield(), mid-reassembly
+    server.send(200, "application/json", "{\"busy\":true,\"ecus\":[]}");
+    return;
+  }
   String s = "{\"ecus\":[";
   const uint32_t req[2] = {ID_ECM_REQ, ID_TCM_REQ};
   const uint32_t rsp[2] = {ID_ECM_RSP, ID_TCM_RSP};
@@ -770,11 +1237,13 @@ static void handleDtc() {
     uint8_t req03[1] = {0x03};
     uint8_t buf[64];
     int len = obdIsoTp(req[e], rsp[e], req03, 1, buf, sizeof(buf),
-                       activeTransport == TR_BLE ? 1500 : 300);
+                       activeTransport == TR_BLE ? 900 : 300);
     // A half-read DTC list would report fewer codes than are actually stored, so a
     // truncated reply gets one retry rather than being parsed as far as it goes.
+    // 900 + 1200 still clears ATST (400 ms) with room to spare, and caps the worst
+    // case at ~4 s across both ECUs instead of ~8 s.
     if (len == -3) len = obdIsoTp(req[e], rsp[e], req03, 1, buf, sizeof(buf),
-                                  activeTransport == TR_BLE ? 2500 : 600);
+                                  activeTransport == TR_BLE ? 1200 : 500);
     bool first = true;
     if (len >= 2 && buf[0] == 0x43) {
       uint8_t count = buf[1];
@@ -797,6 +1266,83 @@ static void handleDtc() {
   server.send(200, "application/json", s);
 }
 
+static void handleMonitors() {
+  monWantedMs = millis();          // arms monStep() for the next half minute
+  String s = "{\"ready\":";
+  s += monDiscovered ? "true" : "false";
+  s += ",\"ids\":";
+  s += monMidCount;
+  s += ",\"recs\":[";
+  for (uint8_t i = 0; i < monCount; i++) {
+    const MonRec &m = monRec[i];
+    if (i) s += ",";
+    char hex[8];
+    s += "{\"mid\":\"";  snprintf(hex, sizeof(hex), "%02X", m.mid); s += hex;
+    s += "\",\"tid\":\""; snprintf(hex, sizeof(hex), "%02X", m.tid); s += hex;
+    s += "\",\"uas\":\""; snprintf(hex, sizeof(hex), "%02X", m.uas); s += hex;
+    s += "\",\"v\":";  s += m.value;
+    s += ",\"lo\":";    s += m.lo;
+    s += ",\"hi\":";    s += m.hi;
+    s += "}";
+  }
+  s += "]}";
+  server.send(200, "application/json", s);
+}
+
+static void handleTripList() {
+  String s = "{\"fs\":";
+  s += tripFsUp ? "true" : "false";
+  s += ",\"used\":";  s += (uint32_t)(tripFsUp ? LittleFS.usedBytes() : 0);
+  s += ",\"total\":"; s += (uint32_t)(tripFsUp ? LittleFS.totalBytes() : 0);
+  s += ",\"live\":\"";
+  s += tripName[0] ? tripName : "";
+  s += "\",\"trips\":[";
+  if (tripFsUp) {
+    File dir = LittleFS.open("/");
+    bool first = true;
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+      if (!f.name() || !strstr(f.name(), ".csv")) continue;
+      if (!first) s += ",";
+      first = false;
+      s += "{\"name\":\"";
+      if (f.name()[0] != '/') s += "/";
+      s += f.name();
+      s += "\",\"size\":";
+      s += (uint32_t)f.size();
+      s += "}";
+    }
+    dir.close();
+  }
+  s += "]}";
+  server.send(200, "application/json", s);
+}
+
+// Only files this firmware wrote are servable, and only from the root - the name
+// comes from a query string, so it is checked rather than trusted.
+static bool tripNameOk(const String &n) {
+  if (n.length() < 6 || n.length() > 20) return false;
+  if (n[0] != '/' || n.indexOf("..") >= 0 || n.lastIndexOf('/') != 0) return false;
+  return n.endsWith(".csv");
+}
+
+static void handleTripGet() {
+  String n = server.arg("f");
+  if (!tripNameOk(n) || !LittleFS.exists(n)) { server.send(404, "text/plain", "no such trip"); return; }
+  File f = LittleFS.open(n, FILE_READ);
+  if (!f) { server.send(500, "text/plain", "open failed"); return; }
+  server.sendHeader("Content-Disposition", "attachment; filename=\"" + n.substring(1) + "\"");
+  server.streamFile(f, "text/csv");
+  f.close();
+}
+
+static void handleTripDelete() {
+  String n = server.arg("f");
+  if (!tripNameOk(n)) { server.send(400, "application/json", "{\"ok\":false}"); return; }
+  if (tripName[0] && n == tripName) tripClose();     // never delete the open file
+  bool ok = LittleFS.remove(n);
+  server.send(200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
 // Trend history, oldest first. Chunked because the full hour is ~14 KB of JSON and
 // assembling that in one String risks the heap on a board this size.
 static void handleHistory() {
@@ -804,8 +1350,11 @@ static void handleHistory() {
   server.send(200, "application/json", "");
 
   char head[96];
-  snprintf(head, sizeof(head), "{\"period\":%lu,\"n\":%u,",
-           (unsigned long)(HIST_PERIOD_MS / 1000), histCount);
+  // endEpoch is the wall-clock time of the newest sample, so the client can put the
+  // chart on a real axis. Zero when nobody has told the board what time it is.
+  snprintf(head, sizeof(head), "{\"period\":%lu,\"n\":%u,\"endEpoch\":%lld,",
+           (unsigned long)(HIST_PERIOD_MS / 1000), histCount,
+           (long long)clockAtMs(histLastPush));
   server.sendContent(head);
 
   const char *names[4] = {"rpm", "speed", "boost", "coolant"};
@@ -838,6 +1387,7 @@ static void handleOtaUpload() {
   HTTPUpload &up = server.upload();
   if (up.status == UPLOAD_FILE_START) {
     scan.running = false;                       // never flash mid-scan
+    tripClose();                                // and land the log before rebooting
     Serial.printf("[ota] start: %s\n", up.filename.c_str());
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
   } else if (up.status == UPLOAD_FILE_WRITE) {
@@ -856,6 +1406,108 @@ static void handleOtaDone() {
   server.sendHeader("Connection", "close");
   server.send(200, "application/json", bad ? "{\"ok\":false}" : "{\"ok\":true}");
   if (!bad) { delay(600); ESP.restart(); }
+}
+
+// The watched identifiers and their latest readings, plus enough live values to
+// correlate against without the page having to poll /data as well.
+static void handleWatchList() {
+  uint32_t now = millis();
+  String s = "{\"max\":";
+  s += WATCH_MAX;
+  s += ",\"period\":";
+  s += watchPeriodMs;
+  s += ",\"cycle\":";
+  s += watchCycleMs();
+  s += ",\"scanning\":";
+  s += scan.running ? "true" : "false";
+  s += ",\"dids\":[";
+  for (uint8_t i = 0; i < watchN; i++) {
+    const WatchDid &w = watch[i];
+    char nm[12];
+    watchColName(nm, sizeof(nm), w, false);
+    if (i) s += ",";
+    s += "{\"name\":\"";  s += nm;
+    s += "\",\"did\":\"";
+    char hex[8];
+    snprintf(hex, sizeof(hex), "%04X", (unsigned)w.did);
+    s += hex;
+    s += "\",\"ecu\":\""; s += (w.ecu ? "TCM" : "ECM");
+    s += "\",\"len\":";   s += w.len;
+    s += ",\"fresh\":";   s += watchFresh(w, now) ? "true" : "false";
+    if (w.len) {
+      s += ",\"val\":";  s += watchValue(w);
+      s += ",\"hex\":\"";
+      for (uint8_t k = 0; k < w.len; k++) {
+        snprintf(hex, sizeof(hex), "%02X", w.data[k]);
+        s += hex;
+      }
+      s += "\",\"age\":"; s += (now - w.stamp);
+    }
+    s += "}";
+  }
+  s += "],\"v\":{";
+  Live L = g_live;
+  bool fresh = g_seq && (millis() - g_liveMs < 4000);
+  jsonNum(s, "rpm",     fresh ? L.rpm : NAN, 0);
+  jsonNum(s, "speed",   fresh ? L.speed : NAN, 0);
+  jsonNum(s, "coolant", fresh ? L.coolant : NAN, 0);
+  jsonNum(s, "load",    fresh ? L.load : NAN, 1);
+  jsonNum(s, "throttle", fresh ? L.throttle : NAN, 1);
+  jsonNum(s, "iat",     fresh ? L.iat : NAN, 0);
+  s.remove(s.length() - 1);            // trailing comma
+  s += "}}";
+  server.send(200, "application/json", s);
+}
+
+static void handleWatchSet() {
+  WatchDid next[WATCH_MAX];
+  uint8_t n = 0;
+  if (server.hasArg("d")) n = watchParseList(server.arg("d").c_str(), next, WATCH_MAX);
+
+  uint32_t p = watchPeriodMs;
+  if (server.hasArg("period")) p = (uint32_t)strtoul(server.arg("period").c_str(), nullptr, 10);
+
+  bool changed = watchApply(next, n, p);
+  if (changed) {
+    watchSave();
+    Serial.printf("[watch] set to %u identifiers, every %lums\n",
+                  watchN, (unsigned long)watchPeriodMs);
+  }
+  String s = "{\"ok\":true,\"n\":";
+  s += watchN;
+  s += ",\"period\":";
+  s += watchPeriodMs;
+  s += ",\"changed\":";
+  s += changed ? "true" : "false";
+  s += "}";
+  server.send(200, "application/json", s);
+}
+
+// ---------------------------------------------------------------- static assets
+//
+// A page only changes when the firmware does, so a tab switch should be a
+// revalidation - a 304 with no body - rather than a re-download of 10-27 KB. The
+// stylesheet is the same ~7 KB on all five pages, so it is served once from its own
+// version-stamped URL and marked immutable: after the first page of a given build
+// the browser stops asking for it entirely.
+#define UI_ETAG "\"" FW_VERSION "\""
+
+static bool ifNoneMatch() {
+  return server.header("If-None-Match") == UI_ETAG;
+}
+
+static void sendPage(const char *html) {
+  server.sendHeader("ETag", UI_ETAG);
+  server.sendHeader("Cache-Control", "no-cache");     // revalidate, do not blind-cache
+  if (ifNoneMatch()) { server.send(304, "text/html", ""); return; }
+  server.send_P(200, "text/html", html);
+}
+
+static void handleUiCss() {
+  server.sendHeader("ETag", UI_ETAG);
+  server.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
+  if (ifNoneMatch()) { server.send(304, "text/css", ""); return; }
+  server.send_P(200, "text/css", UI_CSS_BODY);
 }
 
 // ---------------------------------------------------------------- transport pick
@@ -913,31 +1565,61 @@ void setup() {
   Serial.print(" -> http://");
   Serial.println(WiFi.softAPIP());
 
-  server.on("/",            []() { server.send_P(200, "text/html", DASHBOARD_HTML); });
-  server.on("/scan",        []() { server.send_P(200, "text/html", SCAN_HTML); });
-  server.on("/update", HTTP_GET, []() { server.send_P(200, "text/html", OTA_HTML); });
+  // ETag revalidation needs the request header kept; WebServer discards everything
+  // it was not told to collect.
+  static const char *collect[] = {"If-None-Match"};
+  server.collectHeaders(collect, 1);
+
+  server.on("/",            []() { sendPage(DASHBOARD_HTML); });
+  server.on("/scan",        []() { sendPage(SCAN_HTML); });
+  server.on("/ui.css",      handleUiCss);
+  server.on("/update", HTTP_GET, []() { sendPage(OTA_HTML); });
   server.on("/update", HTTP_POST, handleOtaDone, handleOtaUpload);
   server.on("/data",        handleData);
   server.on("/dtc",         handleDtc);
   server.on("/history",     handleHistory);
+  server.on("/mon",         handleMonitors);
+  server.on("/time",        handleTime);
+  server.on("/trips/list",  handleTripList);
+  server.on("/trips/get",   handleTripGet);
+  server.on("/trips/del",   handleTripDelete);
+  server.on("/trips",       []() { sendPage(TRIP_HTML); });
+  server.on("/monitors",    []() { sendPage(MON_HTML); });
+  server.on("/watch",       []() { sendPage(WATCH_HTML); });
+  server.on("/watch/list",  handleWatchList);
+  server.on("/watch/set",   handleWatchSet);
   server.on("/scan/start",  handleScanStart);
   server.on("/scan/stop",   handleScanStop);
   server.on("/scan/status", handleScanStatus);
   server.begin();
 
+  scanHitsBegin();
+  watchLoad();          // before tripBegin: the watch set decides the CSV columns
+  tripBegin();
+  scanBegin();          // resumes an interrupted sweep, needs the filesystem up
   histBegin();
   lastEcuOkMs = millis();
   chooseTransport();
 }
 
+// Requests served per turn. A page load is the document, /time, and the page's
+// first poll; taking one per turn put a full bus exchange between each of them and
+// made a tab switch feel like a page load. Four covers a load in a single turn,
+// and costs nothing when idle - each spare call is one non-blocking accept.
+static const int HTTP_DRAIN = 4;
+
 void loop() {
-  server.handleClient();
-  samplerStep();          // one batch per turn, so the server keeps its responsiveness
+  for (int i = 0; i < HTTP_DRAIN; i++) serveHttp();
+  samplerStep();          // the bus waits inside here serve HTTP too - bus_yield.h
+  watchStep();            // one watched identifier per period, paused during a scan
+  monStep();              // only does anything while the monitors page is open
   heartbeat(millis() - lastEcuOkMs < 3000, scan.running);
 
   if (scan.running) {
+    if (!scan.stalled) lastEcuOkMs = millis();   // a stalled scan is not activity
     scanStep(250);                // then hand the web server a turn
-    lastEcuOkMs = millis();       // scanning counts as activity
+    static uint32_t scanCkpt = 0;
+    if (millis() - scanCkpt > 5000) { scanCkpt = millis(); scanSaveState(); }
   }
 
   // Periodic status line. setup() output is lost because the USB CDC
@@ -979,6 +1661,7 @@ void loop() {
   if (everSawEcu && millis() - lastEcuOkMs > IDLE_SLEEP_MS) {
     Serial.println("[pwr] idle - deep sleep");
     histSave();
+    tripClose();
     twai_stop();
     twai_driver_uninstall();
     esp_sleep_enable_timer_wakeup(SLEEP_WAKE_US);

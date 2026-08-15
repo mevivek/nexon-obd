@@ -26,11 +26,13 @@ it says so.
 
 | Page | What it does |
 |---|---|
-| `/` | Live gauges — RPM, boost, temps, trims, lambda, catalyst |
+| `/` | Live gauges — RPM, boost, temps, trims, lambda, catalyst, driver demand |
+| `/monitors` | Mode 06 on-board monitor test results, with the ECU's own limits |
 | `/scan` | UDS service `0x22` identifier sweep, with CSV export |
 | `/update` | Upload a new `.bin` over Wi-Fi |
 | `/dtc` | Stored + pending fault codes as JSON |
 | `/data` | Current sample as JSON, plus firmware version and active transport |
+| `/trips` | Per-drive CSV logs — list, download, delete |
 | `/history` | The stored trend buffer as JSON |
 
 The header shows the running firmware version and which transport is actually live
@@ -52,13 +54,39 @@ when nothing is wrong.
 ### Polling runs on the board, not on the page
 
 The board samples the ECU continuously in `loop()`, one batched request per turn,
-and `/data` returns the newest cached sample. Nothing waits on the bus to serve a
-page, so switching between Live, the scanner and Firmware is immediate. It also
-means polling does not stop when you close the browser.
+and `/data` returns the newest cached sample rather than going to the bus. Polling
+therefore does not stop when you close the browser, and no request ever waits for a
+poll of its own.
 
-One batch per turn matters: the web server is single threaded, so any time spent on
-the bus is time the board cannot answer a request. Polling all three batches inline
-could leave a tap on a nav link sitting behind seconds of BLE timeouts.
+It did, however, wait for *someone else's*. The web server is single threaded, and
+until v1.8.0 it got exactly one turn per bus exchange — up to 1.2 s on BLE, twice
+that when a batch is retried. A tab switch is three requests (the document, `/time`,
+and the new page's first poll), so switching pages could sit behind several seconds
+of ELM327 timeouts and felt like a page load rather than a page swap.
+
+Two things fix that, both in `bus_yield.h`:
+
+- **The wait loops serve HTTP.** Waiting on the car is otherwise `delay(1)` on BLE
+  and a 5 ms blocking receive on CAN. Both now call `webYield()` instead, which
+  serves whatever is queued and reports how long it took — and the response deadline
+  moves out by exactly that, because the reply is still waiting behind us either way
+  (the TWAI RX queue, or the ELM notify buffer). Without the give-back, serving a
+  page would eat the ECU's patience window and surface as a phantom timeout. The
+  extension is capped at 3 s so one slow handler cannot hold an exchange open.
+- **`loop()` drains the queue** instead of taking one request per turn, so a whole
+  page load completes in a single turn.
+
+Two guards keep that safe. `WebServer` tracks a single current client, so
+`webYield()` refuses to re-enter it from inside a handler; and `obdIsoTp()` sets a
+flag for the duration of an exchange so a handler reached from a yield cannot start
+a second one underneath a half-finished reassembly. `/dtc` is the only handler that
+touches the bus — it stands down when that flag is set, and because it runs inside
+`handleClient()` and therefore cannot yield, its own timeouts are kept short.
+
+The pages help too: the shared ~7 KB stylesheet used to be compiled into all five
+documents and re-sent on every switch. It is now served once from `/ui.css` with a
+version-stamped, immutable URL, and the pages carry an `ETag` so a re-visit is a
+304 with no body. That is also worth ~26 KB of flash.
 
 A sample is published after **every** batch, not after all three. The other two are
 carried forward from cache while they are still fresh (3 s), so the page updates at
@@ -69,9 +97,10 @@ move fast enough to deserve equal billing:
 
 | | Refresh |
 |---|---|
-| `b1` — rpm, speed, MAP, throttle, load, coolant | every 2 batches |
-| `b2` — oil, IAT, voltage, trims, fuel rate | every 4 batches |
-| `b3` — lambda, catalyst, timing, run time, ambient, fuel | every 4 batches |
+| `b1` — rpm, speed, MAP, throttle, load, coolant | every 3 batches |
+| `b4` — pedal, commanded throttle, torque, absolute load | every 3 batches |
+| `b2` — oil, IAT, voltage, trims, fuel rate | every 6 batches |
+| `b3` — lambda, catalyst, timing, run time, ambient, fuel | every 6 batches |
 
 A batch that has not answered for three of its own polling cycles is dropped to
 `null` rather than published as current, so carrying values forward can never
@@ -97,6 +126,81 @@ The dashboard stops requesting while the page is off screen, and the Hz readout
 counts *published samples* rather than fetches — the same cached sample can be
 fetched several times and must not inflate the rate.
 
+### Mileage
+
+Two figures, in the glance area under boost and coolant:
+
+- **Mileage** — the average over this drive, with the totals it came from
+  (`23.6 km · 1.66 L`) underneath so the number can be checked rather than trusted.
+- **Right now** — instantaneous km/L, which is what the pedal moves. Standing still
+  it reads `—` and says `idling` instead, because speed ÷ nothing is not a mileage.
+
+There is no PID for fuel economy, so it is integrated on the board from speed
+(`0D`) and fuel rate (`5E`), both confirmed supported on this ECU. On the board and
+not on the page, so locking the phone or closing the browser does not lose the drive.
+Two rules keep it honest:
+
+- **Both inputs or neither.** Fuel rate lives in the `b2` batch and refreshes half as
+  often as speed, so it goes absent regularly. Counting the distance anyway would
+  divide real kilometres by an understated litre count and report a mileage better
+  than the car achieved.
+- **Gaps are not driving.** An interval longer than 5 s — a BLE dropout, a scan taking
+  the bus, a wake from sleep — is skipped rather than integrated at the last known
+  speed. The clock still moves, so the interval after an outage is one interval, not
+  the whole outage.
+
+The average is withheld until roughly the first 0.5 km and 0.1 L. Before that it
+swings by tens of km/L between polls and reads as a broken gauge.
+
+Totals start at zero each time the board powers up, which — given the
+accessory-socket supply — is exactly one drive. They also go into the trip CSV as
+`trip_km` and `trip_l`, so economy over any stretch of a drive can be recovered by
+differencing two rows.
+
+One caveat worth knowing: `5E` is the ECU's injection model, not a flow meter. Trip
+km/L from it typically reads a few percent optimistic against tank-to-tank. It is
+excellent for comparing drives and weaker as an absolute.
+
+### Driver demand vs. delivery
+
+Six of the 55 PIDs the ECM supports trace one chain: **accelerator pedal (`49`/`4A`)
+→ commanded throttle (`4C`) → actual throttle (`11`) → demanded torque (`61`) →
+delivered torque (`62`)**, with absolute load (`43`) alongside. That is what you
+asked the car for, what the ECU decided to do about it, and what the engine actually
+produced — which on a small turbo is the interesting part.
+
+Torque is reported as a percentage of the engine's reference torque (`63`), a
+constant read once at startup like barometric pressure, so the newton-metre figures
+are derived rather than read.
+
+> The scalings are the J1979 ones and have **not been verified against this car** —
+> `FINDINGS.md` lists the torque PID scaling as an open question precisely because it
+> needs data under load. A wrong data *length* is caught (`mode01Walk` rejects the
+> batch), but a wrong *scaling* would not be. Treat the numbers as provisional until
+> they have been watched under load and found sane.
+
+### On-board monitors (mode 06)
+
+Mode 06 is the ECU's own test results: what each monitor measured, and the limits it
+is judged against. `FINDINGS.md` recorded it as supported (`46 00 C0000001`) and
+never explored — so `/monitors` reads it.
+
+The value of it over `/dtc` is that a fault code only appears once a system has
+already failed. Mode 06 shows how much room is left, so a catalyst drifting toward
+its threshold is visible while it is still passing.
+
+**Pass and headroom do not require knowing the units.** A test passes when its value
+sits inside its own limits, and the headroom is a fraction of that window — both
+unit-free. The unit-and-scaling table is long and only partly documented, so values
+are shown raw with their scaling id, decoded only where the multiplier is
+unambiguous. Monitor names likewise: only unambiguous J1979 ids are named, the rest
+keep their raw id rather than being given a label that might be wrong.
+
+Discovery walks the support masks (`00` → `20` → `40` …, each mask's last bit
+pointing at the next), then each monitor is read one at a time. It runs only while
+the page is open — monitors move over minutes, and polling them continuously would
+take bus time from the values that move now.
+
 ### The DID scan runs in the background
 
 A scan is driven by the board, so it continues if you navigate away, close the
@@ -116,6 +220,83 @@ Scanning is time-boxed to 250 ms per turn rather than a fixed identifier count. 
 count behaves wildly differently per transport — 40 identifiers is about a second on
 CAN but roughly 22 s over BLE, during which nothing answers the web server and the
 board appears hung.
+
+### Watching identifiers to find out what they hold
+
+A sweep finds identifiers that answer. It cannot say what any of them contain — the
+manufacturer-specific block (ISO 14229-1 hands `0100`–`A5FF` to the manufacturer)
+comes back as one or two raw bytes with no name, unit or scaling, and that lives in
+an ODX database nobody outside the supplier has.
+
+What you can do is correlate. `/watch` reads up to **8** chosen identifiers
+continuously and shows them next to rpm, speed, coolant, intake, load and throttle,
+each with a sparkline. Blip the throttle and an rpm-linked value gives itself away.
+The ones the scanner found are offered as checkboxes, so there is no copying hex
+between pages.
+
+**Coming from a build before 1.7.0:** those sweeps kept their hits in RAM only —
+nothing was written to flash — so an updated board comes up with an empty picker
+even though the sweep happened. The `did_hits.csv` you exported is the only copy,
+and the picker loads it directly: choose the file and the identifiers appear as
+checkboxes, merged with anything the board found itself. It is parsed in the
+browser and kept in `localStorage`; nothing is uploaded, and there is no endpoint
+that would make a browser a second source of truth for what the board found.
+
+The same readings become extra columns on the trip CSV — two per identifier: the
+bytes decoded big-endian, and the raw bytes beside them. Two bytes might equally be
+one 16-bit value or two 8-bit ones and nothing in the reply says which, so the
+decode is a convenience and the raw column is the record. An identifier that has
+stopped answering writes **empty** cells rather than zeros, the same rule the PID
+columns already follow: a missing reading must not correlate as a value of nought.
+
+Changing the set **rotates the CSV**. Columns are fixed when a file is opened, and
+shifting them halfway down one is worse than having two files. Re-applying an
+identical set is not a change, so pressing Apply twice does not litter the partition.
+
+The cost is real and the page states it. Every watched identifier is one more bus
+exchange, and BLE affords about six a second in total — eight at the default one per
+second is roughly a sixth of the budget. Watching **pauses entirely while a sweep is
+running**; a sweep is already hours long and shares the bus with the sampler, and a
+third claimant would do both jobs badly.
+
+This gives correlation, not meaning. It will tell you `1002` tracks coolant; the
+offset and scale come from fitting the logged column against the PID afterwards.
+Service `0x22` is still a read — only the identifier varies, never the service.
+
+### Trip logs
+
+A CSV row a second while the ECU is answering, written to the 1.5 MB filesystem
+partition. Twenty-two columns, wall-clock time and uptime on every row, and empty
+cells rather than zeros where a value was not read — so a gap is a gap, not a
+reading of nought.
+
+Roughly half a megabyte an hour, so the partition holds a few hours and the oldest
+trip is deleted automatically when space runs short. LittleFS rather than SPIFFS:
+the board loses power the instant the ignition goes off, mid-write as often as not,
+and LittleFS is built to survive exactly that.
+
+The clock comes from whichever page you open, so a drive that starts before you open
+one has an unset clock for its first rows. Each file's header records whether the
+clock was set rather than implying a timestamp it does not have.
+
+### Scans survive being switched off
+
+A sweep is tens of thousands of requests — the better part of a day over BLE — so it
+has to outlast the car being switched off. Position goes to NVS as it runs, hits are
+appended to the filesystem the moment they are found, and an interrupted sweep
+resumes on the next boot rather than starting over.
+
+It also stops sweeping when the ECU stops answering. **A timeout and a negative
+response mean opposite things:** a negative response is the ECU saying "no such
+identifier", which is a result worth recording; a timeout is no answer at all. After
+25 consecutive timeouts the sweep holds its position and probes every few seconds
+until the car answers again.
+
+Without that, switching the ignition off mid-sweep would record thousands of
+identifiers as "no response" — turning an unswept range into one that looks swept
+and empty. That is the same class of silent wrong answer as the `ATCRA` bug in
+[FINDINGS](docs/FINDINGS.md), and it matters here because the whole value of the
+sweep is its negative result.
 
 ### Trend history
 
@@ -261,7 +442,10 @@ firmware/test/run.sh          # needs g++, python3 and node — no ESP32 core, n
 The ISO-TP layer and the mode-01 batch poller are extracted straight out of
 `NexonOBD.ino` and compiled against fake TWAI and ELM327 shims, so frame sequences
 that are impractical to stage against a real car — a dropped consecutive frame, a
-reordered sequence number, a reply that stops halfway — are covered. The dashboard's
+reordered sequence number, a reply that stops halfway — are covered. The same shims
+stand in for the web server, so the deadline give-back described above is tested for
+the two properties that make it safe: a silent ECU is still reported silent, and the
+extension is bounded. The dashboard's
 hold-last-value logic is pulled out of the served pages and run under node, which
 also parse-checks every page script; they are JavaScript inside C++ raw string
 literals, so nothing else in the build ever compiles them.

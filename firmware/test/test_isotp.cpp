@@ -8,6 +8,7 @@
 
 #include "shims.h"
 #include "isotp_extract.h"
+#include "../NexonOBD/didwatch.h"
 
 #include <cstdio>
 
@@ -110,6 +111,77 @@ static void test_can_silent() {
   resetBus();
   uint8_t req[2] = {0x01, 0x00}, out[64];
   eq(canIsoTp(0x7E0, 0x7E8, req, 2, out, sizeof(out), 400), -1, "reports -1");
+}
+
+// ------------------------------------------------------------------ HTTP yield
+//
+// The transports serve the web server while they wait on the car, so a tab switch
+// no longer queues behind a full ISO-TP exchange. Two things have to hold for that
+// to be safe: the time spent serving must be given back to the response deadline
+// (or every page load would show up as a phantom ECU timeout), and the give-back
+// must be bounded (or one slow handler could hold an exchange open forever).
+
+static void test_yield_only_while_idle() {
+  printf("yield: only when there is nothing on the bus\n");
+  resetBus();
+  g_yieldCostMs = 50;
+  uint8_t req[2] = {0x01, 0x00}, out[64];
+  rx(0x7E8, {0x06, 0x41, 0x00, 0xBE, 0x3E, 0xA8, 0x13});
+  eq(canIsoTp(0x7E0, 0x7E8, req, 2, out, sizeof(out), 400), 6, "reply still parsed");
+  eq(g_yieldCalls, 0, "a waiting frame is taken before the web server gets a turn");
+}
+
+static void test_yield_extends_the_deadline() {
+  printf("yield: time spent serving is not charged to the ECU\n");
+  resetBus();
+  g_yieldCostMs = 100;                       // every yield serves a request
+  uint8_t req[2] = {0x01, 0x00}, out[64];
+  uint32_t start = g_millis;
+  eq(canIsoTp(0x7E0, 0x7E8, req, 2, out, sizeof(out), 400), -1,
+     "a genuinely silent ECU is still reported silent");
+  uint32_t elapsed = g_millis - start;
+  ok(g_yieldCalls > 1, "served the web server while it waited");
+  ok(elapsed > 400 + 1000,
+     "waited well past the raw timeout, because the wait was spent serving pages");
+  ok(elapsed < 400 + YIELD_EXTEND_MAX_MS + 200,
+     "but not indefinitely - the extension is capped");
+}
+
+static void test_yield_extension_is_bounded() {
+  printf("yield: the give-back is bounded\n");
+  g_millis = 1000;
+  g_yieldCostMs = 500;                       // a slow handler: a trip download, say
+  g_yieldCalls = 0;
+  uint32_t deadline = 1400, extended = 0;
+  for (int i = 0; i < 20; i++) busWaitYield(deadline, extended);
+  eq((int)extended, (int)YIELD_EXTEND_MAX_MS, "stops extending at the cap");
+  eq((int)deadline, (int)(1400 + YIELD_EXTEND_MAX_MS), "and the deadline moved by exactly that");
+}
+
+static void test_yield_costing_nothing_changes_nothing() {
+  printf("yield: an idle server does not move the deadline\n");
+  g_millis = 1000;
+  g_yieldCostMs = 0;                         // nothing queued, accept() returns at once
+  uint32_t deadline = 1400, extended = 0;
+  for (int i = 0; i < 20; i++) busWaitYield(deadline, extended);
+  eq((int)extended, 0, "nothing served, nothing given back");
+  eq((int)deadline, 1400, "deadline untouched");
+}
+
+static void test_bus_guard_is_visible_from_a_yield() {
+  printf("yield: a handler reached from a yield can see the bus is busy\n");
+  resetBus();
+  g_yieldCostMs = 100;
+  uint8_t req[2] = {0x01, 0x00}, out[64];
+  eq(obdIsoTp(0x7E0, 0x7E8, req, 2, out, sizeof(out), 400), -1, "exchange timed out");
+  ok(g_yieldSawBusBusy, "the guard was set for the whole exchange");
+  ok(!g_busBusy, "and cleared on the way out, even though the exchange failed");
+
+  resetBus();
+  g_yieldCostMs = 100;
+  rx(0x7E8, {0x06, 0x41, 0x00, 0xBE, 0x3E, 0xA8, 0x13});
+  eq(obdIsoTp(0x7E0, 0x7E8, req, 2, out, sizeof(out), 400), 6, "exchange succeeded");
+  ok(!g_busBusy, "guard cleared on the success path too");
 }
 
 // ------------------------------------------------------------------ bleIsoTp
@@ -254,6 +326,30 @@ static void test_batch_rejects_misframed() {
   ok(isnan(L.rpm), "nothing from a misframed reply is applied");
 }
 
+static void test_new_pid_lengths() {
+  printf("pidLen: the demand/delivery PIDs\n");
+  // A wrong length is not a wrong number - mode01Walk validates against pidLen, so
+  // it rejects the batch outright. That is the safety net for PIDs added without a
+  // car to check them against, but it means the lengths have to be right or those
+  // readings simply never appear.
+  eq(pidLen(0x49), 1, "accelerator pedal D is one byte");
+  eq(pidLen(0x4A), 1, "accelerator pedal E is one byte");
+  eq(pidLen(0x4C), 1, "commanded throttle is one byte");
+  eq(pidLen(0x61), 1, "demanded torque is one byte");
+  eq(pidLen(0x62), 1, "actual torque is one byte");
+  eq(pidLen(0x43), 2, "absolute load is two");
+  eq(pidLen(0x63), 2, "reference torque is two");
+
+  // ...and a b4 reply has to walk cleanly end to end with those lengths.
+  uint8_t reply[] = {0x41, 0x49, 0x33, 0x4A, 0x34, 0x4C, 0x28,
+                     0x61, 0x8C, 0x62, 0x8A, 0x43, 0x00, 0x64};
+  Live L;
+  eq(mode01Walk(reply, sizeof(reply), PID_B4, 6, &L), 6, "a full b4 reply verifies");
+  eq((int)L.pedalD, 20, "pedal decodes");            // 0x33 * 100 / 255
+  eq((int)L.torqDem, 15, "demanded torque decodes"); // 0x8C - 125
+  eq((int)L.torqAct, 13, "actual torque decodes");   // 0x8A - 125
+}
+
 static void test_mode01_walk() {
   printf("mode01Walk: verification\n");
   static const uint8_t pids[2] = {0x0C, 0x05};
@@ -281,6 +377,56 @@ static void test_batch_silent_does_not_retry() {
   ok(g_millis - t0 < 800, "did not burn a second timeout");
 }
 
+// ------------------------------------------------------------------ mode 06
+
+static void test_mon_mask() {
+  printf("monMaskMids: support masks and how the ranges chain\n");
+  uint8_t out[32];
+
+  // The exact reply FINDINGS records from this car: 46 00 C0 00 00 01.
+  // C0 is the top two bits of the first byte - monitors 01 and 02 - and the very
+  // last bit is id 20, which is not a monitor but the marker saying the next range
+  // has its own mask.
+  uint8_t real[] = {0x46, 0x00, 0xC0, 0x00, 0x00, 0x01};
+  uint8_t n = monMaskMids(real, sizeof(real), 0x00, out, 32);
+  eq(n, 3, "three bits set");
+  eq(out[0], 0x01, "monitor 01");
+  eq(out[1], 0x02, "monitor 02");
+  eq(out[2], 0x20, "and the next-range marker");
+
+  // Bit ordering is most significant first, and the range is relative to the base.
+  uint8_t hi[] = {0x46, 0x20, 0x80, 0x00, 0x00, 0x00};
+  eq(monMaskMids(hi, sizeof(hi), 0x20, out, 32), 1, "one bit set in the 20 range");
+  eq(out[0], 0x21, "the first id of that range, not of the first range");
+
+  // A reply for a different base than we asked about is not ours to read.
+  eq(monMaskMids(real, sizeof(real), 0x20, out, 32), 0, "a mismatched base is rejected");
+  uint8_t stub[] = {0x46, 0x00, 0xC0};
+  eq(monMaskMids(stub, sizeof(stub), 0x00, out, 32), 0, "a short mask is rejected");
+}
+
+static void test_mon_parse() {
+  printf("monParse: nine-byte test records\n");
+  MonRec r[12];
+  uint8_t reply[] = {0x46,
+                     0x01, 0x01, 0x0B, 0x02, 0x30, 0x01, 0x00, 0x03, 0x00,
+                     0x01, 0x02, 0x0B, 0x00, 0x90, 0x00, 0x40, 0x01, 0x80};
+  eq(monParse(reply, sizeof(reply), r, 12), 2, "both records are read");
+  eq(r[0].mid, 0x01, "monitor id");
+  eq(r[0].tid, 0x01, "test id");
+  eq(r[0].uas, 0x0B, "unit and scaling id is kept, not interpreted");
+  eq((int)r[0].value, 0x0230, "value is a 16-bit word");
+  eq((int)r[0].lo, 0x0100, "as is the lower limit");
+  eq((int)r[0].hi, 0x0300, "and the upper");
+  eq(r[1].tid, 0x02, "the second record follows on");
+
+  // A reply cut mid-record must drop the fragment rather than read past it.
+  eq(monParse(reply, 14, r, 12), 1, "a trailing part-record is ignored");
+  uint8_t wrong[] = {0x41, 0x01, 0x01, 0x0B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  eq(monParse(wrong, sizeof(wrong), r, 12), 0, "a reply that is not mode 06 is rejected");
+  eq(monParse(reply, sizeof(reply), r, 1), 1, "the caller's capacity is respected");
+}
+
 // ------------------------------------------------------------------ reconnect
 
 static void test_pick_backoff() {
@@ -305,13 +451,17 @@ static void test_pick_backoff() {
 
 static void test_sample_order_favours_live_values() {
   printf("SAMPLE_ORDER: b1 gets the most turns\n");
-  int count[3] = {0, 0, 0};
+  int count[4] = {0, 0, 0, 0};
   for (size_t i = 0; i < sizeof(SAMPLE_ORDER) / sizeof(SAMPLE_ORDER[0]); i++)
     count[SAMPLE_ORDER[i]]++;
   // b1 is rpm, speed, MAP, throttle, load, coolant - everything with a sparkline.
   // On BLE each batch is a full round trip, so giving all three equal billing held
   // the values that actually move to a third of the achievable rate.
   ok(count[0] > count[1] && count[0] > count[2], "b1 is polled more often than b2/b3");
+  // b4 is pedal, commanded throttle and torque - driver input and the engine's
+  // answer to it. A pedal position sampled every few seconds says nothing, so it
+  // rides at b1's cadence rather than with the temperatures.
+  eq(count[3], count[0], "b4 keeps pace with b1");
   ok(count[1] > 0 && count[2] > 0, "the slower batches are still polled");
 }
 
@@ -330,9 +480,9 @@ static void test_stale_window_tracks_the_cycle() {
 
 static void test_sample_merge_combines_batches() {
   printf("sampleMerge: a published sample carries every fresh batch\n");
-  uint8_t bufs[3][40] = {};
-  uint8_t lens[3] = {0, 0, 0};
-  uint32_t stamps[3] = {0, 0, 0};
+  uint8_t bufs[4][40] = {};
+  uint8_t lens[4] = {0, 0, 0, 0};
+  uint32_t stamps[4] = {0, 0, 0, 0};
 
   // b1 answered: 41 0C 0AF0 0D 00
   const uint8_t r1[] = {0x41, 0x0C, 0x0A, 0xF0, 0x0D, 0x00};
@@ -350,9 +500,9 @@ static void test_sample_merge_combines_batches() {
 
 static void test_sample_merge_drops_stale() {
   printf("sampleMerge: a batch that stopped answering is dropped\n");
-  uint8_t bufs[3][40] = {};
-  uint8_t lens[3] = {0, 0, 0};
-  uint32_t stamps[3] = {0, 0, 0};
+  uint8_t bufs[4][40] = {};
+  uint8_t lens[4] = {0, 0, 0, 0};
+  uint32_t stamps[4] = {0, 0, 0, 0};
 
   const uint8_t r1[] = {0x41, 0x0C, 0x0A, 0xF0};
   memcpy(bufs[0], r1, sizeof(r1)); lens[0] = sizeof(r1); stamps[0] = 10000;
@@ -369,9 +519,9 @@ static void test_sample_merge_drops_stale() {
 
 static void test_sample_merge_nothing_fresh() {
   printf("sampleMerge: everything stale\n");
-  uint8_t bufs[3][40] = {};
-  uint8_t lens[3] = {0, 0, 0};
-  uint32_t stamps[3] = {0, 0, 0};
+  uint8_t bufs[4][40] = {};
+  uint8_t lens[4] = {0, 0, 0, 0};
+  uint32_t stamps[4] = {0, 0, 0, 0};
   const uint8_t r1[] = {0x41, 0x0C, 0x0A, 0xF0};
   memcpy(bufs[0], r1, sizeof(r1)); lens[0] = sizeof(r1); stamps[0] = 1000;
 
@@ -395,6 +545,307 @@ static void test_pollbatch_keeps_bytes() {
   eq((int)again.rpm, 700, "and decode to the same values");
 }
 
+// ------------------------------------------------------------------ trip totals
+//
+// Fuel economy has to be integrated - there is no PID for it. The failure modes are
+// all quiet ones: a gap counted as if it were driven, distance accumulated while
+// the fuel rate was missing, a stale reading integrated twice. Each of those moves
+// the average in the flattering direction, which is exactly the direction a mileage
+// figure must not drift on its own.
+
+static void tripReset() {
+  g_tripKm = 0.0f;
+  g_tripL = 0.0f;
+  tripIntAt = 0;
+}
+
+static void test_trip_integrates_distance_and_fuel() {
+  printf("trip: integrates speed and fuel rate over time\n");
+  tripReset();
+  tripIntegrate(60.0f, 6.0f, 1000);              // first call only starts the clock
+  eq((int)(g_tripKm * 1000), 0, "the first sample has no interval behind it");
+
+  // 60 km/h for one second is 1/60 km; 6 L/h for one second is 1/600 L.
+  tripIntegrate(60.0f, 6.0f, 2000);
+  ok(fabsf(g_tripKm - 60.0f / 3600.0f) < 1e-5f, "one second at 60 km/h is 16.7 m");
+  ok(fabsf(g_tripL - 6.0f / 3600.0f) < 1e-6f, "and burns 1.67 ml at 6 L/h");
+
+  for (uint32_t t = 3000; t <= 3600000; t += 1000) tripIntegrate(60.0f, 6.0f, t);
+  ok(fabsf(g_tripKm - 60.0f) < 0.05f, "an hour at 60 km/h is 60 km");
+  ok(fabsf(g_tripL - 6.0f) < 0.01f, "and 6 litres at 6 L/h");
+  ok(fabsf(g_tripKm / g_tripL - 10.0f) < 0.01f, "which is 10 km/L");
+}
+
+static void test_trip_skips_intervals_it_knows_nothing_about() {
+  printf("trip: a gap is not driving\n");
+  tripReset();
+  tripIntegrate(60.0f, 6.0f, 1000);
+  tripIntegrate(60.0f, 6.0f, 2000);
+  float km = g_tripKm, l = g_tripL;
+
+  // A BLE dropout, a scan taking the bus, a wake from sleep. The car may have been
+  // stationary or at 100 km/h; integrating the last known speed across it invents
+  // a distance nobody measured.
+  tripIntegrate(60.0f, 6.0f, 2000 + TRIP_INT_MAX_MS + 1);
+  ok(g_tripKm == km && g_tripL == l, "a gap longer than the cap is not integrated");
+
+  // ...but the clock still moves, so the next interval is measured from the gap's
+  // end rather than accumulating the whole outage on the following sample.
+  tripIntegrate(60.0f, 6.0f, 2000 + TRIP_INT_MAX_MS + 1001);
+  ok(fabsf(g_tripKm - (km + 60.0f / 3600.0f)) < 1e-5f,
+     "and the interval after it is one second, not the whole outage");
+}
+
+static void test_trip_needs_both_inputs() {
+  printf("trip: both inputs or neither\n");
+  tripReset();
+  tripIntegrate(60.0f, 6.0f, 1000);
+  tripIntegrate(60.0f, 6.0f, 2000);
+  float km = g_tripKm, l = g_tripL;
+
+  // Fuel rate is in the b2 batch and refreshes half as often as speed, so it goes
+  // absent regularly. Counting the distance anyway would divide real kilometres by
+  // an understated litre count and report a mileage better than the car achieved.
+  tripIntegrate(60.0f, NAN, 3000);
+  ok(g_tripKm == km, "distance is not counted while the fuel rate is missing");
+  ok(g_tripL == l, "and neither is fuel");
+
+  tripIntegrate(NAN, 6.0f, 4000);
+  ok(g_tripKm == km && g_tripL == l, "nor the other way round");
+
+  // A misframed reply that decoded to something impossible.
+  tripIntegrate(-5.0f, 6.0f, 5000);
+  ok(g_tripKm == km && g_tripL == l, "a negative decode is refused rather than subtracted");
+
+  tripIntegrate(60.0f, 6.0f, 6000);
+  ok(g_tripKm > km, "and it resumes once both are back");
+}
+
+static void test_trip_totals_only_grow() {
+  printf("trip: totals are monotonic\n");
+  tripReset();
+  float lastKm = 0, lastL = 0;
+  bool monotonic = true;
+  for (uint32_t t = 1000; t <= 60000; t += 1000) {
+    // A drive with stops, missing samples and idling.
+    float sp = (t / 1000) % 7 == 0 ? 0.0f : 45.0f;
+    float fr = (t / 1000) % 5 == 0 ? NAN : 4.2f;
+    tripIntegrate(sp, fr, t);
+    if (g_tripKm < lastKm || g_tripL < lastL) monotonic = false;
+    lastKm = g_tripKm;
+    lastL = g_tripL;
+  }
+  ok(monotonic, "neither total ever goes backwards across a minute of mixed driving");
+  ok(lastKm > 0 && lastL > 0, "and both accumulate");
+  ok(lastKm / lastL > 0 && lastKm / lastL < 100, "and gives a plausible km/L");
+  // Idling burns fuel while covering no ground, which is the whole reason a trip
+  // average is worth having and the instantaneous figure is not.
+  tripReset();
+  for (uint32_t t = 1000; t <= 60000; t += 1000) tripIntegrate(0.0f, 0.8f, t);
+  eq((int)(g_tripKm * 1000), 0, "idling covers no distance");
+  ok(g_tripL > 0, "but does burn fuel");
+}
+
+// ------------------------------------------------------------------ DID watch
+//
+// The scanner finds identifiers; the watch reads a chosen few of them repeatedly
+// and files the readings alongside the live PIDs. Everything here is a way that can
+// go wrong silently: a column appearing in the CSV header with no cell under it, a
+// value reading as zero when it never actually arrived, or a typo parsing as a
+// perfectly valid identifier 0000 and being watched forever.
+
+static WatchDid mk(uint16_t did, uint8_t ecu, std::vector<uint8_t> bytes, uint32_t stamp) {
+  WatchDid w;
+  w.did = did;
+  w.ecu = ecu;
+  w.len = (uint8_t)bytes.size();
+  for (size_t i = 0; i < bytes.size() && i < sizeof(w.data); i++) w.data[i] = bytes[i];
+  w.stamp = stamp;
+  return w;
+}
+
+static void test_watch_value_is_big_endian() {
+  printf("watch: decodes big-endian unsigned\n");
+  eq((int)watchValue(mk(0x1000, 0, {0x91}, 1)), 0x91, "one byte");
+  eq((int)watchValue(mk(0x1002, 0, {0x15, 0x4F}, 1)), 0x154F, "two bytes, high byte first");
+  eq((int)watchValue(mk(0x1002, 0, {0x00, 0x00, 0x01, 0x00}, 1)), 256, "four bytes");
+  // Longer than four bytes is a string or a structure, not a number - the raw column
+  // is the honest representation of those and the decode simply stops.
+  eq((int)watchValue(mk(0xF18A, 0, {0x42, 0x4F, 0x53, 0x43, 0x48}, 1)), 0x424F5343,
+     "stops at four bytes rather than overflowing");
+  WatchDid never;
+  eq((int)watchValue(never), 0, "an identifier that never answered decodes to nothing");
+}
+
+static void test_watch_freshness() {
+  printf("watch: a reading that missed its turn is not current\n");
+  watchN = 4;
+  watchPeriodMs = 1000;
+  uint32_t cycle = watchCycleMs();
+  eq((int)cycle, 4000, "a cycle is one read of each");
+
+  WatchDid never;
+  ok(!watchFresh(never, 10000), "never answered is never fresh");
+  ok(watchFresh(mk(0x1000, 0, {0x10}, 9500), 10000), "just read is fresh");
+  // One cycle plus a period of slack: this adapter drops replies (FINDINGS), and a
+  // single lost one must not flap the column between present and absent.
+  ok(watchFresh(mk(0x1000, 0, {0x10}, 10000 - (cycle + 900)), 10000),
+     "one dropped reply is tolerated");
+  ok(!watchFresh(mk(0x1000, 0, {0x10}, 10000 - (cycle + 1500)), 10000),
+     "but a reading that missed a whole extra cycle is stale");
+}
+
+static void test_watch_header_and_row_agree() {
+  printf("watch: every header column has a cell under it\n");
+  watchN = 2;
+  watchPeriodMs = 1000;
+  const uint32_t now = 100000;
+  // Every state a watched identifier can be in, including the ones that produce
+  // empty cells - an empty cell is still a cell, or the row shifts left and every
+  // column after it is read as the wrong thing.
+  WatchDid cases[] = {
+    WatchDid(),                                             // never answered
+    mk(0x1002, 0, {0x15, 0x4F}, now - 100),                 // fresh
+    mk(0x1002, 1, {0x15, 0x4F}, now - 60000),               // long stale
+    mk(0x1000, 0, {0x91}, now - 100),                       // single byte
+    mk(0xF190, 0, {1, 2, 3, 4, 5, 6, 7, 8}, now - 100),     // full width
+  };
+  for (const WatchDid &w : cases) {
+    char names[WATCH_COLS_PER_DID][12];
+    char cells[WATCH_COLS_PER_DID][20];
+    uint8_t nh = watchColNames(w, names, WATCH_COLS_PER_DID);
+    uint8_t nr = watchColCells(w, now, cells, WATCH_COLS_PER_DID);
+    eq(nr, nh, "header columns and row cells match");
+  }
+}
+
+static void test_watch_cells() {
+  printf("watch: cell contents\n");
+  watchN = 1;
+  watchPeriodMs = 1000;
+  const uint32_t now = 100000;
+  char cells[WATCH_COLS_PER_DID][20];
+
+  watchColCells(mk(0x1002, 0, {0x15, 0x4F}, now - 100), now, cells, WATCH_COLS_PER_DID);
+  ok(strcmp(cells[0], "5455") == 0, "decoded column carries the big-endian value");
+  ok(strcmp(cells[1], "154F") == 0, "raw column carries the bytes as sent");
+
+  // The whole reason an absent PID is written empty rather than zero: a watched
+  // identifier that stopped answering must not correlate as a value of nought.
+  watchColCells(mk(0x1002, 0, {0x15, 0x4F}, now - 90000), now, cells, WATCH_COLS_PER_DID);
+  ok(cells[0][0] == 0, "a stale reading leaves the value empty, not zero");
+  ok(cells[1][0] == 0, "and leaves the raw column empty too");
+
+  WatchDid never;
+  watchColCells(never, now, cells, WATCH_COLS_PER_DID);
+  ok(cells[0][0] == 0 && cells[1][0] == 0, "never answered writes two empty cells");
+}
+
+static void test_watch_column_names() {
+  printf("watch: column names distinguish the responder\n");
+  char names[WATCH_COLS_PER_DID][12];
+  watchColNames(mk(0x1002, 0, {}, 0), names, WATCH_COLS_PER_DID);
+  ok(strcmp(names[0], "E1002") == 0, "an ECM identifier names its column E....");
+  ok(strcmp(names[1], "E1002x") == 0, "and the raw column takes an x");
+  watchColNames(mk(0x0140, 1, {}, 0), names, WATCH_COLS_PER_DID);
+  ok(strcmp(names[0], "T0140") == 0, "the same DID on the TCM is a different column");
+}
+
+static void test_watch_nvs_round_trip() {
+  printf("watch: the set survives a restart\n");
+  WatchDid in[3] = { mk(0x1002, 0, {0x15, 0x4F}, 12345),
+                     mk(0x0140, 1, {0x01}, 12345),
+                     mk(0xF190, 0, {}, 0) };
+  uint8_t blob[WATCH_MAX * 3];
+  size_t n = watchEncode(in, 3, blob, sizeof(blob));
+  eq((int)n, 9, "three identifiers encode to nine bytes");
+
+  WatchDid out[WATCH_MAX];
+  uint8_t got = watchDecode(blob, n, out, WATCH_MAX);
+  eq(got, 3, "and decode back to three");
+  ok(out[0].did == 0x1002 && out[0].ecu == 0, "the first survives");
+  ok(out[1].did == 0x0140 && out[1].ecu == 1, "the responder survives too");
+  // Readings are deliberately not persisted: a value from before the ignition went
+  // off is not a reading, and restoring one would put a stale number into the first
+  // rows of the next drive's CSV.
+  eq(out[0].len, 0, "readings are not restored, only the choice of identifier");
+  eq((int)out[0].stamp, 0, "so nothing looks fresh on the first row after a restart");
+
+  WatchDid two[2];
+  eq(watchDecode(blob, n, two, 2), 2, "decode honours the caller's capacity");
+  eq((int)watchEncode(in, 3, blob, 4), 3, "encode honours the buffer it was given");
+}
+
+static void test_watch_parse() {
+  printf("watch: parsing identifiers\n");
+  WatchDid w;
+  ok(watchParseOne("E1002", w) && w.did == 0x1002 && w.ecu == 0, "E prefix is the ECM");
+  ok(watchParseOne("T0140", w) && w.did == 0x0140 && w.ecu == 1, "T prefix is the TCM");
+  ok(watchParseOne("1002", w) && w.did == 0x1002 && w.ecu == 0, "bare hex assumes the ECM");
+  ok(watchParseOne("f18a", w) && w.did == 0xF18A, "lower case is accepted");
+  // A typo has to drop the entry rather than fall through to identifier 0000, which
+  // is a real address and would then be watched silently forever.
+  ok(!watchParseOne("10G2", w), "a non-hex digit is rejected");
+  ok(!watchParseOne("102", w), "three digits is rejected");
+  ok(!watchParseOne("10022", w), "five digits is rejected");
+  ok(!watchParseOne("", w), "empty is rejected");
+  ok(!watchParseOne("E", w), "a bare prefix is rejected");
+}
+
+static void test_watch_parse_list() {
+  printf("watch: parsing a list\n");
+  WatchDid out[WATCH_MAX];
+  eq(watchParseList("1002,1003,T0140", out, WATCH_MAX), 3, "comma separated");
+  ok(out[2].ecu == 1 && out[2].did == 0x0140, "the responder carries through the list");
+  eq(watchParseList("1002, 1003 ,1002", out, WATCH_MAX), 2,
+     "a duplicate does not get a second turn of the round robin");
+  eq(watchParseList("E1002,T1002", out, WATCH_MAX), 2,
+     "the same DID on two ECUs is not a duplicate");
+  eq(watchParseList("1002,zzz,1003", out, WATCH_MAX), 2, "junk is dropped, the rest kept");
+  eq(watchParseList("", out, WATCH_MAX), 0, "an empty list watches nothing");
+  eq(watchParseList("1000,1001,1002,1003,1004,1005,1006,1007,1008,1009", out, WATCH_MAX),
+     WATCH_MAX, "and the set cannot exceed the cap");
+}
+
+static void test_watch_apply_detects_a_real_change() {
+  printf("watch: only a real change rotates the CSV\n");
+  WatchDid empty[1];
+  watchApply(empty, 0, 1000);                     // known starting point
+  eq((int)watchN, 0, "starts watching nothing");
+
+  WatchDid a[2] = { mk(0x1002, 0, {}, 0), mk(0x1003, 0, {}, 0) };
+  uint32_t gen0 = watchGen;
+  ok(watchApply(a, 2, 1000), "a new set is a change");
+  eq((int)(watchGen - gen0), 1, "and bumps the generation, so the trip file rotates");
+  eq((int)watchN, 2, "both are watched");
+  eq((int)watchTurn, 0, "the round robin restarts");
+
+  // The page re-sends its selection on every Apply. If an identical list counted as
+  // a change, a drive would become a pile of one-row CSVs.
+  uint32_t gen1 = watchGen;
+  ok(!watchApply(a, 2, 1000), "re-applying the same set is not a change");
+  eq((int)(watchGen - gen1), 0, "so the file it is writing stays open");
+
+  ok(watchApply(a, 2, 2000), "changing only the period is still a change");
+  WatchDid reordered[2] = { mk(0x1003, 0, {}, 0), mk(0x1002, 0, {}, 0) };
+  ok(watchApply(reordered, 2, 2000), "reordering changes the column order, so it counts");
+
+  // A reading taken under the old set does not belong under the new header.
+  watch[0].len = 2; watch[0].data[0] = 0x15; watch[0].stamp = 4242;
+  watchApply(a, 2, 2000);
+  eq((int)watch[0].len, 0, "applying a set clears readings taken under the last one");
+
+  watchApply(a, 2, 1);
+  eq((int)watchPeriodMs, (int)WATCH_PERIOD_MIN, "an absurd period is clamped up");
+  watchApply(a, 2, 99999);
+  eq((int)watchPeriodMs, (int)WATCH_PERIOD_MAX, "and a lazy one is clamped down");
+
+  WatchDid many[WATCH_MAX + 2];
+  for (uint8_t i = 0; i < WATCH_MAX + 2; i++) many[i] = mk((uint16_t)(0x2000 + i), 0, {}, 0);
+  watchApply(many, WATCH_MAX + 2, 1000);
+  eq((int)watchN, (int)WATCH_MAX, "more than the cap is truncated, not overflowed");
+}
+
 // ------------------------------------------------------------------
 
 int main() {
@@ -408,6 +859,12 @@ int main() {
   test_can_oversize_reply();
   test_can_silent();
 
+  test_yield_only_while_idle();
+  test_yield_extends_the_deadline();
+  test_yield_extension_is_bounded();
+  test_yield_costing_nothing_changes_nothing();
+  test_bus_guard_is_visible_from_a_yield();
+
   test_ble_single_frame();
   test_ble_ignores_other_ecu();
   test_ble_multiframe_complete();
@@ -416,6 +873,7 @@ int main() {
   test_ble_no_data();
   test_ble_negative();
 
+  test_new_pid_lengths();
   test_mode01_walk();
   test_batch_complete();
   test_batch_retries_for_a_complete_reply();
@@ -423,6 +881,8 @@ int main() {
   test_batch_rejects_misframed();
   test_batch_silent_does_not_retry();
 
+  test_mon_mask();
+  test_mon_parse();
   test_pick_backoff();
   test_sample_order_favours_live_values();
   test_stale_window_tracks_the_cycle();
@@ -430,6 +890,21 @@ int main() {
   test_sample_merge_drops_stale();
   test_sample_merge_nothing_fresh();
   test_pollbatch_keeps_bytes();
+
+  test_trip_integrates_distance_and_fuel();
+  test_trip_skips_intervals_it_knows_nothing_about();
+  test_trip_needs_both_inputs();
+  test_trip_totals_only_grow();
+
+  test_watch_value_is_big_endian();
+  test_watch_freshness();
+  test_watch_header_and_row_agree();
+  test_watch_cells();
+  test_watch_column_names();
+  test_watch_nvs_round_trip();
+  test_watch_parse();
+  test_watch_parse_list();
+  test_watch_apply_detects_a_real_change();
 
   printf("\n%d checks, %d failed\n", g_ran, g_fail);
   return g_fail ? 1 : 0;

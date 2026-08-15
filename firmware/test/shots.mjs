@@ -11,7 +11,7 @@
 import { createRequire } from 'node:module';
 import http from 'node:http';
 import { mkdirSync } from 'node:fs';
-import { pageSource } from './pagesrc.mjs';
+import { pageSource, uiCss } from './pagesrc.mjs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -40,6 +40,8 @@ const CRUISING = {
   coolant: 89, oil: 96, iat: 34, ambient: 34, volt: 14.32, stft: 2.3,
   ltft: -1.6, lambda: 0.998, cat: 642.5, timing: 18.5, fuelRate: 4.85,
   fuel: 100, runtime: 1284,
+  // Accumulated by the board over the drive, not sampled: 23.6 km on 1.66 L.
+  tripKm: 23.62, tripL: 1.661,
 };
 
 const SCENARIOS = {
@@ -62,6 +64,9 @@ const PAGES = [
   ['dashboard', '../NexonOBD/dashboard_html.h'],
   ['scan', '../NexonOBD/scan_html.h'],
   ['update', '../NexonOBD/ota_html.h'],
+  ['monitors', '../NexonOBD/mon_html.h'],
+  ['trips', '../NexonOBD/trip_html.h'],
+  ['watch', '../NexonOBD/watch_html.h'],
 ];
 
 const WIDTHS = [[390, 'phone'], [768, 'tablet']];
@@ -75,6 +80,13 @@ const html = Object.fromEntries(PAGES.map(([name, f]) => [name, pageSource(f)]))
 
 const server = http.createServer((req, res) => {
   const url = req.url.split('?')[0];
+  // The pages link the shared stylesheet rather than inlining it, so the shots are
+  // only representative if this route works - an unstyled screenshot would be a
+  // very loud failure, but a silent 404 here would look like a CSS regression.
+  if (url === '/ui.css') {
+    res.writeHead(200, { 'content-type': 'text/css' });
+    return res.end(uiCss());
+  }
   if (url === '/data') {
     res.writeHead(200, { 'content-type': 'application/json' });
     if (scanning) {
@@ -101,6 +113,49 @@ const server = http.createServer((req, res) => {
     }
     res.writeHead(200, { 'content-type': 'application/json' });
     return res.end(JSON.stringify(h));
+  }
+  if (url.startsWith('/time')) {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ set: true, epoch: 1755000000000 }));
+  }
+  if (url === '/trips/list') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ fs: true, used: 486539, total: 1572864,
+      live: '/t0007.csv', trips: [
+        { name: '/t0007.csv', size: 128400 },
+        { name: '/t0006.csv', size: 291733 },
+        { name: '/t0005.csv', size: 66406 },
+      ] }));
+  }
+  if (url === '/mon') {
+    // Two O2 monitors, which is what this car's support mask implies: one comfortably
+    // inside its window, one close enough to a limit to be worth seeing.
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ ready: true, ids: 2, recs: [
+      { mid: '01', tid: '01', uas: '0B', v: 560, lo: 200, hi: 900 },
+      { mid: '01', tid: '02', uas: '0B', v: 143, lo: 120, hi: 700 },
+      { mid: '02', tid: '01', uas: '03', v: 4100, lo: 1000, hi: 8000 },
+      { mid: '02', tid: '81', uas: '01', v: 12, lo: 0, hi: 40 },
+    ] }));
+  }
+  if (url === '/watch/list') {
+    // Three identifiers from the 10xx block the sweep turned up, in the states that
+    // matter: answering, answering with a single byte, and gone quiet.
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ max: 8, period: 1000, cycle: 3000, scanning: false,
+      dids: [
+        { name: 'E1002', did: '1002', ecu: 'ECM', len: 2, fresh: true,
+          val: 5455 + (seq % 40), hex: '154F', age: 320 },
+        { name: 'E1000', did: '1000', ecu: 'ECM', len: 1, fresh: true,
+          val: 145, hex: '91', age: 1180 },
+        { name: 'T0140', did: '0140', ecu: 'TCM', len: 2, fresh: false,
+          val: 4200, hex: '1068', age: 21400 },
+      ],
+      v: { rpm: 2150, speed: 58, coolant: 89, iat: 34, load: 34.5, throttle: 18.4 } }));
+  }
+  if (url === '/watch/set') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, n: 3, period: 1000, changed: true }));
   }
   if (url === '/dtc') {
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -157,7 +212,7 @@ for (const [width, wname] of WIDTHS) {
   }
 
   ok = true; scanning = false; sample = CRUISING;
-  for (const p of ['scan', 'update']) {
+  for (const p of ['scan', 'update', 'monitors', 'trips', 'watch']) {
     await page.goto(`${base}/${p}`);
     await page.waitForTimeout(500);
     const f = join(outDir, `${p}-${wname}.png`);

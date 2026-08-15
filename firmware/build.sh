@@ -16,7 +16,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
 TC="$HERE/.toolchain"
 OUT="$HERE/build"
-FQBN="esp32:esp32:XIAO_ESP32S3"
+# PSRAM is off by default on this board; the scan hit list and the JSON it builds
+# both live there rather than competing with the web server for the 320 KB heap.
+FQBN="esp32:esp32:XIAO_ESP32S3:PSRAM=opi"
 
 export ARDUINO_DIRECTORIES_DATA="$TC/data"
 export ARDUINO_DIRECTORIES_DOWNLOADS="$TC/downloads"

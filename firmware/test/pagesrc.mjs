@@ -1,10 +1,14 @@
 // Reassemble a served page from its C++ source.
 //
 // Each page is a PROGMEM string built by concatenating raw string literals around
-// the UI_CSS macro, so the three pages share one stylesheet and cannot drift. That
-// means the HTML cannot be read straight off disk - this puts it back together the
-// way the compiler will, so the tests and the screenshot harness look at exactly
-// what the board serves.
+// the FW_VERSION macro, so the HTML cannot be read straight off disk - this puts it
+// back together the way the compiler will, so the tests and the screenshot harness
+// look at exactly what the board serves.
+//
+// The shared stylesheet used to be spliced in the same way, via a UI_CSS macro. It
+// is now served separately from /ui.css and linked, so that a tab switch does not
+// re-download an identical 7 KB; uiCss() below is what that route sends, and the
+// harness serves it at the same path the pages ask for.
 
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -18,8 +22,11 @@ function rawLiteral(src, tag) {
   return m[1];
 }
 
+// The shared stylesheet is served from /ui.css rather than inlined, so the harness
+// has to serve it too - and the rules that used to be asserted against page source
+// are now asserted against this.
 let cssCache = null;
-function uiCss() {
+export function uiCss() {
   if (cssCache === null) {
     cssCache = rawLiteral(readFileSync(join(here, '../NexonOBD/ui_css.h'), 'utf8'), 'css');
   }

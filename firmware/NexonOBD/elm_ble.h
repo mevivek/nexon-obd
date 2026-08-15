@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <BLEDevice.h>
+#include "bus_yield.h"
 
 // BLE transport to a dual-mode ELM327 clone.
 //
@@ -39,10 +40,16 @@ static String elmCommand(const String &cmd, uint32_t timeoutMs = 1500) {
   String out = cmd + "\r";
   elmTxChar->writeValue((uint8_t *)out.c_str(), out.length(), false);   // write without response
 
+  // The adapter takes up to ATST (400 ms) to answer and the buffer fills from a
+  // notify callback, so this wait is pure dead time - spend it serving the web
+  // server instead. busWaitYield extends the deadline by whatever that costs, so a
+  // page load cannot turn into a phantom ELM timeout. See bus_yield.h.
   uint32_t deadline = millis() + timeoutMs;
-  while (millis() < deadline) {
+  uint32_t extended = 0;
+  while ((int32_t)(deadline - millis()) > 0) {
     if (elmBuf.indexOf('>') >= 0) break;
     delay(1);
+    busWaitYield(deadline, extended);
   }
   String r = elmBuf;
   r.replace(">", "");

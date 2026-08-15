@@ -16,9 +16,8 @@ R"rawliteral(<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Nexon Live</title>
-<style>)rawliteral"
-UI_CSS
-R"rawliteral(
+<link rel="stylesheet" href="/ui.css?v=)rawliteral" FW_VERSION R"rawliteral(">
+<style>
 .glance{display:grid;grid-template-columns:1fr 140px;gap:8px}
 @media(max-width:338px){.glance{grid-template-columns:1fr}}
 .hero .value{font-size:46px;letter-spacing:-.035em}
@@ -42,7 +41,7 @@ letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 <span class="sub">v)rawliteral" FW_VERSION R"rawliteral( &middot; <span id="tr">&mdash;</span></span>
 <div class="status"><span class="dot" id="dot"></span><span id="st">connecting&hellip;</span>
 <span id="hz" style="color:var(--muted)"></span></div></div>
-<nav><a class="on" href="/">Live</a><a href="/scan">DID scanner</a><a href="/update">Firmware</a></nav>
+<nav><a class="on" href="/">Live</a><a href="/monitors">Monitors</a><a href="/trips">Trips</a><a href="/watch">Watch</a><a href="/scan">Scanner</a><a href="/update">Firmware</a></nav>
 </header>
 
 <div class="wrap">
@@ -82,6 +81,16 @@ live values update slowly. It keeps going if you leave this page.</div>
 <svg class="spark" id="spCool" preserveAspectRatio="none" aria-label="Coolant temperature, recent history"></svg></div>
 </div>
 
+<div class="tiles vital">
+<div class="tile"><div class="label">Mileage</div>
+<div class="value"><span id="kmpl">&mdash;</span><span class="unit">km/L</span></div>
+<div class="note" id="tripNote">this drive</div></div>
+
+<div class="tile"><div class="label">Right now</div>
+<div class="value"><span id="kmplNow">&mdash;</span><span class="unit">km/L</span></div>
+<div class="note" id="rateNote"></div></div>
+</div>
+
 <h2 class="sec">Engine</h2>
 <div class="tiles">
 <div class="tile"><div class="label">Oil temp</div>
@@ -105,6 +114,32 @@ live values update slowly. It keeps going if you leave this page.</div>
 <div class="flag" id="voltF"></div></div>
 </div>
 
+<h2 class="sec">Driver demand</h2>
+<div class="tiles">
+<div class="tile"><div class="label">Accelerator pedal</div>
+<div class="value"><span id="pedalD">&mdash;</span><span class="unit">%</span></div>
+<div class="note">2nd track <span id="pedalE">&mdash;</span> %</div></div>
+
+<div class="tile"><div class="label">Commanded throttle</div>
+<div class="value"><span id="cmdThrottle">&mdash;</span><span class="unit">%</span></div>
+<div class="note">actual <span id="thrEcho">&mdash;</span> %</div></div>
+
+<div class="tile"><div class="label">Torque demanded</div>
+<div class="value"><span id="torqDem">&mdash;</span><span class="unit">%</span></div>
+<div class="note" id="torqDemNm"></div></div>
+
+<div class="tile"><div class="label">Torque delivered</div>
+<div class="value"><span id="torqAct">&mdash;</span><span class="unit">%</span></div>
+<div class="note" id="torqActNm"></div></div>
+
+<div class="tile"><div class="label">Absolute load</div>
+<div class="value"><span id="absLoad">&mdash;</span><span class="unit">%</span></div></div>
+
+<div class="tile"><div class="label">Reference torque</div>
+<div class="value sm"><span id="torqRef">&mdash;</span><span class="unit">N&middot;m</span></div>
+<div class="note">engine constant</div></div>
+</div>
+
 <h2 class="sec">Mixture &amp; exhaust</h2>
 <div class="tiles">
 <div class="tile"><div class="label">Lambda</div>
@@ -117,8 +152,7 @@ live values update slowly. It keeps going if you leave this page.</div>
 <div class="flag" id="trimF"></div></div>
 
 <div class="tile"><div class="label">Fuel rate</div>
-<div class="value"><span id="fuelRate">&mdash;</span><span class="unit">L/h</span></div>
-<div class="note" id="econ"></div></div>
+<div class="value"><span id="fuelRate">&mdash;</span><span class="unit">L/h</span></div></div>
 
 <div class="tile"><div class="label">Catalyst B1S1</div>
 <div class="value" id="catV"><span id="cat">&mdash;</span><span class="unit">&deg;C</span></div>
@@ -154,6 +188,8 @@ live values update slowly. It keeps going if you leave this page.</div>
 // The board keeps that across restarts and serves it at /history, so the charts
 // have shape the moment the page loads instead of starting flat.
 const HSLOT=600,HP=6000,HOLD=2500,hist={rpm:[],boost:[],speed:[],coolant:[]},keep={};
+// How much of a drive there has to be before an average means anything.
+const TRIP_MIN_KM=0.5,TRIP_MIN_L=0.1;
 let rate=[],hb=0,miss=0,lastStatus='',lastSeq=-1,alive=true;
 // A sample can arrive with only some fields filled in: /data reports ok as soon as
 // any one of the three batched mode-01 requests answers, so a single batch timing
@@ -206,7 +242,12 @@ const ROWS=[['0C','Engine RPM','rpm','rpm',0],['0D','Vehicle speed','speed','km/
 ['34','Lambda','lambda','',3],['3C','Catalyst temp B1S1','cat','°C',1],
 ['0E','Timing advance','timing','° BTDC',1],['5E','Fuel rate','fuelRate','L/h',2],
 ['42','Module voltage','volt','V',2],['33','Barometric pressure','baro','kPa',0],
-['2F','Fuel tank level','fuel','%',1],['1F','Engine run time','runtime','s',0]];
+['2F','Fuel tank level','fuel','%',1],['1F','Engine run time','runtime','s',0],
+['49','Accelerator pedal D','pedalD','%',1],['4A','Accelerator pedal E','pedalE','%',1],
+['4C','Commanded throttle actuator','cmdThrottle','%',1],
+['61','Driver demanded torque','torqDem','%',1],['62','Actual engine torque','torqAct','%',1],
+['63','Engine reference torque','torqRef','N·m',0],
+['43','Absolute load value','absLoad','%',1]];
 function hhmmss(s){if(s==null||isNaN(s))return'—';const h=Math.floor(s/3600),m=Math.floor(s%3600/60),q=Math.floor(s%60);
 return(h?h+'h ':'')+m+'m '+String(q).padStart(2,'0')+'s'}
 function css(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim()}
@@ -238,10 +279,35 @@ F('trimF',!q.stft&&!q.ltft&&Math.abs(v.stft+v.ltft)>20,'warn','⚠ total trim be
 T('cat',n(v.cat),q.cat);V('catV',q.cat?'':v.cat>=900?'crit':v.cat>=800?'warn':'');
 F('catF',!q.cat&&v.cat>=800,v.cat>=900?'crit':'warn','⚠ catalyst very hot');
 T('timing',n(v.timing),q.timing);T('fuelRate',n(v.fuelRate,2),q.fuelRate);
-document.getElementById('econ').textContent=(!q.speed&&!q.fuelRate&&v.speed>0&&v.fuelRate>0)?(v.speed/v.fuelRate).toFixed(1)+' km/L instantaneous':(!q.fuelRate&&v.fuelRate>0?'idling':'');
+// Mileage. The average is what a drive is actually judged on, and the board
+// integrates it so that closing this page does not lose it. Both figures are held
+// back until there is enough drive to divide by: 0.4 km over 0.02 L is arithmetic,
+// not a mileage, and it swings by tens of km/L between polls.
+const tkm=v.tripKm,tl=v.tripL;
+const avg=(tkm!=null&&tl!=null&&tkm>=TRIP_MIN_KM&&tl>=TRIP_MIN_L)?tkm/tl:null;
+T('kmpl',avg==null?'—':avg.toFixed(1));
+document.getElementById('tripNote').textContent=(tkm==null||tl==null)?'this drive'
+ :tkm.toFixed(1)+' km · '+tl.toFixed(2)+' L'+(avg==null?' — too early to average':'');
+// Instantaneous is only meaningful while moving; standing still it is a division by
+// nothing, and the useful thing to say instead is that fuel is being burned anyway.
+const inst=(!q.speed&&!q.fuelRate&&v.speed>0&&v.fuelRate>0)?v.speed/v.fuelRate:null;
+T('kmplNow',inst==null?'—':inst.toFixed(1),q.speed||q.fuelRate);
+document.getElementById('rateNote').textContent=v.fuelRate==null?''
+ :(v.fuelRate>0&&!(v.speed>0)?'idling · ':'')+v.fuelRate.toFixed(2)+' L/h';
 T('volt',n(v.volt,2),q.volt);const vl=!q.volt&&v.volt<12.2,vh=!q.volt&&v.volt>15.2;V('voltV',(vl||vh)?'warn':'');
 F('voltF',vl||vh,'warn',vl?'⚠ not charging':'⚠ overcharging');
 T('runtime',hhmmss(v.runtime),q.runtime);
+T('pedalD',n(v.pedalD),q.pedalD);T('pedalE',n(v.pedalE),q.pedalE);
+T('cmdThrottle',n(v.cmdThrottle),q.cmdThrottle);
+T('thrEcho',n(v.throttle),q.throttle);
+T('torqDem',n(v.torqDem),q.torqDem);T('torqAct',n(v.torqAct),q.torqAct);
+T('torqRef',v.torqRef==null?'—':Math.round(v.torqRef),q.torqRef);
+T('absLoad',n(v.absLoad),q.absLoad);
+// 61/62 are a percentage of the engine's reference torque, so the newton-metres are
+// only meaningful once 63 has been read. Shown as a note rather than a headline
+// because the J1979 scaling has not been checked against this car.
+const nm=(x,q2)=>(x==null||v.torqRef==null||q2)?'':(v.torqRef*x/100).toFixed(0)+' N·m';
+T('torqDemNm',nm(v.torqDem,q.torqDem));T('torqActNm',nm(v.torqAct,q.torqAct));
 // Only fresh readings enter the history - replaying a held value would draw a flat
 // run in the sparkline that the car never actually did.
 const now=Date.now(),fresh=now-hb>=HP;if(fresh)hb=now;
@@ -295,5 +361,8 @@ async function seed(){try{
  spark('spRpm',hist.rpm,css('--blue'),1);spark('spBoost',hist.boost,css('--orange'),0);
  spark('spSpeed',hist.speed,css('--aqua'),1);spark('spCool',hist.coolant,css('--yellow'),0);
 }catch(e){}}
+// The board has no clock of its own. Whichever page you open hands over the
+// time, so anything it records carries a real timestamp.
+fetch('/time?ms='+Date.now(),{cache:'no-store'}).catch(()=>{});
 seed().then(tick);
 </script></body></html>)rawliteral";

@@ -11,9 +11,8 @@ R"rawliteral(<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Firmware Update</title>
-<style>)rawliteral"
-UI_CSS
-R"rawliteral(
+<link rel="stylesheet" href="/ui.css?v=)rawliteral" FW_VERSION R"rawliteral(">
+<style>
 #go{width:100%;margin-top:4px}
 .drop{border:1px dashed var(--base);border-radius:10px;padding:14px;text-align:center;
 color:var(--ink2);font-size:14px}
@@ -23,7 +22,7 @@ color:var(--ink2);font-size:14px}
 <header>
 <div class="bar"><h1>Firmware Update</h1>
 <span class="sub">running v)rawliteral" FW_VERSION R"rawliteral(</span></div>
-<nav><a href="/">Live</a><a href="/scan">DID scanner</a><a class="on" href="/update">Firmware</a></nav>
+<nav><a href="/">Live</a><a href="/monitors">Monitors</a><a href="/trips">Trips</a><a href="/watch">Watch</a><a href="/scan">Scanner</a><a class="on" href="/update">Firmware</a></nav>
 </header>
 
 <div class="wrap">
@@ -55,6 +54,9 @@ after the new image verifies &mdash; but an interrupted upload means starting ag
 </div>
 
 <script>
+// The board has no clock of its own. Whichever page you open hands over the
+// time, so anything it records carries a real timestamp.
+fetch('/time?ms='+Date.now(),{cache:'no-store'}).catch(()=>{});
 const f=document.getElementById('f'),go=document.getElementById('go'),
       p=document.getElementById('p'),m=document.getElementById('m');
 f.onchange=()=>{go.disabled=!f.files.length;m.textContent='';m.className='msg';p.style.width='0'};
