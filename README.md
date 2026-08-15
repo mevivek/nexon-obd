@@ -124,13 +124,40 @@ The board runs from `app0`; an upload streams into `app1`; `otadata` only flips 
 touches `otadata`, so **a failed OTA cannot brick the board** — it reboots into the
 firmware it was already running.
 
-**From a phone, with no dev machine:** every push to `main` runs
-[`.github/workflows/build.yml`](.github/workflows/build.yml), which compiles the firmware
-and publishes `NexonOBD.ino.bin` as a build artifact. Download it from the Actions tab on
-your phone, join the board's Wi-Fi, upload it at `/update`.
+**From a phone, with no dev machine:** [`ci/build.yml`](ci/build.yml) compiles the firmware
+on every push and publishes `NexonOBD.ino.bin` as a build artifact. Download it from the
+Actions tab on your phone, join the board's Wi-Fi, upload it at `/update`.
 
 That is the whole edit-from-mobile loop: change code → push → CI builds → download `.bin`
 → flash over Wi-Fi.
+
+> **The workflow is parked at `ci/build.yml` and is not active yet.** Pushing a file under
+> `.github/workflows/` needs the `workflow` OAuth scope, which this repo's token lacks.
+> To enable it:
+>
+> ```bash
+> gh auth refresh -h github.com -s workflow
+> git mv ci/build.yml .github/workflows/build.yml
+> git commit -m "Enable CI" && git push
+> ```
+
+---
+
+## Before you use this
+
+Change the access point credentials in `NexonOBD.ino` — they are placeholders, and the
+board is an open target on any network it creates:
+
+```cpp
+static const char *AP_SSID = "NexonOBD";
+static const char *AP_PASS = "nexon1234";   // >= 8 chars
+```
+
+`/update` has **no authentication**. Anyone who can join the AP can flash the board, so a
+strong `AP_PASS` is the only thing protecting it.
+
+Set `ELM_BLE_ADDR` in `elm_ble.h` to your own adapter's BLE address — the one committed
+here is from the unit this was developed against.
 
 ---
 
