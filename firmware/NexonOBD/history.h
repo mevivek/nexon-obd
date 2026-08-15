@@ -5,23 +5,33 @@
 
 // One hour of trend data, held across restarts.
 //
-// The board deep-sleeps after 10 minutes with no ECU response and wakes every 30 s,
-// so setup() runs over and over while the car is parked. History kept only in
-// ordinary RAM is therefore wiped constantly, and every time you get back in the car
-// the graphs start flat.
+// The board restarts constantly in normal use, so history in ordinary RAM would be
+// wiped every time you got back in the car and the graphs would always start flat.
+// How it restarts depends on the wiring:
 //
-// RTC slow memory survives deep sleep at no cost, so that is the primary store.
-// NVS is written only when we are about to sleep and at a slow heartbeat while
-// running, because a blob this size written every few seconds would chew through
-// flash endurance for no real benefit - losing the last few minutes to an actual
-// power cut is fine.
+//   powered from the ignition - power is simply cut when the car goes off
+//   powered from OBD pin 16   - always live, so it deep-sleeps after 10 idle
+//                               minutes and wakes every 30 s, re-running setup()
+//
+// RTC slow memory survives deep sleep at no cost, so it is kept as a free fast path
+// for the restarts that do not cut power: an OTA reboot, a crash, the idle sleep.
+//
+// It is NOT the store that matters on a board wired to switch off with the car,
+// which is the common case. RTC contents do not survive power loss, and the save on
+// the way into deep sleep never runs either - the power simply goes. That leaves the
+// periodic NVS write as the only thing standing between a trip's history and
+// nothing, so it runs about once a minute rather than the ten it began with. A power
+// cut then costs at most the last minute.
+//
+// Roughly sixty writes per hour of driving is comfortably inside NVS endurance;
+// writing every few seconds instead would not be, and would buy very little.
 //
 // 600 slots x 6 s = 3600 s exactly. Four int16 series is 4800 bytes, which fits the
 // 8 KB of RTC slow memory with room to spare.
 
 static const uint16_t HIST_SLOTS     = 600;
 static const uint32_t HIST_PERIOD_MS = 6000;
-static const uint32_t HIST_SAVE_MS   = 10UL * 60UL * 1000UL;   // NVS heartbeat
+static const uint32_t HIST_SAVE_MS   = 60UL * 1000UL;          // NVS heartbeat
 static const int16_t  HIST_NONE      = INT16_MIN;              // nothing recorded
 
 struct HistSlot {
@@ -63,8 +73,8 @@ static void histSave() {
   histLastSave = millis();
 }
 
-// RTC first (survives deep sleep, which is the common case), NVS second (survives
-// an actual power cut), empty last.
+// RTC first - free, and correct whenever power was never lost. NVS second, which is
+// what a car that switches the board off actually lands on. Empty last.
 static void histBegin() {
   if (histMagic == HIST_MAGIC && histCount <= HIST_SLOTS && histHead < HIST_SLOTS) {
     Serial.printf("[hist] %u samples from RTC memory\n", histCount);

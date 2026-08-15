@@ -436,6 +436,22 @@ console.log('\nversion stamp');
        `${name}: version stays visible at phone width${hidden.length ? ` (hidden below ${hidden}px)` : ''}`);
   }
 
+  // history.h cannot be compiled on the host - it needs RTC attributes and NVS - so
+  // check the constants that encode the design decisions instead of nothing at all.
+  const hist = readFileSync(join(here, '../NexonOBD/history.h'), 'utf8');
+  const konst = (n) => {
+    const m = hist.match(new RegExp(n + '\\s*=\\s*([^;]+);'));
+    return m ? Function('return ' + m[1].replace(/UL|U|\b_\b/g, ''))() : NaN;
+  };
+  eq(konst('HIST_SLOTS') * konst('HIST_PERIOD_MS'), 3600000, 'the buffer spans exactly one hour');
+  // The board is usually wired to lose power with the ignition, so RTC memory and the
+  // save on the way into deep sleep both contribute nothing - this heartbeat is the
+  // only thing that saves a trip's history, and it bounds what a power cut costs.
+  ok(konst('HIST_SAVE_MS') <= 60000,
+     `history is flushed at least once a minute (${konst('HIST_SAVE_MS')} ms)`);
+  ok(konst('HIST_SAVE_MS') >= 20000,
+     'but not so often it burns flash endurance');
+
   const build = readFileSync(join(here, '../build.sh'), 'utf8');
   ok(/FW_VERSION/.test(build) && /NexonOBD-v\$VERSION\.bin/.test(build),
      'build.sh names the image from the same FW_VERSION');

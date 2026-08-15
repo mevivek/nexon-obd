@@ -131,11 +131,18 @@ wiped every time you got back in the car.
 | Store | Survives | Written |
 |---|---|---|
 | RTC slow memory (4.8 KB) | deep sleep | every 6 s, free |
-| NVS (flash) | power loss | before sleeping, and every 10 min |
+| NVS (flash) | power loss | every 60 s, and before sleeping |
 
-Flash is deliberately written rarely — a 4.8 KB blob every few seconds would burn
-endurance to save data nobody misses. An unexpected power cut costs the last few
-minutes, nothing more.
+Which store matters depends on how the board is powered. Wired to the ignition it
+simply loses power when the car goes off — RTC memory does not survive that, and the
+save on the way into deep sleep never runs, so the periodic flash write is the only
+thing keeping a trip's history. It runs every 60 s, so a power cut costs at most the
+last minute. Wired to the permanently-live pin 16 the board deep-sleeps instead, and
+RTC memory carries the buffer across for free.
+
+Flash is still written sparingly — roughly sixty writes per hour of driving, which is
+comfortably inside NVS endurance; every few seconds would not be, and would buy
+very little.
 
 The onboard LED encodes state, which matters when the board is hidden under the dash:
 
