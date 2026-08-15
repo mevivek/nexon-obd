@@ -13,11 +13,7 @@
 // Both dashboards carry the same logic (TOOLS.md: kept in sync by hand), so the
 // same suite runs against both and fails if they drift apart.
 
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-
-const here = dirname(fileURLToPath(import.meta.url));
+import { pageSource, scriptsOf } from './pagesrc.mjs';
 
 let ran = 0, failed = 0;
 function ok(cond, what) {
@@ -27,10 +23,6 @@ function ok(cond, what) {
 }
 function eq(got, want, what) {
   ok(Object.is(got, want), `${what}${Object.is(got, want) ? '' : ` (got ${got}, want ${want})`}`);
-}
-
-function scripts(src) {
-  return [...src.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
 }
 
 // ---------------------------------------------------------------- fake DOM
@@ -64,8 +56,7 @@ function fakeDom() {
 // than a reimplementation of it. fetch/setTimeout are inert, so the tick() call at
 // the end of the script starts and then parks without doing anything.
 function load(file) {
-  const src = readFileSync(join(here, file), 'utf8');
-  const js = scripts(src)[0];
+  const js = scriptsOf(pageSource(file))[0];
   const dom = fakeDom();
   const api = new Function(
     'document', 'getComputedStyle', 'fetch', 'setTimeout',
@@ -188,7 +179,7 @@ function suiteRate(label, m) {
 console.log('syntax');
 for (const f of ['../NexonOBD/dashboard_html.h', '../NexonOBD/scan_html.h',
                  '../NexonOBD/ota_html.h', '../../tools/dashboard.html']) {
-  const blocks = scripts(readFileSync(join(here, f), 'utf8'));
+  const blocks = scriptsOf(pageSource(f));
   ok(blocks.length > 0, `${f}: has a script block`);
   for (const js of blocks) {
     try { new Function(js); ok(true, `${f}: script parses`); }

@@ -127,7 +127,7 @@ arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32S3 --output-dir build firmware/
 arduino-cli upload -p COM3 --fqbn esp32:esp32:XIAO_ESP32S3 firmware/NexonOBD
 ```
 
-Current size: **1.19 MB flash (35 %)**, 48 KB RAM (14 %).
+Current size: **1.21 MB flash (36 %)**, 48 KB RAM (14 %).
 
 The default `default_8MB` partition already provides `ota_0` + `ota_1` at 3.19 MB each,
 so OTA works without changing the partition scheme.
@@ -145,6 +145,17 @@ reordered sequence number, a reply that stops halfway — are covered. The dashb
 hold-last-value logic is pulled out of the served pages and run under node, which
 also parse-checks every page script; they are JavaScript inside C++ raw string
 literals, so nothing else in the build ever compiles them.
+
+To look at the pages without flashing anything:
+
+```bash
+node firmware/test/shots.mjs out/     # needs playwright + chromium
+```
+
+It serves the real pages against a mock `/data` and screenshots them at phone and
+tablet widths across four states — cruising, a partial poll, warnings, and ignition
+off. The partial-poll shot is the one worth checking after any change to the polling
+code, since that is the state that used to blank the dashboard.
 
 ### OTA
 

@@ -37,7 +37,10 @@ Polls in 3 batched requests of 6 PIDs (~2 Hz). Reconnects on its own and re-init
 ELM protocol every 4th failure, so switching the ignition off and on recovers without a
 restart. Ctrl+C to stop.
 
-Renders `dashboard.html` — the same UI the firmware serves, kept in sync by hand.
+Renders `dashboard.html`. It shares the firmware dashboard's polling and
+hold-last-value logic — `firmware/test/run.sh` drives both and fails if they drift —
+but not its layout: the firmware pages were rebuilt around a phone viewport, while
+this one is still the original single-column desktop design.
 
 ## `obd_enum2.ps1`
 

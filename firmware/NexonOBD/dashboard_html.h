@@ -1,127 +1,142 @@
 #pragma once
 #include <pgmspace.h>
+#include "ui_css.h"
 
 // Live gauge dashboard served at http://192.168.4.1/
-// Dark-committed instrument panel: surfaces painted explicitly, status colours
-// always paired with an icon + text so nothing depends on colour alone.
-static const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(<!doctype html>
+//
+// Ordered for a glance from the driver's seat rather than by PID number: speed and
+// engine speed first, then the two that tell you to stop (boost, coolant), then the
+// engine block, then mixture. Everything diagnostic is folded away below.
+//
+// Tiles are two-up at phone width and reflow wider on a tablet, which is what makes
+// the whole set readable without scrolling.
+static const char DASHBOARD_HTML[] PROGMEM =
+R"rawliteral(<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Nexon Live</title>
-<style>
-:root{--plane:#0d0d0d;--surface:#1a1a19;--ink:#fff;--ink2:#c3c2b7;--muted:#898781;
---grid:#2c2c2a;--base:#383835;--ring:rgba(255,255,255,.10);
---blue:#3987e5;--orange:#d95926;--aqua:#199e70;--yellow:#c98500;
---good:#0ca30c;--warning:#fab219;--critical:#d03b3b;color-scheme:dark}
-*{box-sizing:border-box}
-body{margin:0;background:var(--plane);color:var(--ink);padding:16px;
-font:400 15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
-header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:16px}
-h1{font-size:17px;font-weight:600;margin:0}
-.sub{color:var(--muted);font-size:13px}
-nav a{color:var(--ink2);font-size:13px;text-decoration:none;border-bottom:1px solid var(--base)}
-.status{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink2)}
-.dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex:none}
-.dot.live{background:var(--good)}.dot.stale{background:var(--warning)}.dot.dead{background:var(--critical)}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:11px}
-.card{background:var(--surface);border:1px solid var(--ring);border-radius:10px;padding:13px 15px;min-width:0}
-.card.hero{grid-column:span 2}
-@media(max-width:640px){.card.hero{grid-column:span 1}}
-.label{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:6px}
-.value{font-size:29px;font-weight:600;line-height:1.1}
-.value .unit{font-size:14px;font-weight:400;color:var(--ink2);margin-left:4px}
-.value.warn{color:var(--warning)}.value.crit{color:var(--critical)}
-.stale{opacity:.45}
-.flag{font-size:12px;margin-top:4px;display:none}
-.flag.on{display:block}.flag.warn{color:var(--warning)}.flag.crit{color:var(--critical)}
-.gw{display:flex;align-items:center;gap:13px}.gw svg{flex:none}
-.gv{font-size:36px;font-weight:600;line-height:1}
-.gv .unit{font-size:13px;font-weight:400;color:var(--ink2);display:block;margin-top:2px}
-.spark{display:block;width:100%;height:32px;margin-top:8px}
-table{border-collapse:collapse;width:100%;font-size:13px;margin-top:10px}
-caption{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);padding-bottom:8px}
-th,td{text-align:left;padding:5px 10px 5px 0;border-bottom:1px solid var(--grid)}
-th{color:var(--muted);font-weight:500}
-td.num{font-variant-numeric:tabular-nums;text-align:right}
-.tw{margin-top:16px;overflow-x:auto}summary{cursor:pointer;color:var(--ink2);font-size:13px}
+<style>)rawliteral"
+UI_CSS
+R"rawliteral(
+.glance{display:grid;grid-template-columns:1fr 140px;gap:8px}
+@media(max-width:338px){.glance{grid-template-columns:1fr}}
+.hero .value{font-size:46px;letter-spacing:-.035em}
+/* The hero tile grows with the viewport while the dial beside it stays fixed, so
+   the numeral has to scale or it floats in a widening void. */
+@media(min-width:600px){.hero .value{font-size:68px}}
+.dial{position:relative;width:116px;height:116px;margin:1px auto 0}
+.dial svg{display:block}
+.dial .gv{position:absolute;inset:0;display:flex;flex-direction:column;
+align-items:center;justify-content:center;font-size:23px;font-weight:650;
+letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.dial .gv .unit{margin-top:1px;font-size:10px;font-weight:400;color:var(--ink2)}
+.vital{grid-template-columns:repeat(auto-fit,minmax(158px,1fr));margin-top:8px}
+.value.sm{font-size:19px}
+.sep{color:var(--muted);margin:0 3px;font-weight:400}
 </style></head><body>
-<header><h1>Nexon Live</h1>
+
+<header>
+<div class="bar"><h1>Nexon Live</h1>
 <span class="sub">XIAO ESP32S3 &middot; CAN 11/500</span>
-<nav><a href="/scan">DID scanner</a> &nbsp;<a href="/update">Firmware</a></nav>
 <div class="status"><span class="dot" id="dot"></span><span id="st">connecting&hellip;</span>
-<span id="hz" style="color:var(--muted)"></span></div></header>
+<span id="hz" style="color:var(--muted)"></span></div></div>
+<nav><a class="on" href="/">Live</a><a href="/scan">DID scanner</a><a href="/update">Firmware</a></nav>
+</header>
 
-<div class="grid">
-<div class="card hero"><div class="label">Engine speed</div><div class="gw">
-<svg width="120" height="120" viewBox="0 0 128 128" aria-hidden="true">
-<path id="rt" fill="none" stroke="var(--base)" stroke-width="10" stroke-linecap="round"/>
-<path id="ra" fill="none" stroke="var(--blue)" stroke-width="10" stroke-linecap="round"/></svg>
-<div><div class="gv"><span id="rpm">&mdash;</span><span class="unit">rpm</span></div>
-<div class="flag" id="rpmF">&#9650; approaching redline</div></div></div>
+<div class="wrap">
+
+<div class="glance">
+<div class="tile hero"><div class="label">Vehicle speed</div>
+<div class="value"><span id="speed">&mdash;</span><span class="unit">km/h</span></div>
+<svg class="spark" id="spSpeed" preserveAspectRatio="none" aria-label="Vehicle speed, recent history"></svg></div>
+
+<div class="tile"><div class="label">Engine speed</div>
+<div class="dial"><svg width="116" height="116" viewBox="0 0 128 128" aria-hidden="true">
+<path id="rt" fill="none" stroke="var(--base)" stroke-width="9" stroke-linecap="round"/>
+<path id="ra" fill="none" stroke="var(--blue)" stroke-width="9" stroke-linecap="round"/></svg>
+<div class="gv"><span id="rpm">&mdash;</span><span class="unit">rpm</span></div></div>
+<div class="flag" id="rpmF">&#9650; approaching redline</div>
 <svg class="spark" id="spRpm" preserveAspectRatio="none" aria-label="Engine speed, recent history"></svg></div>
+</div>
 
-<div class="card hero"><div class="label">Boost (MAP &minus; baro)</div><div class="gw">
-<svg width="120" height="120" viewBox="0 0 128 128" aria-hidden="true">
-<path id="bt" fill="none" stroke="var(--base)" stroke-width="10" stroke-linecap="round"/>
-<path id="ba" fill="none" stroke="var(--orange)" stroke-width="10" stroke-linecap="round"/></svg>
-<div><div class="gv"><span id="boost">&mdash;</span><span class="unit">bar</span></div>
-<div class="sub" style="font-size:12px">MAP <span id="map">&mdash;</span> kPa</div></div></div>
+<div class="tiles vital">
+<div class="tile"><div class="label">Boost</div>
+<div class="value"><span id="boost">&mdash;</span><span class="unit">bar</span></div>
+<div class="note">MAP <span id="map">&mdash;</span> kPa</div>
 <svg class="spark" id="spBoost" preserveAspectRatio="none" aria-label="Boost, recent history"></svg></div>
 
-<div class="card"><div class="label">Vehicle speed</div>
-<div class="value"><span id="speed">&mdash;</span><span class="unit">km/h</span></div>
-<svg class="spark" id="spSpeed" preserveAspectRatio="none" aria-label="Speed, recent history"></svg></div>
-
-<div class="card"><div class="label">Coolant temperature</div>
+<div class="tile"><div class="label">Coolant</div>
 <div class="value" id="coolantV"><span id="coolant">&mdash;</span><span class="unit">&deg;C</span></div>
 <div class="flag" id="coolantF"></div>
-<svg class="spark" id="spCool" preserveAspectRatio="none" aria-label="Coolant, recent history"></svg></div>
+<svg class="spark" id="spCool" preserveAspectRatio="none" aria-label="Coolant temperature, recent history"></svg></div>
+</div>
 
-<div class="card"><div class="label">Oil temperature</div>
+<h2 class="sec">Engine</h2>
+<div class="tiles">
+<div class="tile"><div class="label">Oil temp</div>
 <div class="value" id="oilV"><span id="oil">&mdash;</span><span class="unit">&deg;C</span></div>
 <div class="flag" id="oilF"></div></div>
 
-<div class="card"><div class="label">Intake air temperature</div>
+<div class="tile"><div class="label">Intake air</div>
 <div class="value"><span id="iat">&mdash;</span><span class="unit">&deg;C</span></div></div>
 
-<div class="card"><div class="label">Engine load</div>
+<div class="tile"><div class="label">Engine load</div>
 <div class="value"><span id="load">&mdash;</span><span class="unit">%</span></div></div>
 
-<div class="card"><div class="label">Throttle position</div>
+<div class="tile"><div class="label">Throttle</div>
 <div class="value"><span id="throttle">&mdash;</span><span class="unit">%</span></div></div>
 
-<div class="card"><div class="label">Lambda</div>
+<div class="tile"><div class="label">Timing</div>
+<div class="value"><span id="timing">&mdash;</span><span class="unit">&deg;</span></div></div>
+
+<div class="tile"><div class="label">Voltage</div>
+<div class="value" id="voltV"><span id="volt">&mdash;</span><span class="unit">V</span></div>
+<div class="flag" id="voltF"></div></div>
+</div>
+
+<h2 class="sec">Mixture &amp; exhaust</h2>
+<div class="tiles">
+<div class="tile"><div class="label">Lambda</div>
 <div class="value" id="lambdaV"><span id="lambda">&mdash;</span></div>
 <div class="flag" id="lambdaF"></div></div>
 
-<div class="card"><div class="label">Fuel trim &mdash; short / long</div>
-<div class="value" style="font-size:23px"><span id="stft">&mdash;</span><span class="unit">%</span>
-<span style="color:var(--muted);margin:0 3px">/</span><span id="ltft">&mdash;</span><span class="unit">%</span></div>
+<div class="tile"><div class="label">Fuel trim S / L</div>
+<div class="value sm"><span id="stft">&mdash;</span><span class="unit">%</span>
+<span class="sep">/</span><span id="ltft">&mdash;</span><span class="unit">%</span></div>
 <div class="flag" id="trimF"></div></div>
 
-<div class="card"><div class="label">Catalyst temp B1S1</div>
+<div class="tile"><div class="label">Fuel rate</div>
+<div class="value"><span id="fuelRate">&mdash;</span><span class="unit">L/h</span></div>
+<div class="note" id="econ"></div></div>
+
+<div class="tile"><div class="label">Catalyst B1S1</div>
 <div class="value" id="catV"><span id="cat">&mdash;</span><span class="unit">&deg;C</span></div>
 <div class="flag" id="catF"></div></div>
-
-<div class="card"><div class="label">Timing advance</div>
-<div class="value"><span id="timing">&mdash;</span><span class="unit">&deg;</span></div></div>
-
-<div class="card"><div class="label">Fuel rate</div>
-<div class="value"><span id="fuelRate">&mdash;</span><span class="unit">L/h</span></div>
-<div class="sub" style="font-size:12px" id="econ"></div></div>
-
-<div class="card"><div class="label">Module voltage</div>
-<div class="value" id="voltV"><span id="volt">&mdash;</span><span class="unit">V</span></div>
-<div class="flag" id="voltF"></div></div>
-
-<div class="card"><div class="label">Engine run time</div>
-<div class="value" style="font-size:23px"><span id="runtime">&mdash;</span></div></div>
 </div>
 
-<div class="tw"><details open><summary>Raw values (table view)</summary>
-<table><caption>Every polled parameter, current sample</caption>
+<details><summary>Secondary readings</summary>
+<div class="tiles">
+<div class="tile"><div class="label">Ambient</div>
+<div class="value"><span id="ambient">&mdash;</span><span class="unit">&deg;C</span></div>
+<div class="note">echoes the intake sensor</div></div>
+
+<div class="tile"><div class="label">Barometric</div>
+<div class="value"><span id="baro">&mdash;</span><span class="unit">kPa</span></div></div>
+
+<div class="tile"><div class="label">Fuel level</div>
+<div class="value"><span id="fuel">&mdash;</span><span class="unit">%</span></div>
+<div class="note">not wired through on this car</div></div>
+
+<div class="tile"><div class="label">Run time</div>
+<div class="value sm"><span id="runtime">&mdash;</span></div></div>
+</div></details>
+
+<details><summary>All values</summary>
+<div class="tw"><table><caption>Every polled parameter, current sample</caption>
 <thead><tr><th>PID</th><th>Parameter</th><th style="text-align:right">Value</th><th>Unit</th></tr></thead>
-<tbody id="tb"></tbody></table></details></div>
+<tbody id="tb"></tbody></table></div></details>
+
+</div>
 
 <script>
 const H=120,HOLD=2500,hist={rpm:[],boost:[],speed:[],coolant:[]},keep={};let rate=[];
@@ -143,10 +158,12 @@ function hz(){if(rate.length<2)return'';const d=(rate[rate.length-1]-rate[0])/10
 return d>0?'· '+((rate.length-1)/d).toFixed(1)+' Hz':''}
 function arc(cx,cy,r,a0,a1){const p=a=>[cx+r*Math.cos(a*Math.PI/180),cy+r*Math.sin(a*Math.PI/180)];
 const[x0,y0]=p(a0),[x1,y1]=p(a1);return`M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${Math.abs(a1-a0)>180?1:0} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`}
-function gauge(t,a,f){f=Math.max(0,Math.min(1,f||0));document.getElementById(t).setAttribute('d',arc(64,64,52,135,405));
-const e=document.getElementById(a);e.setAttribute('d',f<=.001?'':arc(64,64,52,135,135+270*f))}
+function gauge(t,a,f){const e=document.getElementById(t),g=document.getElementById(a);
+if(!e||!g)return;f=Math.max(0,Math.min(1,f||0));
+e.setAttribute('d',arc(64,64,52,135,405));
+g.setAttribute('d',f<=.001?'':arc(64,64,52,135,135+270*f))}
 function spark(id,d,c,z){const e=document.getElementById(id);if(!e||d.length<2)return;
-const w=e.clientWidth||220,h=32,p=3;let lo=Math.min(...d),hi=Math.max(...d);if(z)lo=Math.min(0,lo);
+const w=e.clientWidth||220,h=26,p=3;let lo=Math.min(...d),hi=Math.max(...d);if(z)lo=Math.min(0,lo);
 if(hi-lo<1e-6)hi=lo+1;const dx=w/(H-1);
 const pts=d.map((v,i)=>`${(i*dx).toFixed(1)},${(p+(h-2*p)*(1-(v-lo)/(hi-lo))).toFixed(1)}`).join(' ');
 e.setAttribute('viewBox',`0 0 ${w} ${h}`);
@@ -177,7 +194,7 @@ function render(v,q){
 T('rpm',v.rpm==null?'—':Math.round(v.rpm),q.rpm);gauge('rt','ra',v.rpm/6500);
 F('rpmF',!q.rpm&&v.rpm>=5500,'warn','▲ approaching redline');
 const b=(v.map!=null&&v.baro!=null)?(v.map-v.baro)/100:null,qb=q.map||q.baro;v.boost=b;q.boost=qb;
-T('boost',b==null?'—':(b>=0?'+':'')+b.toFixed(2),qb);gauge('bt','ba',b/1.2);
+T('boost',b==null?'—':(b>=0?'+':'')+b.toFixed(2),qb);
 T('map',v.map==null?'—':Math.round(v.map),q.map);
 T('speed',v.speed==null?'—':Math.round(v.speed),q.speed);
 T('coolant',v.coolant==null?'—':Math.round(v.coolant),q.coolant);
@@ -187,6 +204,8 @@ T('oil',v.oil==null?'—':Math.round(v.oil),q.oil);
 V('oilV',q.oil?'':v.oil>=125?'crit':v.oil>=115?'warn':'');
 F('oilF',!q.oil&&v.oil>=115,v.oil>=125?'crit':'warn','⚠ oil temperature high');
 T('iat',v.iat==null?'—':Math.round(v.iat),q.iat);T('load',n(v.load),q.load);T('throttle',n(v.throttle),q.throttle);
+T('ambient',v.ambient==null?'—':Math.round(v.ambient),q.ambient);
+T('baro',v.baro==null?'—':Math.round(v.baro),q.baro);T('fuel',n(v.fuel),q.fuel);
 T('lambda',n(v.lambda,3),q.lambda);const ln=!q.lambda&&v.lambda>=1.10,ri=!q.lambda&&v.lambda<=0.85;V('lambdaV',ln?'warn':'');
 F('lambdaF',ln||ri,'warn',ln?'⚠ running lean':'● running rich');
 T('stft',v.stft==null?'—':(v.stft>0?'+':'')+n(v.stft),q.stft);
