@@ -14,9 +14,8 @@ R"rawliteral(<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Monitors</title>
-<style>)rawliteral"
-UI_CSS
-R"rawliteral(
+<link rel="stylesheet" href="/ui.css?v=)rawliteral" FW_VERSION R"rawliteral(">
+<style>
 .mon{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:8px}
 .badge{float:right;font-size:10px;font-weight:650;text-transform:uppercase;
 letter-spacing:.07em;padding:2px 7px;border-radius:999px}

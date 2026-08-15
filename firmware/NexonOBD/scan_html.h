@@ -10,9 +10,8 @@ R"rawliteral(<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>DID Scanner</title>
-<style>)rawliteral"
-UI_CSS
-R"rawliteral(
+<link rel="stylesheet" href="/ui.css?v=)rawliteral" FW_VERSION R"rawliteral(">
+<style>
 .row>div{flex:1 1 120px;min-width:0}
 .row>div:first-child{flex:1 1 100%}
 .row select,.row input{width:100%}

@@ -13,9 +13,8 @@ R"rawliteral(<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Trips</title>
-<style>)rawliteral"
-UI_CSS
-R"rawliteral(
+<link rel="stylesheet" href="/ui.css?v=)rawliteral" FW_VERSION R"rawliteral(">
+<style>
 .row2{display:flex;align-items:center;gap:10px}
 .row2 .grow{flex:1;min-width:0}
 .nm{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px}

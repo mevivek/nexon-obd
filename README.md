@@ -54,13 +54,39 @@ when nothing is wrong.
 ### Polling runs on the board, not on the page
 
 The board samples the ECU continuously in `loop()`, one batched request per turn,
-and `/data` returns the newest cached sample. Nothing waits on the bus to serve a
-page, so switching between Live, the scanner and Firmware is immediate. It also
-means polling does not stop when you close the browser.
+and `/data` returns the newest cached sample rather than going to the bus. Polling
+therefore does not stop when you close the browser, and no request ever waits for a
+poll of its own.
 
-One batch per turn matters: the web server is single threaded, so any time spent on
-the bus is time the board cannot answer a request. Polling all three batches inline
-could leave a tap on a nav link sitting behind seconds of BLE timeouts.
+It did, however, wait for *someone else's*. The web server is single threaded, and
+until v1.8.0 it got exactly one turn per bus exchange — up to 1.2 s on BLE, twice
+that when a batch is retried. A tab switch is three requests (the document, `/time`,
+and the new page's first poll), so switching pages could sit behind several seconds
+of ELM327 timeouts and felt like a page load rather than a page swap.
+
+Two things fix that, both in `bus_yield.h`:
+
+- **The wait loops serve HTTP.** Waiting on the car is otherwise `delay(1)` on BLE
+  and a 5 ms blocking receive on CAN. Both now call `webYield()` instead, which
+  serves whatever is queued and reports how long it took — and the response deadline
+  moves out by exactly that, because the reply is still waiting behind us either way
+  (the TWAI RX queue, or the ELM notify buffer). Without the give-back, serving a
+  page would eat the ECU's patience window and surface as a phantom timeout. The
+  extension is capped at 3 s so one slow handler cannot hold an exchange open.
+- **`loop()` drains the queue** instead of taking one request per turn, so a whole
+  page load completes in a single turn.
+
+Two guards keep that safe. `WebServer` tracks a single current client, so
+`webYield()` refuses to re-enter it from inside a handler; and `obdIsoTp()` sets a
+flag for the duration of an exchange so a handler reached from a yield cannot start
+a second one underneath a half-finished reassembly. `/dtc` is the only handler that
+touches the bus — it stands down when that flag is set, and because it runs inside
+`handleClient()` and therefore cannot yield, its own timeouts are kept short.
+
+The pages help too: the shared ~7 KB stylesheet used to be compiled into all five
+documents and re-sent on every switch. It is now served once from `/ui.css` with a
+version-stamped, immutable URL, and the pages carry an `ETag` so a re-visit is a
+304 with no body. That is also worth ~26 KB of flash.
 
 A sample is published after **every** batch, not after all three. The other two are
 carried forward from cache while they are still fresh (3 s), so the page updates at
@@ -339,7 +365,10 @@ firmware/test/run.sh          # needs g++, python3 and node — no ESP32 core, n
 The ISO-TP layer and the mode-01 batch poller are extracted straight out of
 `NexonOBD.ino` and compiled against fake TWAI and ELM327 shims, so frame sequences
 that are impractical to stage against a real car — a dropped consecutive frame, a
-reordered sequence number, a reply that stops halfway — are covered. The dashboard's
+reordered sequence number, a reply that stops halfway — are covered. The same shims
+stand in for the web server, so the deadline give-back described above is tested for
+the two properties that make it safe: a silent ECU is still reported silent, and the
+extension is bounded. The dashboard's
 hold-last-value logic is pulled out of the served pages and run under node, which
 also parse-checks every page script; they are JavaScript inside C++ raw string
 literals, so nothing else in the build ever compiles them.

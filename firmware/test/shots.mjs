@@ -11,7 +11,7 @@
 import { createRequire } from 'node:module';
 import http from 'node:http';
 import { mkdirSync } from 'node:fs';
-import { pageSource } from './pagesrc.mjs';
+import { pageSource, uiCss } from './pagesrc.mjs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -77,6 +77,13 @@ const html = Object.fromEntries(PAGES.map(([name, f]) => [name, pageSource(f)]))
 
 const server = http.createServer((req, res) => {
   const url = req.url.split('?')[0];
+  // The pages link the shared stylesheet rather than inlining it, so the shots are
+  // only representative if this route works - an unstyled screenshot would be a
+  // very loud failure, but a silent 404 here would look like a CSS regression.
+  if (url === '/ui.css') {
+    res.writeHead(200, { 'content-type': 'text/css' });
+    return res.end(uiCss());
+  }
   if (url === '/data') {
     res.writeHead(200, { 'content-type': 'application/json' });
     if (scanning) {

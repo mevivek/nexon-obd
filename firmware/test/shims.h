@@ -62,6 +62,27 @@ inline String elmCommand(const String &cmd, uint32_t timeoutMs = 1500) {
   return r;
 }
 
+// ---------------------------------------------------------------- HTTP yield
+//
+// The transports serve the web server while they wait on the car, and give the
+// deadline back whatever that cost. This double stands in for the real WebServer:
+// it burns a settable number of milliseconds, counts its calls, and records whether
+// the bus guard was set while it ran - a handler reached from a yield is running
+// underneath a half-finished reassembly and has to be able to tell.
+#include "../NexonOBD/bus_yield.h"
+
+bool     g_busBusy         = false;
+uint32_t g_yieldCostMs     = 0;      // wall-clock each yield consumes
+int      g_yieldCalls      = 0;
+bool     g_yieldSawBusBusy = false;
+
+uint32_t webYield() {
+  g_yieldCalls++;
+  if (g_busBusy) g_yieldSawBusBusy = true;
+  g_millis += g_yieldCostMs;
+  return g_yieldCostMs;
+}
+
 // ---------------------------------------------------------------- sketch globals
 enum Transport { TR_NONE, TR_CAN, TR_BLE };
 Transport activeTransport = TR_CAN;
@@ -83,6 +104,10 @@ inline void resetBus() {
   g_millis = 1000;
   activeTransport = TR_CAN;
   g_baro = NAN;
+  g_busBusy = false;
+  g_yieldCostMs = 0;
+  g_yieldCalls = 0;
+  g_yieldSawBusBusy = false;
 }
 
 // Queue one CAN frame for the driver to return.

@@ -1,10 +1,14 @@
 #pragma once
+#include <pgmspace.h>
 
 // The shell every page shares: palette, header, nav, tiles, tables, controls.
 //
-// A macro rather than a served stylesheet so the pages stay single-request and
-// cannot drift apart - each page concatenates this into its own PROGMEM literal at
-// compile time. Costs ~2.5 KB of flash per page, which is nothing at 35 % used.
+// One macro, so the pages cannot drift apart - but served from /ui.css rather than
+// concatenated into each page. Inlining it put an identical ~7 KB into all five
+// documents and re-sent it on every tab switch, which the board pays for twice: in
+// bytes, and in the loop turns spent writing them. Served once with an immutable
+// cache header and a version-stamped URL, it is fetched once per firmware build and
+// then never again.
 //
 // Dark-committed on purpose: this is an in-car display that is never viewed on a
 // light background. Status colour is always paired with an icon or text, so nothing
@@ -138,3 +142,7 @@ color:var(--ink2);font-variant-numeric:tabular-nums}
 .hint{margin-top:10px;font-size:12px;line-height:1.6;color:var(--muted)}
 code{background:var(--raised);border-radius:5px;padding:1px 5px;font-size:12px}
 )css"
+
+// The macro exists so the pages can still be reassembled from source by the test
+// harness; this is what /ui.css actually sends.
+static const char UI_CSS_BODY[] PROGMEM = UI_CSS;

@@ -11,9 +11,8 @@ R"rawliteral(<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Firmware Update</title>
-<style>)rawliteral"
-UI_CSS
-R"rawliteral(
+<link rel="stylesheet" href="/ui.css?v=)rawliteral" FW_VERSION R"rawliteral(">
+<style>
 #go{width:100%;margin-top:4px}
 .drop{border:1px dashed var(--base);border-radius:10px;padding:14px;text-align:center;
 color:var(--ink2);font-size:14px}

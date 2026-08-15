@@ -16,9 +16,8 @@ R"rawliteral(<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Nexon Live</title>
-<style>)rawliteral"
-UI_CSS
-R"rawliteral(
+<link rel="stylesheet" href="/ui.css?v=)rawliteral" FW_VERSION R"rawliteral(">
+<style>
 .glance{display:grid;grid-template-columns:1fr 140px;gap:8px}
 @media(max-width:338px){.glance{grid-template-columns:1fr}}
 .hero .value{font-size:46px;letter-spacing:-.035em}

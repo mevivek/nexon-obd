@@ -19,6 +19,7 @@
 #include <vector>
 #include "driver/twai.h"
 #include "obd_types.h"
+#include "bus_yield.h"
 #include "elm_ble.h"
 #include "version.h"
 #include "history.h"
@@ -82,6 +83,34 @@ static void heartbeat(bool ecuOk, bool scanning) {
 }
 
 WebServer server(80);
+
+// ---------------------------------------------------------------- HTTP fairness
+
+// Set while inside a request handler. WebServer keeps a single current client, so
+// re-entering handleClient() from within a handler would corrupt it. handleDtc is
+// the one handler that waits on the bus, and it therefore does not yield - which is
+// why its timeouts are kept short.
+static bool g_inHandler = false;
+
+// Set for the duration of one ISO-TP exchange. A handler reached from webYield() is
+// running underneath a half-finished reassembly, so it must not start a second
+// exchange on top of it.
+static bool g_busBusy = false;
+
+static void serveHttp() {
+  g_inHandler = true;
+  server.handleClient();
+  g_inHandler = false;
+}
+
+// Called from the transports' wait loops - see bus_yield.h for why the time is
+// given back to the response deadline.
+uint32_t webYield() {
+  if (g_inHandler) return 0;
+  uint32_t t0 = millis();
+  serveHttp();
+  return millis() - t0;
+}
 
 // ---------------------------------------------------------------- CAN / ISO-TP
 
@@ -147,10 +176,13 @@ static int canIsoTp(uint32_t reqId, uint32_t rspId,
   bool multi = false;
   uint8_t nextSeq = 1;
   uint32_t deadline = millis() + timeoutMs;
+  uint32_t extended = 0;
 
   while ((int32_t)(deadline - millis()) > 0) {
     twai_message_t m;
-    if (twai_receive(&m, pdMS_TO_TICKS(5)) != ESP_OK) continue;
+    // Nothing on the bus this instant: serve any waiting HTTP request rather than
+    // spinning, and give the deadline back the time that took.
+    if (twai_receive(&m, pdMS_TO_TICKS(5)) != ESP_OK) { busWaitYield(deadline, extended); continue; }
     if (m.identifier != rspId) continue;
 
     uint8_t pci = m.data[0] >> 4;
@@ -299,9 +331,15 @@ static int obdIsoTp(uint32_t reqId, uint32_t rspId,
                     const uint8_t *payload, uint8_t plen,
                     uint8_t *out, size_t outCap, uint32_t timeoutMs,
                     int *partial = nullptr) {
-  if (activeTransport == TR_BLE)
-    return bleIsoTp(reqId, rspId, payload, plen, out, outCap, timeoutMs, partial);
-  return canIsoTp(reqId, rspId, payload, plen, out, outCap, timeoutMs, partial);
+  // One exchange at a time. The wait loops below serve HTTP, so a handler can run
+  // underneath a half-finished reassembly; a second request issued from there would
+  // interleave its frames with ours and corrupt both.
+  g_busBusy = true;
+  int r = (activeTransport == TR_BLE)
+        ? bleIsoTp(reqId, rspId, payload, plen, out, outCap, timeoutMs, partial)
+        : canIsoTp(reqId, rspId, payload, plen, out, outCap, timeoutMs, partial);
+  g_busBusy = false;
+  return r;
 }
 
 // ---------------------------------------------------------------- mode 01
@@ -1074,7 +1112,16 @@ static void handleScanStatus() {
 }
 
 // Stored + pending DTCs, both ECUs.
+// The only handler that talks to the bus, which makes it the only one that can
+// block the server for as long as an ECU is willing to stay silent. It runs inside
+// handleClient(), so it cannot yield (see bus_yield.h) - hence the short timeouts.
+// Two ECUs x request + retry used to add up to eight seconds of an unresponsive
+// board, which is most of what made a tab switch feel like a page load.
 static void handleDtc() {
+  if (g_busBusy) {                 // reached from webYield(), mid-reassembly
+    server.send(200, "application/json", "{\"busy\":true,\"ecus\":[]}");
+    return;
+  }
   String s = "{\"ecus\":[";
   const uint32_t req[2] = {ID_ECM_REQ, ID_TCM_REQ};
   const uint32_t rsp[2] = {ID_ECM_RSP, ID_TCM_RSP};
@@ -1086,11 +1133,13 @@ static void handleDtc() {
     uint8_t req03[1] = {0x03};
     uint8_t buf[64];
     int len = obdIsoTp(req[e], rsp[e], req03, 1, buf, sizeof(buf),
-                       activeTransport == TR_BLE ? 1500 : 300);
+                       activeTransport == TR_BLE ? 900 : 300);
     // A half-read DTC list would report fewer codes than are actually stored, so a
     // truncated reply gets one retry rather than being parsed as far as it goes.
+    // 900 + 1200 still clears ATST (400 ms) with room to spare, and caps the worst
+    // case at ~4 s across both ECUs instead of ~8 s.
     if (len == -3) len = obdIsoTp(req[e], rsp[e], req03, 1, buf, sizeof(buf),
-                                  activeTransport == TR_BLE ? 2500 : 600);
+                                  activeTransport == TR_BLE ? 1200 : 500);
     bool first = true;
     if (len >= 2 && buf[0] == 0x43) {
       uint8_t count = buf[1];
@@ -1255,6 +1304,33 @@ static void handleOtaDone() {
   if (!bad) { delay(600); ESP.restart(); }
 }
 
+// ---------------------------------------------------------------- static assets
+//
+// A page only changes when the firmware does, so a tab switch should be a
+// revalidation - a 304 with no body - rather than a re-download of 10-27 KB. The
+// stylesheet is the same ~7 KB on all five pages, so it is served once from its own
+// version-stamped URL and marked immutable: after the first page of a given build
+// the browser stops asking for it entirely.
+#define UI_ETAG "\"" FW_VERSION "\""
+
+static bool ifNoneMatch() {
+  return server.header("If-None-Match") == UI_ETAG;
+}
+
+static void sendPage(const char *html) {
+  server.sendHeader("ETag", UI_ETAG);
+  server.sendHeader("Cache-Control", "no-cache");     // revalidate, do not blind-cache
+  if (ifNoneMatch()) { server.send(304, "text/html", ""); return; }
+  server.send_P(200, "text/html", html);
+}
+
+static void handleUiCss() {
+  server.sendHeader("ETag", UI_ETAG);
+  server.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
+  if (ifNoneMatch()) { server.send(304, "text/css", ""); return; }
+  server.send_P(200, "text/css", UI_CSS_BODY);
+}
+
 // ---------------------------------------------------------------- transport pick
 
 static const char *transportName() {
@@ -1310,9 +1386,15 @@ void setup() {
   Serial.print(" -> http://");
   Serial.println(WiFi.softAPIP());
 
-  server.on("/",            []() { server.send_P(200, "text/html", DASHBOARD_HTML); });
-  server.on("/scan",        []() { server.send_P(200, "text/html", SCAN_HTML); });
-  server.on("/update", HTTP_GET, []() { server.send_P(200, "text/html", OTA_HTML); });
+  // ETag revalidation needs the request header kept; WebServer discards everything
+  // it was not told to collect.
+  static const char *collect[] = {"If-None-Match"};
+  server.collectHeaders(collect, 1);
+
+  server.on("/",            []() { sendPage(DASHBOARD_HTML); });
+  server.on("/scan",        []() { sendPage(SCAN_HTML); });
+  server.on("/ui.css",      handleUiCss);
+  server.on("/update", HTTP_GET, []() { sendPage(OTA_HTML); });
   server.on("/update", HTTP_POST, handleOtaDone, handleOtaUpload);
   server.on("/data",        handleData);
   server.on("/dtc",         handleDtc);
@@ -1322,8 +1404,8 @@ void setup() {
   server.on("/trips/list",  handleTripList);
   server.on("/trips/get",   handleTripGet);
   server.on("/trips/del",   handleTripDelete);
-  server.on("/trips",       []() { server.send_P(200, "text/html", TRIP_HTML); });
-  server.on("/monitors",    []() { server.send_P(200, "text/html", MON_HTML); });
+  server.on("/trips",       []() { sendPage(TRIP_HTML); });
+  server.on("/monitors",    []() { sendPage(MON_HTML); });
   server.on("/scan/start",  handleScanStart);
   server.on("/scan/stop",   handleScanStop);
   server.on("/scan/status", handleScanStatus);
@@ -1337,9 +1419,15 @@ void setup() {
   chooseTransport();
 }
 
+// Requests served per turn. A page load is the document, /time, and the page's
+// first poll; taking one per turn put a full bus exchange between each of them and
+// made a tab switch feel like a page load. Four covers a load in a single turn,
+// and costs nothing when idle - each spare call is one non-blocking accept.
+static const int HTTP_DRAIN = 4;
+
 void loop() {
-  server.handleClient();
-  samplerStep();          // one batch per turn, so the server keeps its responsiveness
+  for (int i = 0; i < HTTP_DRAIN; i++) serveHttp();
+  samplerStep();          // the bus waits inside here serve HTTP too - bus_yield.h
   monStep();              // only does anything while the monitors page is open
   heartbeat(millis() - lastEcuOkMs < 3000, scan.running);
 

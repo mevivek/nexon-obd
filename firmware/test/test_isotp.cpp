@@ -112,6 +112,77 @@ static void test_can_silent() {
   eq(canIsoTp(0x7E0, 0x7E8, req, 2, out, sizeof(out), 400), -1, "reports -1");
 }
 
+// ------------------------------------------------------------------ HTTP yield
+//
+// The transports serve the web server while they wait on the car, so a tab switch
+// no longer queues behind a full ISO-TP exchange. Two things have to hold for that
+// to be safe: the time spent serving must be given back to the response deadline
+// (or every page load would show up as a phantom ECU timeout), and the give-back
+// must be bounded (or one slow handler could hold an exchange open forever).
+
+static void test_yield_only_while_idle() {
+  printf("yield: only when there is nothing on the bus\n");
+  resetBus();
+  g_yieldCostMs = 50;
+  uint8_t req[2] = {0x01, 0x00}, out[64];
+  rx(0x7E8, {0x06, 0x41, 0x00, 0xBE, 0x3E, 0xA8, 0x13});
+  eq(canIsoTp(0x7E0, 0x7E8, req, 2, out, sizeof(out), 400), 6, "reply still parsed");
+  eq(g_yieldCalls, 0, "a waiting frame is taken before the web server gets a turn");
+}
+
+static void test_yield_extends_the_deadline() {
+  printf("yield: time spent serving is not charged to the ECU\n");
+  resetBus();
+  g_yieldCostMs = 100;                       // every yield serves a request
+  uint8_t req[2] = {0x01, 0x00}, out[64];
+  uint32_t start = g_millis;
+  eq(canIsoTp(0x7E0, 0x7E8, req, 2, out, sizeof(out), 400), -1,
+     "a genuinely silent ECU is still reported silent");
+  uint32_t elapsed = g_millis - start;
+  ok(g_yieldCalls > 1, "served the web server while it waited");
+  ok(elapsed > 400 + 1000,
+     "waited well past the raw timeout, because the wait was spent serving pages");
+  ok(elapsed < 400 + YIELD_EXTEND_MAX_MS + 200,
+     "but not indefinitely - the extension is capped");
+}
+
+static void test_yield_extension_is_bounded() {
+  printf("yield: the give-back is bounded\n");
+  g_millis = 1000;
+  g_yieldCostMs = 500;                       // a slow handler: a trip download, say
+  g_yieldCalls = 0;
+  uint32_t deadline = 1400, extended = 0;
+  for (int i = 0; i < 20; i++) busWaitYield(deadline, extended);
+  eq((int)extended, (int)YIELD_EXTEND_MAX_MS, "stops extending at the cap");
+  eq((int)deadline, (int)(1400 + YIELD_EXTEND_MAX_MS), "and the deadline moved by exactly that");
+}
+
+static void test_yield_costing_nothing_changes_nothing() {
+  printf("yield: an idle server does not move the deadline\n");
+  g_millis = 1000;
+  g_yieldCostMs = 0;                         // nothing queued, accept() returns at once
+  uint32_t deadline = 1400, extended = 0;
+  for (int i = 0; i < 20; i++) busWaitYield(deadline, extended);
+  eq((int)extended, 0, "nothing served, nothing given back");
+  eq((int)deadline, 1400, "deadline untouched");
+}
+
+static void test_bus_guard_is_visible_from_a_yield() {
+  printf("yield: a handler reached from a yield can see the bus is busy\n");
+  resetBus();
+  g_yieldCostMs = 100;
+  uint8_t req[2] = {0x01, 0x00}, out[64];
+  eq(obdIsoTp(0x7E0, 0x7E8, req, 2, out, sizeof(out), 400), -1, "exchange timed out");
+  ok(g_yieldSawBusBusy, "the guard was set for the whole exchange");
+  ok(!g_busBusy, "and cleared on the way out, even though the exchange failed");
+
+  resetBus();
+  g_yieldCostMs = 100;
+  rx(0x7E8, {0x06, 0x41, 0x00, 0xBE, 0x3E, 0xA8, 0x13});
+  eq(obdIsoTp(0x7E0, 0x7E8, req, 2, out, sizeof(out), 400), 6, "exchange succeeded");
+  ok(!g_busBusy, "guard cleared on the success path too");
+}
+
 // ------------------------------------------------------------------ bleIsoTp
 
 static void test_ble_single_frame() {
@@ -485,6 +556,12 @@ int main() {
   test_can_dropped_consecutive_frame();
   test_can_oversize_reply();
   test_can_silent();
+
+  test_yield_only_while_idle();
+  test_yield_extends_the_deadline();
+  test_yield_extension_is_bounded();
+  test_yield_costing_nothing_changes_nothing();
+  test_bus_guard_is_visible_from_a_yield();
 
   test_ble_single_frame();
   test_ble_ignores_other_ecu();

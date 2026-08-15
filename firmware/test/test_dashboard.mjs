@@ -13,7 +13,7 @@
 // Both dashboards carry the same logic (TOOLS.md: kept in sync by hand), so the
 // same suite runs against both and fails if they drift apart.
 
-import { pageSource, scriptsOf, fwVersion } from './pagesrc.mjs';
+import { pageSource, scriptsOf, fwVersion, uiCss } from './pagesrc.mjs';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -441,13 +441,16 @@ console.log('\nversion stamp');
     const name = f.split('/').pop();
     const sub = (html.match(/<span class="sub">([\s\S]*?)<\/span>/) || [, ''])[1];
     ok(sub.includes(v), `${name}: header shows v${v}`);
-
-    const hidden = [...html.matchAll(/@media\(max-width:(\d+)px\)\{\.sub\{display:none\}\}/g)]
-      .map(m => Number(m[1]))
-      .filter(w => w > 360);
-    ok(hidden.length === 0,
-       `${name}: version stays visible at phone width${hidden.length ? ` (hidden below ${hidden}px)` : ''}`);
   }
+
+  // The rule that hides the subtitle lives in the shared stylesheet, so that is
+  // where it has to be checked - a page-level override countering it was how the
+  // version came to be invisible on /scan and /update in the first place.
+  const hidden = [...uiCss().matchAll(/@media\(max-width:(\d+)px\)\{\.sub\{display:none\}\}/g)]
+    .map(m => Number(m[1]))
+    .filter(w => w > 360);
+  ok(hidden.length === 0,
+     `ui.css: version stays visible at phone width${hidden.length ? ` (hidden below ${hidden}px)` : ''}`);
 
   // history.h cannot be compiled on the host - it needs RTC attributes and NVS - so
   // check the constants that encode the design decisions instead of nothing at all.
@@ -490,6 +493,80 @@ console.log('\nversion stamp');
   ok(/PSRAM=opi/.test(build), 'build.sh asks for the board with PSRAM enabled');
   ok(/FW_VERSION/.test(build) && /NexonOBD-v\$VERSION\.bin/.test(build),
      'build.sh names the image from the same FW_VERSION');
+}
+
+// ---------------------------------------------------------------- tab switching
+//
+// Switching from Live to another tab felt like a page load rather than a page swap.
+// Two causes, and this suite pins both fixes to the source.
+//
+//  1. The web server got exactly one turn per bus exchange, and an exchange on BLE
+//     is up to 1.2 s. A tab switch is three requests - the document, /time, and the
+//     page's first poll - so it could wait several seconds. The transports now
+//     serve HTTP while they wait on the car, and the loop drains what is queued
+//     instead of taking one request per turn.
+//  2. All five pages inlined an identical ~7 KB stylesheet and carried no cache
+//     headers, so every switch re-sent the whole document. The stylesheet is now
+//     served once per build from an immutable URL, and the pages revalidate.
+console.log('\ntab switching');
+{
+  const v = fwVersion();
+  const ALL = ['../NexonOBD/dashboard_html.h', '../NexonOBD/scan_html.h',
+               '../NexonOBD/ota_html.h', '../NexonOBD/mon_html.h',
+               '../NexonOBD/trip_html.h'];
+
+  for (const f of ALL) {
+    const html = pageSource(f);
+    const name = f.split('/').pop();
+    ok(html.includes(`<link rel="stylesheet" href="/ui.css?v=${v}">`),
+       `${name}: links the shared stylesheet, version-stamped`);
+    // The palette only exists in ui.css. If it turns up in a page, the shared sheet
+    // has been inlined again and every tab switch is re-sending it.
+    ok(!html.includes('--plane:'), `${name}: does not inline the shared stylesheet`);
+  }
+  ok(uiCss().includes('--plane:'), 'ui.css carries the palette');
+
+  const ino = readFileSync(join(here, '../NexonOBD/NexonOBD.ino'), 'utf8');
+
+  // Caching. A version-stamped immutable URL means the stylesheet is fetched once
+  // per build; an ETag on the pages turns a re-visit into a 304 with no body.
+  ok(/server\.on\("\/ui\.css",\s*handleUiCss\)/.test(ino), 'ui.css has a route');
+  ok(/max-age=31536000,\s*immutable/.test(ino), 'ui.css is served immutable');
+  ok(/collectHeaders/.test(ino) && /If-None-Match/.test(ino),
+     'the revalidation header is collected, or server.header() would always be empty');
+  ok(/server\.send\(304,/.test(ino), 'a matching ETag answers 304');
+  // Every page route has to go through sendPage, or it ships without the ETag.
+  const rawPage = [...ino.matchAll(/send_P\(200,\s*"text\/html",\s*(\w*_HTML)\)/g)].map(m => m[1]);
+  ok(rawPage.length === 0,
+     `no page bypasses sendPage()${rawPage.length ? ` (${rawPage.join(', ')})` : ''}`);
+
+  // Fairness. Both transports have to yield, or the fix only covers one of them.
+  ok(/twai_receive\([\s\S]*?!=\s*ESP_OK\)\s*\{\s*busWaitYield/.test(ino),
+     'the CAN wait loop serves HTTP while the bus is quiet');
+  const elm = readFileSync(join(here, '../NexonOBD/elm_ble.h'), 'utf8');
+  ok(/busWaitYield\(deadline,\s*extended\)/.test(elm),
+     'the ELM327 wait loop serves HTTP while the adapter thinks');
+
+  // Re-entering handleClient() from a handler would corrupt WebServer's single
+  // current client, and starting a second bus exchange under a half-finished one
+  // would interleave frames. Both guards have to exist.
+  ok(/if \(g_inHandler\) return 0;/.test(ino),
+     'webYield refuses to re-enter the server from inside a handler');
+  ok(/if \(g_busBusy\) \{/.test(ino),
+     'the one handler that touches the bus stands down while an exchange is live');
+
+  const drain = Number((ino.match(/HTTP_DRAIN\s*=\s*(\d+)/) || [, 0])[1]);
+  ok(drain >= 3, `the loop drains a whole page load per turn (${drain} requests)`);
+
+  // handleDtc runs inside handleClient() and therefore cannot yield, so its
+  // timeouts are the one place a request can still hold the board. They have to
+  // clear ATST (400 ms) but stay well short of the eight seconds they once totalled.
+  const dtc = ino.slice(ino.indexOf('static void handleDtc()'));
+  const tmos = [...dtc.slice(0, 1200).matchAll(/TR_BLE \? (\d+) : (\d+)/g)].map(m => Number(m[1]));
+  ok(tmos.length === 2, `handleDtc has both of its timeouts (${tmos.join(', ')})`);
+  ok(tmos.every(t => t > 400), 'each clears the adapter\'s own ATST window');
+  ok(tmos.reduce((a, b) => a + b, 0) * 2 <= 5000,
+     `both ECUs, request and retry, stay under five seconds (${tmos.reduce((a, b) => a + b, 0) * 2} ms)`);
 }
 
 // ---------------------------------------------------------------- syntax
