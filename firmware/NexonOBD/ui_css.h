@@ -33,8 +33,9 @@ background:rgba(11,11,12,.94);border-bottom:1px solid var(--grid)}
 h1{margin:0;font-size:15px;font-weight:650;letter-spacing:-.01em;white-space:nowrap}
 .sub{color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;
 text-overflow:ellipsis;min-width:0}
-/* On a narrow phone the status pill is worth more than the subtitle. */
-@media(max-width:460px){.sub{display:none}}
+/* The subtitle carries the firmware version on every page, so it stays visible at
+   phone width and is dropped only when there is genuinely no room for it. */
+@media(max-width:360px){.sub{display:none}}
 .status{margin-left:auto;display:flex;align-items:center;gap:6px;flex:none;
 font-size:12px;color:var(--ink2);background:var(--surface);
 border:1px solid var(--ring);border-radius:999px;padding:4px 9px;white-space:nowrap}

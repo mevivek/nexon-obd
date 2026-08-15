@@ -33,7 +33,6 @@ letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 .dial .gv .unit{margin-top:1px;font-size:10px;font-weight:400;color:var(--ink2)}
 .vital{grid-template-columns:repeat(auto-fit,minmax(158px,1fr));margin-top:8px}
 .value.sm{font-size:19px}
-@media(min-width:361px){.sub{display:inline}}
 .sep{color:var(--muted);margin:0 3px;font-weight:400}
 </style></head><body>
 

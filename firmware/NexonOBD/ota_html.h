@@ -41,9 +41,11 @@ The board reboots automatically once the write verifies.</div>
 <div class="hint" style="margin-top:0">
 Build it with:<br>
 <code>firmware/build.sh</code><br>
-then upload <code>firmware/build/NexonOBD.ino.bin</code>.<br><br>
+then upload <code>firmware/build/NexonOBD-v&lt;version&gt;.bin</code>.<br><br>
 That is the app image. <code>NexonOBD.ino.merged.bin</code> sitting next to it is a
 full-flash image for USB recovery and will not work here.<br><br>
+The version above updates when the new image boots, so it doubles as confirmation
+that the flash took.<br><br>
 <b style="color:var(--ink2)">Do not close this page or leave the Wi-Fi network while it uploads.</b>
 A failed write leaves the previous firmware intact &mdash; the ESP32 only switches over
 after the new image verifies &mdash; but an interrupted upload means starting again.

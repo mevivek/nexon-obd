@@ -13,7 +13,12 @@
 // Both dashboards carry the same logic (TOOLS.md: kept in sync by hand), so the
 // same suite runs against both and fails if they drift apart.
 
-import { pageSource, scriptsOf } from './pagesrc.mjs';
+import { pageSource, scriptsOf, fwVersion } from './pagesrc.mjs';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const here = dirname(fileURLToPath(import.meta.url));
 
 let ran = 0, failed = 0;
 function ok(cond, what) {
@@ -256,6 +261,37 @@ async function suiteSeed(label, file) {
   ok(n > 200, `sparkline is seeded from the board's history (${n} points, not flat)`);
   ok(!/NaN/.test(m.el('spSpeed').innerHTML), 'nulls in the stored history do not produce NaN geometry');
   ok(/^0[,.]/.test(pts) || pts.startsWith('0,'), 'the trace starts at the left edge');
+}
+
+// ---------------------------------------------------------------- version
+//
+// The version has to be legible on the phone that is doing the flashing - on
+// /update most of all, where it is the only way to tell whether the last upload
+// took. It was previously visible on the dashboard alone, because the rule that
+// hides the subtitle lives in the shared stylesheet while the override that
+// countered it had been put on one page.
+console.log('\nversion stamp');
+{
+  const v = fwVersion();
+  ok(/^\d+\.\d+\.\d+$/.test(v), `version.h holds a version (${v})`);
+
+  for (const f of ['../NexonOBD/dashboard_html.h', '../NexonOBD/scan_html.h',
+                   '../NexonOBD/ota_html.h']) {
+    const html = pageSource(f);
+    const name = f.split('/').pop();
+    const sub = (html.match(/<span class="sub">([\s\S]*?)<\/span>/) || [, ''])[1];
+    ok(sub.includes(v), `${name}: header shows v${v}`);
+
+    const hidden = [...html.matchAll(/@media\(max-width:(\d+)px\)\{\.sub\{display:none\}\}/g)]
+      .map(m => Number(m[1]))
+      .filter(w => w > 360);
+    ok(hidden.length === 0,
+       `${name}: version stays visible at phone width${hidden.length ? ` (hidden below ${hidden}px)` : ''}`);
+  }
+
+  const build = readFileSync(join(here, '../build.sh'), 'utf8');
+  ok(/FW_VERSION/.test(build) && /NexonOBD-v\$VERSION\.bin/.test(build),
+     'build.sh names the image from the same FW_VERSION');
 }
 
 // ---------------------------------------------------------------- syntax
