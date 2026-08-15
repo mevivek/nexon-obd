@@ -55,6 +55,9 @@ after the new image verifies &mdash; but an interrupted upload means starting ag
 </div>
 
 <script>
+// The board has no clock of its own. Whichever page you open hands over the
+// time, so anything it records carries a real timestamp.
+fetch('/time?ms='+Date.now(),{cache:'no-store'}).catch(()=>{});
 const f=document.getElementById('f'),go=document.getElementById('go'),
       p=document.getElementById('p'),m=document.getElementById('m');
 f.onchange=()=>{go.disabled=!f.files.length;m.textContent='';m.className='msg';p.style.width='0'};

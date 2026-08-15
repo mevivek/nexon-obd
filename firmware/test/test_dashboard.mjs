@@ -463,7 +463,18 @@ console.log('\nversion stamp');
   ok(konst('HIST_CHUNK') * konst('HIST_PERIOD_MS') >= 60000,
      'a chunk spans at least a minute of data');
 
+  // The board has no clock, so every page has to hand over the browser's time -
+  // whichever one you happen to open is the only chance it gets.
+  for (const f of ['../NexonOBD/dashboard_html.h', '../NexonOBD/scan_html.h',
+                   '../NexonOBD/ota_html.h', '../NexonOBD/mon_html.h']) {
+    const html = pageSource(f);
+    ok(/fetch\('\/time\?ms='\+Date\.now\(\)/.test(html),
+       `${f.split('/').pop()}: sends the browser clock to the board`);
+  }
+
+  // PSRAM is off by default on this board; the scan hit list depends on it being on.
   const build = readFileSync(join(here, '../build.sh'), 'utf8');
+  ok(/PSRAM=opi/.test(build), 'build.sh asks for the board with PSRAM enabled');
   ok(/FW_VERSION/.test(build) && /NexonOBD-v\$VERSION\.bin/.test(build),
      'build.sh names the image from the same FW_VERSION');
 }

@@ -110,5 +110,8 @@ async function poll(){
   $('empty').style.display=j.recs.length?'none':'block';
  }catch(e){$('state').textContent='ESP32 unreachable';$('dot').className='dot dead'}
 }
+// The board has no clock of its own. Whichever page you open hands over the
+// time, so anything it records carries a real timestamp.
+fetch('/time?ms='+Date.now(),{cache:'no-store'}).catch(()=>{});
 poll();setInterval(poll,2000);
 </script></body></html>)rawliteral";

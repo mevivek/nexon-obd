@@ -337,5 +337,8 @@ async function seed(){try{
  spark('spRpm',hist.rpm,css('--blue'),1);spark('spBoost',hist.boost,css('--orange'),0);
  spark('spSpeed',hist.speed,css('--aqua'),1);spark('spCool',hist.coolant,css('--yellow'),0);
 }catch(e){}}
+// The board has no clock of its own. Whichever page you open hands over the
+// time, so anything it records carries a real timestamp.
+fetch('/time?ms='+Date.now(),{cache:'no-store'}).catch(()=>{});
 seed().then(tick);
 </script></body></html>)rawliteral";

@@ -133,5 +133,8 @@ $('csv').onclick=()=>{
  a.href=URL.createObjectURL(new Blob([rows.join('\n')],{type:'text/csv'}));
  a.download='did_hits.csv';a.click();
 };
+// The board has no clock of its own. Whichever page you open hands over the
+// time, so anything it records carries a real timestamp.
+fetch('/time?ms='+Date.now(),{cache:'no-store'}).catch(()=>{});
 poll();
 </script></body></html>)rawliteral";

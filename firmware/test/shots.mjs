@@ -103,6 +103,10 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
     return res.end(JSON.stringify(h));
   }
+  if (url.startsWith('/time')) {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ set: true, epoch: 1755000000000 }));
+  }
   if (url === '/mon') {
     // Two O2 monitors, which is what this car's support mask implies: one comfortably
     // inside its window, one close enough to a limit to be worth seeing.

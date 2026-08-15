@@ -22,6 +22,7 @@
 #include "elm_ble.h"
 #include "version.h"
 #include "history.h"
+#include "clock.h"
 #include <Update.h>
 #include "dashboard_html.h"
 #include "scan_html.h"
@@ -545,8 +546,33 @@ struct ScanState {
   uint32_t cur = 0, from = 0, to = 0xFFFF;
   uint32_t tried = 0, negatives = 0;
   uint32_t startedMs = 0;
-  std::vector<Hit> hits;
 } scan;
+
+// The hit list used to be a std::vector on the heap, capped at 3000 entries - about
+// 84 KB of a 320 KB heap, competing with the web server and the TLS-free but still
+// hungry Wi-Fi stack. It lives in PSRAM now, where 8 MB sits otherwise unused, and
+// the cap can be generous instead of a compromise. Without PSRAM it falls back to a
+// modest heap allocation rather than refusing to scan.
+static Hit     *scanHits   = nullptr;
+static uint16_t scanHitCap = 0;
+static uint16_t scanHitN   = 0;
+static bool     scanHitsPsram = false;
+
+static void scanHitsBegin() {
+  const uint16_t want = 4000;
+  if (psramFound()) {
+    scanHits = (Hit *)ps_malloc(sizeof(Hit) * want);
+    if (scanHits) { scanHitCap = want; scanHitsPsram = true; }
+  }
+  if (!scanHits) {
+    const uint16_t fallback = 400;
+    scanHits = (Hit *)malloc(sizeof(Hit) * fallback);
+    scanHitCap = scanHits ? fallback : 0;
+  }
+  Serial.printf("[mem] psram %s, scan hits cap %u (%s)\n",
+                psramFound() ? "present" : "absent", scanHitCap,
+                scanHitsPsram ? "psram" : "heap");
+}
 
 // Time-boxed rather than counted. A fixed count of identifiers is a wildly
 // different amount of wall-clock per transport - 40 DIDs is about a second on CAN
@@ -584,7 +610,7 @@ static void scanStep(uint32_t budgetMs) {
     h.ecu = scan.ecu;
     h.len = (uint8_t)min((size_t)(len - 3), sizeof(h.data));
     memcpy(h.data, &buf[3], h.len);
-    if (scan.hits.size() < 3000) scan.hits.push_back(h);
+    if (scanHitN < scanHitCap) scanHits[scanHitN++] = h;
   }
 }
 
@@ -815,6 +841,8 @@ static void handleData() {
   s += g_seq;
   s += ",\"age\":";
   s += (millis() - g_liveMs);
+  s += ",\"epoch\":";
+  s += (long long)clockNowMs();
   jsonScan(s);
   s += ",\"v\":{";
   jsonNum(s, "rpm", L.rpm, 0);        jsonNum(s, "speed", L.speed, 0);
@@ -836,6 +864,19 @@ static void handleData() {
   server.send(200, "application/json", s);
 }
 
+// The browser hands over the time on every page load, so the board can stamp what
+// it records. Re-sent each load rather than once, because the internal oscillator
+// drifts and correcting it costs nothing.
+static void handleTime() {
+  if (server.hasArg("ms")) clockSetFrom(strtoll(server.arg("ms").c_str(), nullptr, 10));
+  String s = "{\"set\":";
+  s += clockSet() ? "true" : "false";
+  s += ",\"epoch\":";
+  s += (long long)clockNowMs();
+  s += "}";
+  server.send(200, "application/json", s);
+}
+
 static void handleScanStart() {
   scan.running   = true;
   scan.ecu       = server.hasArg("ecu") ? (uint8_t)server.arg("ecu").toInt() : 0;
@@ -845,7 +886,7 @@ static void handleScanStart() {
   scan.tried     = 0;
   scan.negatives = 0;
   scan.startedMs = millis();
-  scan.hits.clear();
+  scanHitN = 0;
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -854,39 +895,51 @@ static void handleScanStop() {
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
+// Chunked, like /history and for the same reason: a completed sweep can hold
+// thousands of hits, and building that into one String would need more contiguous
+// heap than the board has to spare while also serving the page that asked for it.
 static void handleScanStatus() {
-  String s = "{\"running\":";
-  s += scan.running ? "true" : "false";
-  s += ",\"ecu\":\"";
-  s += scan.ecu ? "TCM" : "ECM";
-  s += "\",\"cur\":\"";
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json", "");
+
   char hex[8];
   snprintf(hex, sizeof(hex), "%04X", (unsigned)(scan.cur > 0xFFFF ? 0xFFFF : scan.cur));
-  s += hex;
-  s += "\",\"tried\":";  s += scan.tried;
-  s += ",\"total\":";    s += (scan.to - scan.from + 1);
-  s += ",\"negatives\":";s += scan.negatives;
-  s += ",\"elapsed\":";  s += (millis() - scan.startedMs) / 1000;
-  s += ",\"hits\":[";
-  for (size_t i = 0; i < scan.hits.size(); i++) {
-    const Hit &h = scan.hits[i];
-    if (i) s += ",";
+  String head = "{\"running\":";
+  head += scan.running ? "true" : "false";
+  head += ",\"ecu\":\"";
+  head += scan.ecu ? "TCM" : "ECM";
+  head += "\",\"cur\":\"";
+  head += hex;
+  head += "\",\"tried\":";  head += scan.tried;
+  head += ",\"total\":";     head += (scan.to - scan.from + 1);
+  head += ",\"negatives\":"; head += scan.negatives;
+  head += ",\"elapsed\":";   head += (millis() - scan.startedMs) / 1000;
+  head += ",\"cap\":";       head += scanHitCap;
+  head += ",\"hits\":[";
+  server.sendContent(head);
+
+  String chunk;
+  for (uint16_t i = 0; i < scanHitN; i++) {
+    const Hit &h = scanHits[i];
+    if (i) chunk += ",";
     snprintf(hex, sizeof(hex), "%04X", h.did);
-    s += "{\"did\":\"";  s += hex;
-    s += "\",\"ecu\":\""; s += (h.ecu ? "TCM" : "ECM");
-    s += "\",\"len\":";   s += h.len;
-    s += ",\"hex\":\"";
-    for (uint8_t k = 0; k < h.len; k++) { char b[4]; snprintf(b, sizeof(b), "%02X", h.data[k]); s += b; }
-    s += "\",\"ascii\":\"";
+    chunk += "{\"did\":\"";  chunk += hex;
+    chunk += "\",\"ecu\":\""; chunk += (h.ecu ? "TCM" : "ECM");
+    chunk += "\",\"len\":";   chunk += h.len;
+    chunk += ",\"hex\":\"";
+    for (uint8_t k = 0; k < h.len; k++) { char b[4]; snprintf(b, sizeof(b), "%02X", h.data[k]); chunk += b; }
+    chunk += "\",\"ascii\":\"";
     for (uint8_t k = 0; k < h.len; k++) {
       char c = (char)h.data[k];
-      if (c == '"' || c == '\\') s += '.';
-      else s += (c >= 32 && c < 127) ? c : '.';
+      if (c == '"' || c == '\\') chunk += '.';
+      else chunk += (c >= 32 && c < 127) ? c : '.';
     }
-    s += "\"}";
+    chunk += "\"}";
+    if (chunk.length() > 1024) { server.sendContent(chunk); chunk = ""; }
   }
-  s += "]}";
-  server.send(200, "application/json", s);
+  chunk += "]}";
+  server.sendContent(chunk);
+  server.sendContent("");
 }
 
 // Stored + pending DTCs, both ECUs.
@@ -959,8 +1012,11 @@ static void handleHistory() {
   server.send(200, "application/json", "");
 
   char head[96];
-  snprintf(head, sizeof(head), "{\"period\":%lu,\"n\":%u,",
-           (unsigned long)(HIST_PERIOD_MS / 1000), histCount);
+  // endEpoch is the wall-clock time of the newest sample, so the client can put the
+  // chart on a real axis. Zero when nobody has told the board what time it is.
+  snprintf(head, sizeof(head), "{\"period\":%lu,\"n\":%u,\"endEpoch\":%lld,",
+           (unsigned long)(HIST_PERIOD_MS / 1000), histCount,
+           (long long)clockAtMs(histLastPush));
   server.sendContent(head);
 
   const char *names[4] = {"rpm", "speed", "boost", "coolant"};
@@ -1076,12 +1132,14 @@ void setup() {
   server.on("/dtc",         handleDtc);
   server.on("/history",     handleHistory);
   server.on("/mon",         handleMonitors);
+  server.on("/time",        handleTime);
   server.on("/monitors",    []() { server.send_P(200, "text/html", MON_HTML); });
   server.on("/scan/start",  handleScanStart);
   server.on("/scan/stop",   handleScanStop);
   server.on("/scan/status", handleScanStatus);
   server.begin();
 
+  scanHitsBegin();
   histBegin();
   lastEcuOkMs = millis();
   chooseTransport();
