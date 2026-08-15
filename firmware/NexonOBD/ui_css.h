@@ -124,6 +124,9 @@ button{background:var(--blue);color:#04121f;border:0;border-radius:8px;
 padding:9px 16px;font:inherit;font-weight:650;cursor:pointer}
 button.ghost{background:transparent;color:var(--ink2);border:1px solid var(--base)}
 button:disabled{background:var(--base);color:var(--muted);cursor:not-allowed}
+/* A locked control has to look locked, or it reads as unresponsive rather than
+   deliberately unavailable. */
+select:disabled,input:disabled{opacity:.45;cursor:not-allowed}
 .bar2{height:6px;margin-top:12px;background:var(--base);border-radius:3px;
 overflow:hidden}
 .bar2>i{display:block;height:100%;width:0;background:var(--blue);transition:width .2s}

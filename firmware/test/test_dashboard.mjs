@@ -88,16 +88,23 @@ function load(file, opts = {}) {
     return Promise.resolve({ json: () => Promise.resolve(r) });
   };
   const setTimeoutImpl = (fn) => { pending = fn; return 0; };
+  // The scan page schedules with setInterval; capture the period so a test can see
+  // that the page goes live on its own rather than only after Start is pressed.
+  let interval = null;
+  const setIntervalImpl = (fn, ms) => { interval = { fn, ms }; return 1; };
+  const clearIntervalImpl = () => { interval = null; };
 
   const api = new Function(
-    'document', 'getComputedStyle', 'fetch', 'setTimeout',
-    js + '\n;return { merge, render, hz, holdMs, rate };'
-  )(dom.document, dom.getComputedStyle, fetchImpl, setTimeoutImpl);
+    'document', 'getComputedStyle', 'fetch', 'setTimeout', 'setInterval', 'clearInterval',
+    js + '\n;return ' + (opts.exports || '{ merge, render, hz, holdMs, rate }') + ';'
+  )(dom.document, dom.getComputedStyle, fetchImpl, setTimeoutImpl,
+    setIntervalImpl, clearIntervalImpl);
 
   return {
     ...api, el: dom.el, queue, doc: dom.document,
     fire(ev) { for (const fn of dom.listeners[ev] || []) fn(); },
     scheduled: () => pending !== null,
+    interval: () => interval,
     // Exactly one poll per call: run whatever tick() last rescheduled, then let the
     // promises settle. The first call has nothing scheduled yet and simply lets
     // seed().then(tick) get going. Firing at the end instead would run an extra
@@ -359,6 +366,49 @@ async function suiteSeed(label, file) {
   ok(!/NaN/.test(m.el('spSpeed').innerHTML), 'nulls in the stored history do not produce NaN geometry');
   ok(/^0[,.]/.test(pts) || pts.startsWith('0,'), 'the trace starts at the left edge');
 }
+
+async function suiteScanControls() {
+  console.log('\nDID scanner (scan_html.h) — controls follow the scan');
+  const idle = { running: false, cur: '0000', tried: 0, total: 65536, negatives: 0,
+                 elapsed: 0, hits: [] };
+  const busy = { running: true, cur: 'F1A4', tried: 420, total: 65536, negatives: 415,
+                 elapsed: 37, hits: [{ did: 'F18A', ecu: 'ECM', len: 13,
+                                       hex: '424F534348', ascii: 'BOSCH' }] };
+
+  const m = load('../NexonOBD/scan_html.h', { exports: '{ poll }' });
+
+  m.queue.push(idle);
+  await m.poll();
+  eq(m.el('go').disabled, false, 'idle: Start is available');
+  eq(m.el('go').textContent, 'Start scan', 'idle: Start reads "Start scan"');
+  eq(m.el('stop').disabled, true, 'idle: Stop is not');
+  eq(m.el('csv').disabled, true, 'idle: nothing to export yet');
+
+  // Start resets position and clears the hit list on the board, and none of that is
+  // persisted - so a live Start button during a sweep is one stray tap from losing
+  // the whole run.
+  m.queue.push(busy);
+  await m.poll();
+  eq(m.el('go').disabled, true, 'scanning: Start is disabled');
+  ok(m.el('go').textContent.startsWith('Scanning'), 'scanning: it says so');
+  eq(m.el('stop').disabled, false, 'scanning: Stop is available');
+  eq(m.el('ecu').disabled, true, 'scanning: the range inputs are locked');
+  eq(m.el('from').disabled, true, 'scanning: from is locked');
+  eq(m.el('csv').disabled, false, 'scanning: there are hits to export');
+
+  // The board owns the scan, so this page has to go live on its own - it may have
+  // been opened mid-sweep, or the scan started from another phone.
+  ok(m.interval(), 'the page schedules its own polling');
+  eq(m.interval().ms, 1000, 'and polls quickly while a scan runs');
+
+  m.queue.push(idle);
+  await m.poll();
+  eq(m.el('go').disabled, false, 'finishing re-enables Start');
+  eq(m.el('ecu').disabled, false, 'and unlocks the inputs');
+  eq(m.interval().ms, 4000, 'and backs the polling off when idle');
+}
+
+await suiteScanControls();
 
 // ---------------------------------------------------------------- version
 //

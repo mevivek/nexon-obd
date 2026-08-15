@@ -55,8 +55,10 @@ R"rawliteral(
 <span>left <b id="eta">&mdash;</b></span>
 </div>
 <div class="hint">A scan keeps running if you leave this page or close the browser &mdash;
-it is driven by the board, not by this tab. Live dashboard values pause while it runs,
-because the scanner has the bus. Use Stop to end it.<br><br>
+it is driven by the board, not by this tab. The scanner takes most of the bus, so
+live dashboard values keep updating but slowly. Use Stop to end it &mdash; starting a
+new scan discards the identifiers found so far, and nothing is saved across a
+restart, so export the CSV before you stop.<br><br>
 Service 0x22 is a read. This page never sends 0x2E (write), 0x31 (routine),
 0x11 (reset) or 0x10 (session change). A full 0000&ndash;FFFF pass is 65,536 requests.
 Run it parked.</div>
@@ -71,8 +73,25 @@ Run it parked.</div>
 </div>
 
 <script>
-let timer=null,last=[];
+let timer=null,period=0,last=[];
 const $=i=>document.getElementById(i);
+// The page must be live however the scan was started - it may have been kicked off
+// from another phone, or before this tab was opened, since the board runs it. The
+// interval used to be created only inside the Start handler, so opening this page
+// mid-sweep showed one frozen snapshot and the only way to get moving numbers was
+// to press Start, which wipes the run.
+function schedule(ms){if(timer&&period===ms)return;
+ if(timer)clearInterval(timer);period=ms;timer=setInterval(poll,ms)}
+// Start resets cur, tried, negatives and clears the hit list on the board, and none
+// of that is persisted anywhere - so leaving the button live during a sweep put a
+// stray tap between you and losing the whole thing.
+function controls(running){
+ $('go').disabled=running;
+ $('go').textContent=running?'Scanning\u2026':'Start scan';
+ $('stop').disabled=!running;
+ $('csv').disabled=!last.length;
+ for(const i of ['ecu','from','to'])$(i).disabled=running;
+}
 function hms(s){s=Math.round(s);const h=Math.floor(s/3600),m=Math.floor(s%3600/60);
 return h>48?Math.round(h/24)+'d':h?h+'h '+m+'m':m?m+'m':s+'s'}
 function dot(c){$('dot').className='dot '+c}
@@ -95,14 +114,15 @@ async function poll(){
    `<tr><td>${h.ecu}</td><td class="mono">${h.did}</td><td class="num">${h.len}</td>
     <td class="mono brk">${h.ascii}</td><td class="mono brk">${h.hex.replace(/(..)/g,'$1 ').trim()}</td></tr>`).join('')
    :'<tr><td colspan="5" style="color:var(--muted)">Nothing yet.</td></tr>';
-  if(!j.running&&timer){clearInterval(timer);timer=null}
- }catch(e){$('state').textContent='ESP32 unreachable';dot('dead')}
+  controls(j.running);
+  schedule(j.running?1000:4000);
+ }catch(e){$('state').textContent='ESP32 unreachable';dot('dead');schedule(4000)}
 }
 $('go').onclick=async()=>{
+ controls(true);                       // reflect it now, not a round trip later
  const q=`?ecu=${$('ecu').value}&from=${$('from').value}&to=${$('to').value}`;
  await fetch('/scan/start'+q);
- if(timer)clearInterval(timer);
- timer=setInterval(poll,1000);poll();
+ poll();
 };
 $('stop').onclick=async()=>{await fetch('/scan/stop');poll()};
 $('csv').onclick=()=>{
