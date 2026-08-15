@@ -33,6 +33,7 @@ letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 .dial .gv .unit{margin-top:1px;font-size:10px;font-weight:400;color:var(--ink2)}
 .vital{grid-template-columns:repeat(auto-fit,minmax(158px,1fr));margin-top:8px}
 .value.sm{font-size:19px}
+#scanBar{margin-bottom:10px}
 .sep{color:var(--muted);margin:0 3px;font-weight:400}
 </style></head><body>
 
@@ -45,6 +46,14 @@ letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 </header>
 
 <div class="wrap">
+
+<div class="card" id="scanBar" style="display:none;border-color:var(--blue)">
+<div class="label" style="margin:0 0 3px">DID scan running</div>
+<div style="font-size:13px;color:var(--ink2)">Live values are paused &mdash; the
+scanner has the bus. It keeps going if you leave this page.</div>
+<div class="bar2"><i id="scanProg"></i></div>
+<div style="margin-top:8px"><a href="/scan" style="color:var(--blue);font-size:13px">Open the scanner &rarr;</a></div>
+</div>
 
 <div class="glance">
 <div class="tile hero"><div class="label">Vehicle speed</div>
@@ -144,7 +153,7 @@ letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 // The board keeps that across restarts and serves it at /history, so the charts
 // have shape the moment the page loads instead of starting flat.
 const HSLOT=600,HP=6000,HOLD=2500,hist={rpm:[],boost:[],speed:[],coolant:[]},keep={};
-let rate=[],hb=0,miss=0,lastStatus='';
+let rate=[],hb=0,miss=0,lastStatus='',lastSeq=-1,alive=true;
 // A sample can arrive with only some fields filled in: /data reports ok as soon as
 // any one of the three batched mode-01 requests answers, so a single batch timing
 // out sends six nulls and used to blank six gauges at once. Re-show the last known
@@ -241,15 +250,28 @@ document.getElementById('dot').className='dot '+c;document.getElementById('st').
 // a second, which reads as a fault when nothing is actually wrong.
 const MISS_MAX=5;
 async function tick(){try{const r=await fetch('/data',{cache:'no-store'});const j=await r.json();
+scanBar(j.scan,j.scanPct);
 if(j.ok){miss=0;const[v,q,held]=merge(j.v);render(v,q);
-rate.push(Date.now());if(rate.length>20)rate.shift();
+// Count published samples, not fetches: /data serves a cached sample now, so the
+// same one can be fetched several times and must not inflate the rate.
+if(j.seq!==lastSeq){lastSeq=j.seq;rate.push(Date.now());if(rate.length>20)rate.shift()}
 if(j.tr)T('tr',j.tr);
 st('live',held?'live · holding '+held:'live');
 document.getElementById('hz').textContent=hz()}
+else if(j.scan){miss=0;st('stale','paused · scanning');
+document.getElementById('hz').textContent=''}
 else if(++miss>=MISS_MAX){rate.length=0;st('stale',j.error||'no data');
 document.getElementById('hz').textContent=''}}
 catch(e){if(++miss>=MISS_MAX)st('dead','ESP32 unreachable')}
-finally{setTimeout(tick,120)}}
+finally{if(alive)setTimeout(tick,120)}}
+function scanBar(on,pct){const e=document.getElementById('scanBar');if(!e)return;
+e.style.display=on?'block':'none';
+if(on)document.getElementById('scanProg').style.width=(pct||0)+'%'}
+// Stop polling while the page is not on screen. The board keeps sampling either
+// way, and a backgrounded tab hammering /data just costs battery and bus time.
+document.addEventListener('visibilitychange',()=>{
+ if(document.hidden){alive=false}
+ else if(!alive){alive=true;lastStatus='';tick()}});
 // Seed the charts from the board's stored hour before the first poll lands.
 async function seed(){try{
  const h=await(await fetch('/history',{cache:'no-store'})).json();

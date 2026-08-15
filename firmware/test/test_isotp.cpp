@@ -191,8 +191,8 @@ static void test_ble_negative() {
 
 // ------------------------------------------------------------------ pollBatch
 
-// b1 from pollAll(): rpm, speed, map, throttle, load, coolant.
-static const uint8_t B1[6] = {0x0C, 0x0D, 0x0B, 0x11, 0x04, 0x05};
+// The sampler's real first batch: rpm, speed, map, throttle, load, coolant.
+static const uint8_t *const B1 = PID_B1;
 
 // A complete 6-PID reply: 41 + 0C 0AF0 + 0D 00 + 0B 28 + 11 1A + 04 2E + 05 5A.
 static void queueGoodBatch() {
@@ -277,23 +277,44 @@ static void test_batch_silent_does_not_retry() {
   uint32_t t0 = g_millis;
   ok(!pollBatch(L, B1, 6), "returns false");
   // One 400 ms window, not two: retrying a silent bus would triple the latency of
-  // /data with the ignition off, since pollAll() runs three of these.
+  // /data with the ignition off, since a sample is three of these.
   ok(g_millis - t0 < 800, "did not burn a second timeout");
 }
 
-// ------------------------------------------------------------------ pollAll
+// ------------------------------------------------------------------ sampler
 
-static void test_pollall_partial_marks_ok() {
-  printf("pollAll: one batch answers, two do not\n");
+static void test_sampler_rotates() {
+  printf("sampleAdvance: one batch per call\n");
   resetBus();
-  queueGoodBatch();            // b1 answers; b2 and b3 time out
-  Live L = pollAll();
-  ok(L.ok, "sample is still flagged ok");
-  ok(!isnan(L.rpm), "b1 fields are populated");
-  // This is what reaches the browser as null, and why the client holds the
-  // previous value rather than rendering an em-dash over a good reading.
-  ok(isnan(L.oil), "b2 fields are absent");
-  ok(isnan(L.lambda), "b3 fields are absent");
+  Live acc; bool any = false; uint8_t batch = 0;
+
+  queueGoodBatch();                                   // only b1 will answer
+  ok(!sampleAdvance(acc, any, batch), "first call does not complete a sample");
+  eq((int)batch, 1, "and advances to the next batch");
+  ok(any, "b1 answered");
+  ok(!isnan(acc.rpm), "b1 fields are in the accumulator");
+
+  ok(!sampleAdvance(acc, any, batch), "second call still incomplete");
+  ok(sampleAdvance(acc, any, batch), "third call completes the rotation");
+  eq((int)batch, 0, "and wraps back to the start");
+
+  // The point of splitting the sample across loop turns: the web server gets a turn
+  // between batches, so a page request never waits on a whole three-batch poll.
+  ok(!isnan(acc.rpm), "the completed sample keeps what b1 provided");
+  ok(isnan(acc.oil), "and leaves absent fields alone");
+}
+
+static void test_sampler_partial_still_publishes() {
+  printf("sampleAdvance: only one batch of three answers\n");
+  resetBus();
+  Live acc; bool any = false; uint8_t batch = 0;
+  queueGoodBatch();
+  for (int i = 0; i < 3; i++) sampleAdvance(acc, any, batch);
+  ok(any, "the sample is still flagged usable");
+  ok(!isnan(acc.speed), "the batch that answered is present");
+  // This is what reaches the browser as null, and why the client holds the previous
+  // value rather than painting an em-dash over a good reading.
+  ok(isnan(acc.lambda), "the batches that did not are absent, not invented");
 }
 
 // ------------------------------------------------------------------
@@ -324,7 +345,8 @@ int main() {
   test_batch_rejects_misframed();
   test_batch_silent_does_not_retry();
 
-  test_pollall_partial_marks_ok();
+  test_sampler_rotates();
+  test_sampler_partial_still_publishes();
 
   printf("\n%d checks, %d failed\n", g_ran, g_fail);
   return g_fail ? 1 : 0;

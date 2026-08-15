@@ -54,6 +54,8 @@ const SCENARIOS = {
                  rpm: 5720, volt: 11.9 },
   // Ignition off / nothing ever received.
   'no-data': Object.fromEntries(Object.keys(CRUISING).map(k => [k, null])),
+  // A DID sweep has the bus; live values are paused, and the Live page has to say so.
+  scanning: CRUISING,
 };
 
 const PAGES = [
@@ -66,6 +68,8 @@ const WIDTHS = [[390, 'phone'], [768, 'tablet']];
 
 let sample = CRUISING;
 let ok = true;
+let scanning = false;
+let seq = 0;
 
 const html = Object.fromEntries(PAGES.map(([name, f]) => [name, pageSource(f)]));
 
@@ -73,8 +77,13 @@ const server = http.createServer((req, res) => {
   const url = req.url.split('?')[0];
   if (url === '/data') {
     res.writeHead(200, { 'content-type': 'application/json' });
-    return res.end(JSON.stringify(ok ? { ok: true, fw: 'test', tr: 'can', v: sample }
-                                     : { ok: false, error: 'no response from ECU (ignition off?)' }));
+    if (scanning) {
+      return res.end(JSON.stringify({ ok: false, scan: true,
+                                      error: 'paused - DID scan running' }));
+    }
+    return res.end(JSON.stringify(ok
+      ? { ok: true, fw: 'test', tr: 'can', seq: ++seq, age: 40, scan: false, v: sample }
+      : { ok: false, scan: false, error: 'no response from ECU (ignition off?)' }));
   }
   if (url === '/history') {
     // Stands in for the board's stored hour, so the shots show charts with the
@@ -128,11 +137,13 @@ for (const [width, wname] of WIDTHS) {
   for (const [sname, s] of Object.entries(SCENARIOS)) {
     // Warm up on a full sample first, so the hold-last-value path has something to
     // hold - a cold page would just show em-dashes.
-    ok = true; sample = CRUISING;
+    ok = true; scanning = false; sample = CRUISING;
     await page.goto(`${base}/`);
     await page.waitForTimeout(700);
 
-    if (sname === 'no-data') ok = false; else sample = s;
+    if (sname === 'no-data') ok = false;
+    else if (sname === 'scanning') scanning = true;
+    else sample = s;
     // The status only flips after five consecutive failures, so the no-data shot
     // needs longer than one poll interval to actually reach that state.
     await page.waitForTimeout(sname === 'no-data' ? 1600 : 700);
@@ -142,7 +153,7 @@ for (const [width, wname] of WIDTHS) {
     shots.push(f);
   }
 
-  ok = true; sample = CRUISING;
+  ok = true; scanning = false; sample = CRUISING;
   for (const p of ['scan', 'update']) {
     await page.goto(`${base}/${p}`);
     await page.waitForTimeout(500);

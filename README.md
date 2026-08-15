@@ -49,6 +49,36 @@ A single dropped poll is not reported as a fault either — the status only chan
 values are held through them, and flipping the status on each one reads as a problem
 when nothing is wrong.
 
+### Polling runs on the board, not on the page
+
+The board samples the ECU continuously in `loop()`, one batched request per turn,
+and `/data` returns the newest cached sample. Nothing waits on the bus to serve a
+page, so switching between Live, the scanner and Firmware is immediate. It also
+means polling does not stop when you close the browser.
+
+One batch per turn matters: the web server is single threaded, so any time spent on
+the bus is time the board cannot answer a request. Polling all three batches inline
+could leave a tap on a nav link sitting behind seconds of BLE timeouts.
+
+The dashboard stops requesting while the page is off screen, and the Hz readout
+counts *published samples* rather than fetches — the same cached sample can be
+fetched several times and must not inflate the rate.
+
+### The DID scan runs in the background
+
+A scan is driven by the board, so it continues if you navigate away, close the
+browser, or lock the phone. Only **Stop** — or an OTA upload, which never flashes
+mid-scan — ends it.
+
+While it runs, the scanner has the bus and live values pause. The Live page says so
+explicitly rather than looking dead, and shows the sweep's progress with a link back
+to the scanner.
+
+Scanning is time-boxed to 250 ms per turn rather than a fixed identifier count. A
+count behaves wildly differently per transport — 40 identifiers is about a second on
+CAN but roughly 22 s over BLE, during which nothing answers the web server and the
+board appears hung.
+
 ### Trend history
 
 The board keeps one hour of RPM, speed, boost and coolant at 6-second resolution and

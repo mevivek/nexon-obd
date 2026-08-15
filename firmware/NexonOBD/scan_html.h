@@ -53,7 +53,10 @@ R"rawliteral(
 <span>elapsed <b id="el">0</b>s</span>
 <span>rate <b id="rate">&mdash;</b>/s</span>
 </div>
-<div class="hint">Service 0x22 is a read. This page never sends 0x2E (write), 0x31 (routine),
+<div class="hint">A scan keeps running if you leave this page or close the browser &mdash;
+it is driven by the board, not by this tab. Live dashboard values pause while it runs,
+because the scanner has the bus. Use Stop to end it.<br><br>
+Service 0x22 is a read. This page never sends 0x2E (write), 0x31 (routine),
 0x11 (reset) or 0x10 (session change). A full 0000&ndash;FFFF pass is 65,536 requests.
 Run it parked.</div>
 </div>

@@ -418,25 +418,24 @@ static bool pollBatch(Live &L, const uint8_t *pids, uint8_t n) {
 
 static float g_baro = NAN;
 
-static Live pollAll() {
-  Live L;
-  static const uint8_t b1[] = {0x0C, 0x0D, 0x0B, 0x11, 0x04, 0x05};
-  static const uint8_t b2[] = {0x5C, 0x0F, 0x42, 0x06, 0x07, 0x5E};
-  static const uint8_t b3[] = {0x34, 0x3C, 0x0E, 0x1F, 0x46, 0x2F};
+// The three batched mode-01 requests that make up one sample.
+static const uint8_t PID_B1[6] = {0x0C, 0x0D, 0x0B, 0x11, 0x04, 0x05};
+static const uint8_t PID_B2[6] = {0x5C, 0x0F, 0x42, 0x06, 0x07, 0x5E};
+static const uint8_t PID_B3[6] = {0x34, 0x3C, 0x0E, 0x1F, 0x46, 0x2F};
 
-  bool any = false;
-  any |= pollBatch(L, b1, 6);
-  any |= pollBatch(L, b2, 6);
-  any |= pollBatch(L, b3, 6);
-
-  if (any && isnan(g_baro)) {
-    Live tmp;
-    static const uint8_t b0[] = {0x33};
-    if (pollBatch(tmp, b0, 1)) g_baro = tmp.baro;
-  }
-  L.baro = g_baro;
-  L.ok = any;
-  return L;
+// Advance the sampler by exactly one batch. Returns true when a rotation finished
+// and `acc` is a complete sample.
+//
+// One batch per call, not three: the web server is single threaded, so whatever the
+// poller is doing is time the board cannot answer a page request. Polling all three
+// inline meant a tap on "DID scanner" could sit behind ~3.6 s of BLE timeouts before
+// the server even looked at it.
+static bool sampleAdvance(Live &acc, bool &any, uint8_t &batch) {
+  const uint8_t *pids = (batch == 0) ? PID_B1 : (batch == 1) ? PID_B2 : PID_B3;
+  any |= pollBatch(acc, pids, 6);
+  if (++batch < 3) return false;
+  batch = 0;
+  return true;
 }
 
 // ---------------------------------------------------------------- DID scanner
@@ -450,11 +449,16 @@ struct ScanState {
   std::vector<Hit> hits;
 } scan;
 
-static void scanStep(uint16_t budget) {
+// Time-boxed rather than counted. A fixed count of identifiers is a wildly
+// different amount of wall-clock per transport - 40 DIDs is about a second on CAN
+// but roughly 22 s over BLE, during which nothing answers the web server and the
+// board looks hung. A millisecond budget behaves the same on both.
+static void scanStep(uint32_t budgetMs) {
   uint32_t reqId = scan.ecu ? ID_TCM_REQ : ID_ECM_REQ;
   uint32_t rspId = scan.ecu ? ID_TCM_RSP : ID_ECM_RSP;
+  uint32_t started = millis();
 
-  for (uint16_t k = 0; k < budget && scan.running; k++) {
+  while (scan.running && millis() - started < budgetMs) {
     if (scan.cur > scan.to) { scan.running = false; break; }
 
     uint16_t did = (uint16_t)scan.cur++;
@@ -500,19 +504,72 @@ static const char *transportName();
 static uint32_t lastEcuOkMs;
 static bool     everSawEcu = false;
 
+// The newest complete sample, refreshed by the sampler in loop(). /data serves this
+// rather than polling the ECU inline, so a page request is never stuck behind a bus
+// exchange and switching pages is immediate.
+static Live     g_live;
+static uint32_t g_liveMs = 0;
+static uint32_t g_seq    = 0;      // increments per published sample
+
+static Live    sampAcc;
+static bool    sampAny   = false;
+static uint8_t sampBatch = 0;
+
+static void samplerStep() {
+  // The scanner owns the bus while it runs; interleaving would just halve both.
+  if (scan.running) return;
+
+  if (sampleAdvance(sampAcc, sampAny, sampBatch)) {
+    if (sampAny && isnan(g_baro)) {
+      Live t;
+      static const uint8_t b0[] = {0x33};
+      if (pollBatch(t, b0, 1)) g_baro = t.baro;
+    }
+    sampAcc.baro = g_baro;
+    sampAcc.ok   = sampAny;
+    if (sampAny) {
+      g_live   = sampAcc;
+      g_liveMs = millis();
+      g_seq++;
+      lastEcuOkMs = millis();
+      everSawEcu  = true;
+      histTick(g_live);
+    }
+    sampAcc = Live();
+    sampAny = false;
+  }
+}
+
 static void handleData() {
-  Live L = pollAll();
-  if (L.ok) { lastEcuOkMs = millis(); everSawEcu = true; }   // real reply resets the sleep timer
-  histTick(L);
   String s = "{";
-  if (!L.ok) {
-    s += "\"ok\":false,\"error\":\"no response from ECU (ignition off?)\"}";
+  bool fresh = g_seq && (millis() - g_liveMs < 4000);
+
+  if (!fresh) {
+    s += "\"ok\":false,\"error\":\"";
+    s += scan.running ? "paused - DID scan running"
+                      : "no response from ECU (ignition off?)";
+    s += "\",\"scan\":";
+    s += scan.running ? "true" : "false";
+    s += "}";
     server.send(200, "application/json", s);
     return;
   }
+
+  Live L = g_live;
   s += "\"ok\":true,\"fw\":\"" FW_VERSION "\",\"tr\":\"";
   s += transportName();
-  s += "\",\"v\":{";
+  s += "\",\"seq\":";
+  s += g_seq;
+  s += ",\"age\":";
+  s += (millis() - g_liveMs);
+  s += ",\"scan\":";
+  s += scan.running ? "true" : "false";
+  if (scan.running) {
+    uint32_t total = scan.to - scan.from + 1;
+    s += ",\"scanPct\":";
+    s += (total ? (scan.tried * 100UL / total) : 0);
+  }
+  s += ",\"v\":{";
   jsonNum(s, "rpm", L.rpm, 0);        jsonNum(s, "speed", L.speed, 0);
   jsonNum(s, "map", L.map_, 0);       jsonNum(s, "baro", L.baro, 0);
   jsonNum(s, "throttle", L.throttle, 1); jsonNum(s, "load", L.load, 1);
@@ -756,10 +813,11 @@ void setup() {
 
 void loop() {
   server.handleClient();
+  samplerStep();          // one batch per turn, so the server keeps its responsiveness
   heartbeat(millis() - lastEcuOkMs < 3000, scan.running);
 
   if (scan.running) {
-    scanStep(40);                 // ~1 s of scanning, then service HTTP again
+    scanStep(250);                // then hand the web server a turn
     lastEcuOkMs = millis();       // scanning counts as activity
   }
 

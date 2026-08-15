@@ -38,7 +38,7 @@ function fakeDom() {
   const els = new Map();
   const make = (id) => ({
     id, textContent: '', className: '', innerHTML: '', clientWidth: 220,
-    attrs: {},
+    attrs: {}, style: {},
     setAttribute(k, v) { this.attrs[k] = v; },
     classList: {
       set: new Set(),
@@ -50,10 +50,17 @@ function fakeDom() {
     if (!els.has(id)) els.set(id, make(id));
     return els.get(id);
   };
+  const listeners = {};
   return {
-    document: { getElementById: get, documentElement: make('html') },
+    document: {
+      getElementById: get,
+      documentElement: make('html'),
+      hidden: false,
+      addEventListener(ev, fn) { (listeners[ev] ||= []).push(fn); },
+    },
     getComputedStyle: () => ({ getPropertyValue: () => '#3987e5' }),
     el: get,
+    listeners,
   };
 }
 
@@ -88,7 +95,9 @@ function load(file, opts = {}) {
   )(dom.document, dom.getComputedStyle, fetchImpl, setTimeoutImpl);
 
   return {
-    ...api, el: dom.el, queue,
+    ...api, el: dom.el, queue, doc: dom.document,
+    fire(ev) { for (const fn of dom.listeners[ev] || []) fn(); },
+    scheduled: () => pending !== null,
     // Exactly one poll per call: run whatever tick() last rescheduled, then let the
     // promises settle. The first call has nothing scheduled yet and simply lets
     // seed().then(tick) get going. Firing at the end instead would run an extra
@@ -244,6 +253,54 @@ async function suiteStatus(label, file) {
   eq(n.el('st').textContent, 'live', 'two fetch failures do not report the board unreachable');
 }
 
+async function suiteVisibility(label, file) {
+  console.log(`\n${label} — polling pauses off screen`);
+  const m = load(file);
+  const good = { ok: true, seq: 1, tr: 'ble', v: { rpm: 800, coolant: 88 } };
+
+  m.queue.push(good);
+  await m.step();
+  ok(m.scheduled(), 'a visible page keeps polling');
+
+  // The board samples on its own now, so a backgrounded tab hammering /data buys
+  // nothing and costs battery and bus time.
+  m.doc.hidden = true;
+  m.fire('visibilitychange');
+  m.queue.push(good);
+  await m.step();
+  ok(!m.scheduled(), 'a hidden page stops rescheduling');
+
+  m.doc.hidden = false;
+  m.queue.push(good);
+  m.fire('visibilitychange');
+  for (let i = 0; i < 8; i++) await new Promise(r => setImmediate(r));
+  ok(m.scheduled(), 'coming back on screen resumes it');
+}
+
+async function suiteScanBanner(label, file) {
+  console.log(`\n${label} — scan visibility`);
+  const m = load(file);
+
+  m.queue.push({ ok: true, seq: 1, v: { rpm: 800 } });
+  await m.step();
+  eq(m.el('scanBar').style === undefined ? 'none' : m.el('scanBar').style.display,
+     'none', 'no banner when nothing is scanning');
+
+  // A scan owns the bus, so live values stop. That has to read as "scanning", not
+  // as the ECU having gone away.
+  m.queue.push({ ok: false, scan: true, error: 'paused - DID scan running' });
+  await m.step();
+  eq(m.el('st').textContent, 'paused · scanning', 'status says scanning, not no-response');
+  eq(m.el('scanBar').style.display, 'block', 'the banner appears on the Live page');
+
+  // ...and it must not trip the no-response hysteresis either.
+  for (let i = 0; i < 8; i++) {
+    m.queue.push({ ok: false, scan: true, error: 'paused - DID scan running' });
+    await m.step();
+  }
+  eq(m.el('st').textContent, 'paused · scanning', 'and stays that way while it runs');
+}
+
 async function suiteSeed(label, file) {
   console.log(`\n${label} — history seeding`);
   const hist = { period: 6, n: 300, rpm: [], speed: [], boost: [], coolant: [] };
@@ -327,6 +384,8 @@ for (const [label, file, ids] of PAGES) {
 // Hysteresis and seeding are firmware-page behaviour; the laptop dashboard is
 // served by a different tool and has its own polling loop.
 await suiteStatus('firmware dashboard (dashboard_html.h)', '../NexonOBD/dashboard_html.h');
+await suiteVisibility('firmware dashboard (dashboard_html.h)', '../NexonOBD/dashboard_html.h');
+await suiteScanBanner('firmware dashboard (dashboard_html.h)', '../NexonOBD/dashboard_html.h');
 await suiteSeed('firmware dashboard (dashboard_html.h)', '../NexonOBD/dashboard_html.h');
 
 console.log(`\n${ran} checks, ${failed} failed`);
