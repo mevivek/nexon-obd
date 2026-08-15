@@ -1,0 +1,664 @@
+// NexonOBD - XIAO ESP32S3 + SN65HVD230 CAN transceiver, plugged into the OBD-II port.
+//
+// Two modes, one binary:
+//   1. Live dashboard  - hosts a Wi-Fi AP and serves gauges at http://192.168.4.1/
+//   2. UDS DID scanner - brute-forces service 0x22 across the identifier space
+//
+// Talks raw ISO 15765-4 (CAN 11-bit / 500 kbit) with a real ISO-TP layer, so it
+// replaces the ELM327 rather than depending on it. Bluetooth is not used at all:
+// the XIAO ESP32S3 is BLE-only and cannot speak the Classic SPP an ELM327 needs.
+//
+// SAFETY: this firmware only ever transmits diagnostic requests (mode 01/03/09 and
+// UDS service 0x22 reads) plus ISO-TP flow-control frames. It never sends
+// arbitrary frames, never writes (0x2E), never runs routines (0x31), never resets
+// an ECU (0x11) and never changes diagnostic session (0x10).
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <vector>
+#include "driver/twai.h"
+#include "obd_types.h"
+#include "elm_ble.h"
+#include <Update.h>
+#include "dashboard_html.h"
+#include "scan_html.h"
+#include "ota_html.h"
+
+// Two ways to reach the car, picked at runtime:
+//   TR_CAN - SN65HVD230 transceiver on pins D1/D2, straight onto the bus. Fast.
+//   TR_BLE - BLE GATT to the dual-mode ELM327 already plugged into the OBD port.
+//            Slower, but needs no extra hardware at all.
+enum Transport { TR_NONE, TR_CAN, TR_BLE };
+static Transport activeTransport = TR_NONE;
+
+// ---------------------------------------------------------------- config
+
+static const gpio_num_t PIN_CAN_TX = GPIO_NUM_2;   // XIAO pad D1
+static const gpio_num_t PIN_CAN_RX = GPIO_NUM_3;   // XIAO pad D2
+
+static const char *AP_SSID = "NexonOBD";
+static const char *AP_PASS = "nexon1234";          // >= 8 chars, change if you like
+
+static const uint32_t ID_ECM_REQ = 0x7E0;          // engine ECU request
+static const uint32_t ID_ECM_RSP = 0x7E8;          // engine ECU response
+static const uint32_t ID_TCM_REQ = 0x7E1;          // transmission
+static const uint32_t ID_TCM_RSP = 0x7E9;
+
+// Deep-sleep after this long with no ECU response, so the car battery survives
+// the thing being left plugged in. OBD pin 16 is permanently live.
+static const uint32_t IDLE_SLEEP_MS = 10UL * 60UL * 1000UL;
+static const uint64_t SLEEP_WAKE_US = 30ULL * 1000000ULL;   // re-check every 30 s
+
+// The XIAO ESP32S3 has no power LED - the only visible indicator is the user LED
+// on GPIO21, and it is active LOW. Without this the board looks dead even when
+// it is working, which is no good when it is wedged under the dashboard.
+#ifndef LED_BUILTIN
+#define LED_BUILTIN 21
+#endif
+static const uint8_t LED_PIN = LED_BUILTIN;
+
+// Heartbeat encodes state at a glance:
+//   slow 1 Hz  - alive, Wi-Fi up, but no ECU response (ignition off / not wired)
+//   fast 5 Hz  - talking to the ECU
+//   double-blink - DID scan in progress
+static void heartbeat(bool ecuOk, bool scanning) {
+  static uint32_t last = 0;
+  static uint8_t phase = 0;
+  uint32_t period = scanning ? 120 : (ecuOk ? 100 : 500);
+  if (millis() - last < period) return;
+  last = millis();
+  phase++;
+  bool on;
+  if (scanning) on = (phase % 6) < 2;            // blip-blip-pause
+  else          on = (phase & 1);
+  digitalWrite(LED_PIN, on ? LOW : HIGH);        // active LOW
+}
+
+WebServer server(80);
+
+// ---------------------------------------------------------------- CAN / ISO-TP
+
+static bool canUp = false;
+
+static bool canBegin() {
+  twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(PIN_CAN_TX, PIN_CAN_RX, TWAI_MODE_NORMAL);
+  g.rx_queue_len = 48;
+  g.tx_queue_len = 16;
+  twai_timing_config_t t = TWAI_TIMING_CONFIG_500KBITS();
+  twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+
+  if (twai_driver_install(&g, &t, &f) != ESP_OK) return false;
+  if (twai_start() != ESP_OK) return false;
+  return true;
+}
+
+static void canFlush() {
+  twai_message_t m;
+  while (twai_receive(&m, 0) == ESP_OK) { /* drop stale frames */ }
+}
+
+static bool canSend(uint32_t id, const uint8_t *d, uint8_t len) {
+  twai_message_t m = {};
+  m.identifier = id;
+  m.data_length_code = 8;
+  for (int i = 0; i < 8; i++) m.data[i] = (i < len) ? d[i] : 0x55;   // 0x55 pad
+  return twai_transmit(&m, pdMS_TO_TICKS(30)) == ESP_OK;
+}
+
+// One request, one reassembled response. Handles single frame, first frame +
+// flow control + consecutive frames, and the 0x78 "responsePending" negative reply.
+// Returns payload length, or -1 on timeout, or -2 on a real negative response.
+static int canIsoTp(uint32_t reqId, uint32_t rspId,
+                    const uint8_t *payload, uint8_t plen,
+                    uint8_t *out, size_t outCap, uint32_t timeoutMs) {
+  uint8_t frame[8] = {0};
+  frame[0] = plen;                                  // single-frame PCI
+  memcpy(&frame[1], payload, plen);
+  canFlush();
+  if (!canSend(reqId, frame, plen + 1)) return -1;
+
+  size_t got = 0, total = 0;
+  bool multi = false;
+  uint8_t nextSeq = 1;
+  uint32_t deadline = millis() + timeoutMs;
+
+  while ((int32_t)(deadline - millis()) > 0) {
+    twai_message_t m;
+    if (twai_receive(&m, pdMS_TO_TICKS(5)) != ESP_OK) continue;
+    if (m.identifier != rspId) continue;
+
+    uint8_t pci = m.data[0] >> 4;
+
+    if (pci == 0x0) {                               // single frame
+      uint8_t len = m.data[0] & 0x0F;
+      if (len > 7) return -1;
+      // negative response?
+      if (len >= 3 && m.data[1] == 0x7F) {
+        if (m.data[3] == 0x78) { deadline = millis() + timeoutMs + 200; continue; }  // pending
+        return -2;
+      }
+      size_t n = min((size_t)len, outCap);
+      memcpy(out, &m.data[1], n);
+      return (int)n;
+    }
+    else if (pci == 0x1) {                          // first frame
+      total = (((size_t)(m.data[0] & 0x0F)) << 8) | m.data[1];
+      multi = true;
+      got = 0;
+      size_t n = min((size_t)6, outCap);
+      memcpy(out, &m.data[2], n);
+      got = n;
+      uint8_t fc[3] = {0x30, 0x00, 0x00};           // clear to send, no block, no delay
+      canSend(reqId, fc, 3);
+      nextSeq = 1;
+      deadline = millis() + timeoutMs + 300;
+    }
+    else if (pci == 0x2 && multi) {                 // consecutive frame
+      if ((m.data[0] & 0x0F) != nextSeq) return -1;
+      nextSeq = (nextSeq + 1) & 0x0F;
+      size_t n = min((size_t)7, (size_t)(total > got ? total - got : 0));
+      n = min(n, outCap - got);
+      memcpy(out + got, &m.data[1], n);
+      got += n;
+      if (got >= total) return (int)got;
+    }
+  }
+  return multi ? (int)got : -1;
+}
+
+// ---------------------------------------------------------------- BLE transport
+
+static uint32_t bleCurHeader = 0;
+
+static int hexNib(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  return -1;
+}
+
+// Same request/response contract as canIsoTp, but spoken as ELM327 text over BLE.
+// Headers are left ON and the reply lines are demultiplexed by responder ID here,
+// because this clone's ATCRA receive filter does not actually filter.
+static int bleIsoTp(uint32_t reqId, uint32_t rspId,
+                    const uint8_t *payload, uint8_t plen,
+                    uint8_t *out, size_t outCap, uint32_t timeoutMs) {
+  if (!elmConnected) return -1;
+
+  if (bleCurHeader != reqId) {
+    char h[16];
+    snprintf(h, sizeof(h), "ATSH %03X", (unsigned)reqId);
+    elmCommand(h, 800);
+    bleCurHeader = reqId;
+  }
+
+  char cmd[40];
+  int n = 0;
+  for (uint8_t i = 0; i < plen && n < (int)sizeof(cmd) - 3; i++)
+    n += snprintf(cmd + n, sizeof(cmd) - n, "%02X", payload[i]);
+
+  String resp = elmCommand(String(cmd), timeoutMs);
+  if (resp.length() == 0) return -1;
+  if (resp.indexOf("UNABLE") >= 0 || resp.indexOf("NO DATA") >= 0) return -1;
+
+  char want[4];
+  snprintf(want, sizeof(want), "%03X", (unsigned)rspId);
+
+  size_t got = 0, total = 0;
+  bool multi = false, negative = false;
+
+  int start = 0;
+  while (start < (int)resp.length()) {
+    int nl = resp.indexOf('\r', start);
+    int nl2 = resp.indexOf('\n', start);
+    if (nl < 0 || (nl2 >= 0 && nl2 < nl)) nl = nl2;
+    String line = (nl < 0) ? resp.substring(start) : resp.substring(start, nl);
+    start = (nl < 0) ? resp.length() : nl + 1;
+
+    line.replace(" ", "");
+    line.trim();
+    if (line.length() < 5) continue;
+    if (!line.startsWith(want)) continue;
+
+    String body = line.substring(3);
+    int hi = hexNib(body[0]), lo = hexNib(body[1]);
+    if (hi < 0 || lo < 0) continue;
+    uint8_t pci = (uint8_t)((hi << 4) | lo);
+
+    // decode the remaining hex characters of this line into bytes
+    uint8_t tmp[32];
+    size_t tn = 0;
+    for (size_t i = 2; i + 1 < body.length() && tn < sizeof(tmp); i += 2) {
+      int a = hexNib(body[i]), b = hexNib(body[i + 1]);
+      if (a < 0 || b < 0) break;
+      tmp[tn++] = (uint8_t)((a << 4) | b);
+    }
+
+    if ((pci & 0xF0) == 0x00) {                 // single frame
+      size_t len = pci & 0x0F;
+      if (len >= 3 && tn >= 3 && tmp[0] == 0x7F) { negative = true; continue; }
+      size_t cnt = min(min(len, tn), outCap);
+      memcpy(out, tmp, cnt);
+      return (int)cnt;
+    } else if ((pci & 0xF0) == 0x10) {          // first frame: 12-bit length
+      if (tn < 1) continue;
+      total = (((size_t)(pci & 0x0F)) << 8) | tmp[0];
+      multi = true;
+      size_t cnt = min(tn - 1, outCap);
+      memcpy(out, tmp + 1, cnt);
+      got = cnt;
+    } else if ((pci & 0xF0) == 0x20 && multi) { // consecutive frame
+      size_t room = (outCap > got) ? outCap - got : 0;
+      size_t cnt = min(tn, room);
+      if (total > got) cnt = min(cnt, total - got);
+      memcpy(out + got, tmp, cnt);
+      got += cnt;
+    }
+  }
+
+  if (multi && got) return (int)got;
+  return negative ? -2 : -1;
+}
+
+// Dispatcher - everything above the transport layer calls this.
+static int obdIsoTp(uint32_t reqId, uint32_t rspId,
+                    const uint8_t *payload, uint8_t plen,
+                    uint8_t *out, size_t outCap, uint32_t timeoutMs) {
+  if (activeTransport == TR_BLE) return bleIsoTp(reqId, rspId, payload, plen, out, outCap, timeoutMs);
+  return canIsoTp(reqId, rspId, payload, plen, out, outCap, timeoutMs);
+}
+
+// ---------------------------------------------------------------- mode 01
+
+// Data-field byte count per SAE J1979 PID.
+static uint8_t pidLen(uint8_t pid) {
+  switch (pid) {
+    case 0x0C: case 0x1F: case 0x3C: case 0x42: case 0x5E: return 2;
+    case 0x34: return 4;
+    default:   return 1;
+  }
+}
+
+static void applyPid(Live &L, uint8_t pid, const uint8_t *d) {
+  float A = d[0], B = d[1];
+  switch (pid) {
+    case 0x04: L.load     = A * 100.0f / 255.0f; break;
+    case 0x05: L.coolant  = A - 40;              break;
+    case 0x06: L.stft     = (A - 128) * 100.0f / 128.0f; break;
+    case 0x07: L.ltft     = (A - 128) * 100.0f / 128.0f; break;
+    case 0x0B: L.map_     = A;                   break;
+    case 0x0C: L.rpm      = (256 * A + B) / 4.0f; break;
+    case 0x0D: L.speed    = A;                   break;
+    case 0x0E: L.timing   = A / 2.0f - 64.0f;    break;
+    case 0x0F: L.iat      = A - 40;              break;
+    case 0x11: L.throttle = A * 100.0f / 255.0f; break;
+    case 0x1F: L.runtime  = 256 * A + B;         break;
+    case 0x2F: L.fuel     = A * 100.0f / 255.0f; break;
+    case 0x33: L.baro     = A;                   break;
+    case 0x34: L.lambda   = (256 * A + B) / 32768.0f; break;
+    case 0x3C: L.cat      = (256 * A + B) / 10.0f - 40.0f; break;
+    case 0x42: L.volt     = (256 * A + B) / 1000.0f; break;
+    case 0x46: L.ambient  = A - 40;              break;
+    case 0x5C: L.oil      = A - 40;              break;
+    case 0x5E: L.fuelRate = (256 * A + B) / 20.0f; break;
+  }
+}
+
+// One batched mode-01 request carrying up to 6 PIDs.
+static bool pollBatch(Live &L, const uint8_t *pids, uint8_t n) {
+  uint8_t req[7];
+  req[0] = 0x01;
+  memcpy(&req[1], pids, n);
+
+  uint8_t buf[64];
+  int len = obdIsoTp(ID_ECM_REQ, ID_ECM_RSP, req, n + 1, buf, sizeof(buf),
+                     activeTransport == TR_BLE ? 900 : 200);
+  if (len < 2 || buf[0] != 0x41) return false;
+
+  int i = 1;
+  while (i < len) {
+    uint8_t pid = buf[i++];
+    uint8_t w = pidLen(pid);
+    if (i + w > len) break;
+    uint8_t d[4] = {0, 0, 0, 0};
+    memcpy(d, &buf[i], w);
+    applyPid(L, pid, d);
+    i += w;
+  }
+  return true;
+}
+
+static float g_baro = NAN;
+
+static Live pollAll() {
+  Live L;
+  static const uint8_t b1[] = {0x0C, 0x0D, 0x0B, 0x11, 0x04, 0x05};
+  static const uint8_t b2[] = {0x5C, 0x0F, 0x42, 0x06, 0x07, 0x5E};
+  static const uint8_t b3[] = {0x34, 0x3C, 0x0E, 0x1F, 0x46, 0x2F};
+
+  bool any = false;
+  any |= pollBatch(L, b1, 6);
+  any |= pollBatch(L, b2, 6);
+  any |= pollBatch(L, b3, 6);
+
+  if (any && isnan(g_baro)) {
+    Live tmp;
+    static const uint8_t b0[] = {0x33};
+    if (pollBatch(tmp, b0, 1)) g_baro = tmp.baro;
+  }
+  L.baro = g_baro;
+  L.ok = any;
+  return L;
+}
+
+// ---------------------------------------------------------------- DID scanner
+
+struct ScanState {
+  bool     running = false;
+  uint8_t  ecu = 0;
+  uint32_t cur = 0, from = 0, to = 0xFFFF;
+  uint32_t tried = 0, negatives = 0;
+  uint32_t startedMs = 0;
+  std::vector<Hit> hits;
+} scan;
+
+static void scanStep(uint16_t budget) {
+  uint32_t reqId = scan.ecu ? ID_TCM_REQ : ID_ECM_REQ;
+  uint32_t rspId = scan.ecu ? ID_TCM_RSP : ID_ECM_RSP;
+
+  for (uint16_t k = 0; k < budget && scan.running; k++) {
+    if (scan.cur > scan.to) { scan.running = false; break; }
+
+    uint16_t did = (uint16_t)scan.cur++;
+    scan.tried++;
+
+    uint8_t req[3] = {0x22, (uint8_t)(did >> 8), (uint8_t)(did & 0xFF)};
+    uint8_t buf[64];
+    int len = obdIsoTp(reqId, rspId, req, 3, buf, sizeof(buf),
+                       activeTransport == TR_BLE ? 130 : 25);
+
+    if (len == -2) { scan.negatives++; continue; }
+    if (len < 3) continue;
+    if (buf[0] != 0x62) continue;
+    if (((buf[1] << 8) | buf[2]) != did) continue;
+
+    Hit h;
+    h.did = did;
+    h.ecu = scan.ecu;
+    h.len = (uint8_t)min((size_t)(len - 3), sizeof(h.data));
+    memcpy(h.data, &buf[3], h.len);
+    if (scan.hits.size() < 3000) scan.hits.push_back(h);
+  }
+}
+
+// ---------------------------------------------------------------- HTTP
+
+static void jsonNum(String &s, const char *k, float v, int dp) {
+  s += "\"";
+  s += k;
+  s += "\":";
+  if (isnan(v)) s += "null"; else s += String(v, dp);
+  s += ",";
+}
+
+static uint32_t lastEcuOkMs;
+static bool     everSawEcu = false;
+
+static void handleData() {
+  Live L = pollAll();
+  if (L.ok) { lastEcuOkMs = millis(); everSawEcu = true; }   // real reply resets the sleep timer
+  String s = "{";
+  if (!L.ok) {
+    s += "\"ok\":false,\"error\":\"no response from ECU (ignition off?)\"}";
+    server.send(200, "application/json", s);
+    return;
+  }
+  s += "\"ok\":true,\"v\":{";
+  jsonNum(s, "rpm", L.rpm, 0);        jsonNum(s, "speed", L.speed, 0);
+  jsonNum(s, "map", L.map_, 0);       jsonNum(s, "baro", L.baro, 0);
+  jsonNum(s, "throttle", L.throttle, 1); jsonNum(s, "load", L.load, 1);
+  jsonNum(s, "coolant", L.coolant, 0);jsonNum(s, "oil", L.oil, 0);
+  jsonNum(s, "iat", L.iat, 0);        jsonNum(s, "ambient", L.ambient, 0);
+  jsonNum(s, "volt", L.volt, 2);      jsonNum(s, "stft", L.stft, 1);
+  jsonNum(s, "ltft", L.ltft, 1);      jsonNum(s, "lambda", L.lambda, 3);
+  jsonNum(s, "cat", L.cat, 1);        jsonNum(s, "timing", L.timing, 1);
+  jsonNum(s, "fuelRate", L.fuelRate, 2); jsonNum(s, "fuel", L.fuel, 1);
+  jsonNum(s, "runtime", L.runtime, 0);
+  s.remove(s.length() - 1);           // trailing comma
+  s += "}}";
+  server.send(200, "application/json", s);
+}
+
+static void handleScanStart() {
+  scan.running   = true;
+  scan.ecu       = server.hasArg("ecu") ? (uint8_t)server.arg("ecu").toInt() : 0;
+  scan.from      = server.hasArg("from") ? strtoul(server.arg("from").c_str(), nullptr, 16) : 0x0000;
+  scan.to        = server.hasArg("to")   ? strtoul(server.arg("to").c_str(),   nullptr, 16) : 0xFFFF;
+  scan.cur       = scan.from;
+  scan.tried     = 0;
+  scan.negatives = 0;
+  scan.startedMs = millis();
+  scan.hits.clear();
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+static void handleScanStop() {
+  scan.running = false;
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+static void handleScanStatus() {
+  String s = "{\"running\":";
+  s += scan.running ? "true" : "false";
+  s += ",\"ecu\":\"";
+  s += scan.ecu ? "TCM" : "ECM";
+  s += "\",\"cur\":\"";
+  char hex[8];
+  snprintf(hex, sizeof(hex), "%04X", (unsigned)(scan.cur > 0xFFFF ? 0xFFFF : scan.cur));
+  s += hex;
+  s += "\",\"tried\":";  s += scan.tried;
+  s += ",\"total\":";    s += (scan.to - scan.from + 1);
+  s += ",\"negatives\":";s += scan.negatives;
+  s += ",\"elapsed\":";  s += (millis() - scan.startedMs) / 1000;
+  s += ",\"hits\":[";
+  for (size_t i = 0; i < scan.hits.size(); i++) {
+    const Hit &h = scan.hits[i];
+    if (i) s += ",";
+    snprintf(hex, sizeof(hex), "%04X", h.did);
+    s += "{\"did\":\"";  s += hex;
+    s += "\",\"ecu\":\""; s += (h.ecu ? "TCM" : "ECM");
+    s += "\",\"len\":";   s += h.len;
+    s += ",\"hex\":\"";
+    for (uint8_t k = 0; k < h.len; k++) { char b[4]; snprintf(b, sizeof(b), "%02X", h.data[k]); s += b; }
+    s += "\",\"ascii\":\"";
+    for (uint8_t k = 0; k < h.len; k++) {
+      char c = (char)h.data[k];
+      if (c == '"' || c == '\\') s += '.';
+      else s += (c >= 32 && c < 127) ? c : '.';
+    }
+    s += "\"}";
+  }
+  s += "]}";
+  server.send(200, "application/json", s);
+}
+
+// Stored + pending DTCs, both ECUs.
+static void handleDtc() {
+  String s = "{\"ecus\":[";
+  const uint32_t req[2] = {ID_ECM_REQ, ID_TCM_REQ};
+  const uint32_t rsp[2] = {ID_ECM_RSP, ID_TCM_RSP};
+  for (int e = 0; e < 2; e++) {
+    if (e) s += ",";
+    s += "{\"name\":\"";
+    s += (e ? "TCM" : "ECM");
+    s += "\",\"codes\":[";
+    uint8_t req03[1] = {0x03};
+    uint8_t buf[64];
+    int len = obdIsoTp(req[e], rsp[e], req03, 1, buf, sizeof(buf),
+                       activeTransport == TR_BLE ? 1500 : 300);
+    bool first = true;
+    if (len >= 2 && buf[0] == 0x43) {
+      uint8_t count = buf[1];
+      for (uint8_t i = 0; i < count && (size_t)(2 + i * 2 + 1) < (size_t)len; i++) {
+        uint16_t raw = (buf[2 + i * 2] << 8) | buf[3 + i * 2];
+        if (!raw) continue;
+        const char sys[] = {'P', 'C', 'B', 'U'};
+        char code[8];
+        snprintf(code, sizeof(code), "%c%01X%03X", sys[(raw >> 14) & 3], (raw >> 12) & 3, raw & 0x0FFF);
+        if (!first) s += ",";
+        s += "\"";
+        s += code;
+        s += "\"";
+        first = false;
+      }
+    }
+    s += "]}";
+  }
+  s += "]}";
+  server.send(200, "application/json", s);
+}
+
+// ---------------------------------------------------------------- OTA
+
+// Browser-driven OTA. The ESP32 writes into the inactive OTA partition and only
+// switches over once Update.end() verifies the image, so a failed or interrupted
+// upload leaves the running firmware untouched.
+static void handleOtaUpload() {
+  HTTPUpload &up = server.upload();
+  if (up.status == UPLOAD_FILE_START) {
+    scan.running = false;                       // never flash mid-scan
+    Serial.printf("[ota] start: %s\n", up.filename.c_str());
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (Update.write(up.buf, up.currentSize) != up.currentSize) Update.printError(Serial);
+  } else if (up.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) Serial.printf("[ota] wrote %u bytes, rebooting\n", up.totalSize);
+    else                  Update.printError(Serial);
+  } else if (up.status == UPLOAD_FILE_ABORTED) {
+    Update.abort();
+    Serial.println("[ota] aborted");
+  }
+}
+
+static void handleOtaDone() {
+  bool bad = Update.hasError();
+  server.sendHeader("Connection", "close");
+  server.send(200, "application/json", bad ? "{\"ok\":false}" : "{\"ok\":true}");
+  if (!bad) { delay(600); ESP.restart(); }
+}
+
+// ---------------------------------------------------------------- transport pick
+
+static const char *transportName() {
+  switch (activeTransport) {
+    case TR_CAN: return "can";
+    case TR_BLE: return "ble";
+    default:     return "none";
+  }
+}
+
+// Cheap liveness probe: mode 01 PID 00 is mandatory on every OBD-II ECU.
+static bool ecuProbe() {
+  uint8_t req[2] = {0x01, 0x00};
+  uint8_t buf[16];
+  return obdIsoTp(ID_ECM_REQ, ID_ECM_RSP, req, 2, buf, sizeof(buf),
+                  activeTransport == TR_BLE ? 1200 : 400) > 0;
+}
+
+// Prefer the wired CAN transceiver when it is present and the bus answers;
+// otherwise fall back to the BLE ELM327 already sitting in the OBD port.
+static void chooseTransport() {
+  if (canUp) {
+    activeTransport = TR_CAN;
+    if (ecuProbe()) { Serial.println("[obd] transport = CAN (transceiver)"); return; }
+  }
+  activeTransport = TR_BLE;
+  bleCurHeader = 0;
+  if (elmConnect()) {
+    if (ecuProbe()) { Serial.println("[obd] transport = BLE ELM327"); return; }
+    Serial.println("[obd] BLE ELM327 connected but ECU silent (ignition off?)");
+    return;
+  }
+  Serial.println("[obd] no transport available");
+  activeTransport = canUp ? TR_CAN : TR_NONE;
+}
+
+// ---------------------------------------------------------------- setup / loop
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);        // solid on through boot, so power is visible
+  delay(300);
+
+  canUp = canBegin();
+  Serial.println(canUp ? "[can] TWAI up @500k" : "[can] TWAI init FAILED");
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID, AP_PASS);
+  Serial.print("[ap] ");
+  Serial.print(AP_SSID);
+  Serial.print(" -> http://");
+  Serial.println(WiFi.softAPIP());
+
+  server.on("/",            []() { server.send_P(200, "text/html", DASHBOARD_HTML); });
+  server.on("/scan",        []() { server.send_P(200, "text/html", SCAN_HTML); });
+  server.on("/update", HTTP_GET, []() { server.send_P(200, "text/html", OTA_HTML); });
+  server.on("/update", HTTP_POST, handleOtaDone, handleOtaUpload);
+  server.on("/data",        handleData);
+  server.on("/dtc",         handleDtc);
+  server.on("/scan/start",  handleScanStart);
+  server.on("/scan/stop",   handleScanStop);
+  server.on("/scan/status", handleScanStatus);
+  server.begin();
+
+  lastEcuOkMs = millis();
+  chooseTransport();
+}
+
+void loop() {
+  server.handleClient();
+  heartbeat(millis() - lastEcuOkMs < 3000, scan.running);
+
+  if (scan.running) {
+    scanStep(40);                 // ~1 s of scanning, then service HTTP again
+    lastEcuOkMs = millis();       // scanning counts as activity
+  }
+
+  // Periodic status line. setup() output is lost because the USB CDC
+  // re-enumerates at boot, so a running board must announce itself repeatedly
+  // or there is no way to tell it apart from one stuck in the ROM loader.
+  static uint32_t lastLog = 0;
+  if (millis() - lastLog > 3000) {
+    lastLog = millis();
+    Serial.printf("[alive] up=%lus tr=%s can=%s ble=%s ap=%s clients=%u ecu=%s scan=%s\n",
+                  millis() / 1000UL,
+                  transportName(),
+                  canUp ? "ok" : "FAIL",
+                  elmConnected ? "up" : "down",
+                  WiFi.softAPIP().toString().c_str(),
+                  WiFi.softAPgetStationNum(),
+                  (millis() - lastEcuOkMs < 3000) ? "ok" : "silent",
+                  scan.running ? "running" : "idle");
+  }
+
+  // Re-pick the transport periodically while nothing is answering: covers the
+  // ELM327 dropping its BLE link, or a transceiver being wired in later.
+  static uint32_t lastPick = 0;
+  if (!scan.running && millis() - lastEcuOkMs > 15000 && millis() - lastPick > 20000) {
+    lastPick = millis();
+    chooseTransport();
+  }
+
+  // Battery guard: nothing from the car for a while means the ignition is off.
+  // Only arms once the ECU has actually answered at least once, otherwise a
+  // bench board with no transceiver wired would sleep mid-test and look dead.
+  if (everSawEcu && millis() - lastEcuOkMs > IDLE_SLEEP_MS) {
+    Serial.println("[pwr] idle - deep sleep");
+    twai_stop();
+    twai_driver_uninstall();
+    esp_sleep_enable_timer_wakeup(SLEEP_WAKE_US);
+    esp_deep_sleep_start();
+  }
+}

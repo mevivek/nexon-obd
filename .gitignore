@@ -1,0 +1,19 @@
+# Vehicle data — these contain the VIN (mode 09 0902, UDS 22 F190 / 22 F1A0).
+# Keep them off GitHub.
+*.csv
+obd_log.csv
+did_hits.csv
+ecm_did_hits.csv
+
+# Build output
+build/
+*.bin
+*.elf
+*.map
+
+# Toolchain / editor
+tools/arduino-cli.exe
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

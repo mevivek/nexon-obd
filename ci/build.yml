@@ -1,0 +1,56 @@
+name: Build firmware
+
+# Builds NexonOBD on every push and publishes the .bin as an artifact, so a new
+# image can be downloaded on a phone and pushed to the board at /update without
+# needing a development machine.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+    paths:
+      - 'firmware/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 core
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls \
+            https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+
+      - name: Compile
+        run: |
+          arduino-cli compile \
+            --fqbn esp32:esp32:XIAO_ESP32S3 \
+            --output-dir build \
+            --warnings default \
+            firmware/NexonOBD
+
+      - name: Report size
+        run: |
+          echo "### Firmware build" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          ls -lh build/*.bin >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NexonOBD-firmware
+          path: build/NexonOBD.ino.bin
+          if-no-files-found: error
+          retention-days: 90
