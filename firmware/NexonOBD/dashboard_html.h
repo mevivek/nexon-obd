@@ -31,6 +31,7 @@ nav a{color:var(--ink2);font-size:13px;text-decoration:none;border-bottom:1px so
 .value{font-size:29px;font-weight:600;line-height:1.1}
 .value .unit{font-size:14px;font-weight:400;color:var(--ink2);margin-left:4px}
 .value.warn{color:var(--warning)}.value.crit{color:var(--critical)}
+.stale{opacity:.45}
 .flag{font-size:12px;margin-top:4px;display:none}
 .flag.on{display:block}.flag.warn{color:var(--warning)}.flag.crit{color:var(--critical)}
 .gw{display:flex;align-items:center;gap:13px}.gw svg{flex:none}
@@ -123,7 +124,23 @@ td.num{font-variant-numeric:tabular-nums;text-align:right}
 <tbody id="tb"></tbody></table></details></div>
 
 <script>
-const H=120,hist={rpm:[],boost:[],speed:[],coolant:[]};let samples=0,t0=Date.now();
+const H=120,HOLD=2500,hist={rpm:[],boost:[],speed:[],coolant:[]},keep={};let rate=[];
+// A sample can arrive with only some fields filled in: /data reports ok as soon as
+// any one of the three batched mode-01 requests answers, so a single batch timing
+// out sends six nulls and used to blank six gauges at once. Re-show the last known
+// value for HOLD ms instead, dimmed. After that it reverts to '—' rather than
+// showing something indefinitely stale as though it were live.
+function merge(j){const now=Date.now(),v={},q={};let held=0;
+for(const k in j){const x=j[k];
+if(x!=null&&!isNaN(x)){keep[k]={v:x,t:now};v[k]=x;q[k]=0}
+else if(keep[k]&&now-keep[k].t<=HOLD){v[k]=keep[k].v;q[k]=1;held++}
+else{v[k]=null;q[k]=1}}
+return[v,q,held]}
+// Rate over a trailing window. The old reading averaged over the whole page
+// lifetime, so it sagged after any rough patch and never recovered - it looked
+// like the refresh was degrading long after it had recovered.
+function hz(){if(rate.length<2)return'';const d=(rate[rate.length-1]-rate[0])/1000;
+return d>0?'· '+((rate.length-1)/d).toFixed(1)+' Hz':''}
 function arc(cx,cy,r,a0,a1){const p=a=>[cx+r*Math.cos(a*Math.PI/180),cy+r*Math.sin(a*Math.PI/180)];
 const[x0,y0]=p(a0),[x1,y1]=p(a1);return`M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${Math.abs(a1-a0)>180?1:0} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}`}
 function gauge(t,a,f){f=Math.max(0,Math.min(1,f||0));document.getElementById(t).setAttribute('d',arc(64,64,52,135,405));
@@ -136,7 +153,7 @@ e.setAttribute('viewBox',`0 0 ${w} ${h}`);
 e.innerHTML=`<polyline points="${pts}" fill="none" stroke="${c}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`}
 function push(k,v){if(v==null||isNaN(v))return;const a=hist[k];a.push(v);if(a.length>H)a.shift()}
 const n=(v,d=1)=>(v==null||isNaN(v))?'—':Number(v).toFixed(d);
-const T=(i,s)=>{const e=document.getElementById(i);if(e)e.textContent=s};
+const T=(i,s,q)=>{const e=document.getElementById(i);if(!e)return;e.textContent=s;e.classList.toggle('stale',!!q)};
 function F(i,on,c,m){const e=document.getElementById(i);if(!e)return;e.className='flag'+(on?' on '+c:'');if(on&&m)e.textContent=m}
 function V(i,l){const e=document.getElementById(i);if(e)e.className='value'+(l?' '+l:'')}
 const ROWS=[['0C','Engine RPM','rpm','rpm',0],['0D','Vehicle speed','speed','km/h',0],
@@ -152,39 +169,48 @@ const ROWS=[['0C','Engine RPM','rpm','rpm',0],['0D','Vehicle speed','speed','km/
 function hhmmss(s){if(s==null||isNaN(s))return'—';const h=Math.floor(s/3600),m=Math.floor(s%3600/60),q=Math.floor(s%60);
 return(h?h+'h ':'')+m+'m '+String(q).padStart(2,'0')+'s'}
 function css(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim()}
-function render(v){
-T('rpm',v.rpm==null?'—':Math.round(v.rpm));gauge('rt','ra',v.rpm/6500);
-F('rpmF',v.rpm>=5500,'warn','▲ approaching redline');
-const b=(v.map!=null&&v.baro!=null)?(v.map-v.baro)/100:null;v.boost=b;
-T('boost',b==null?'—':(b>=0?'+':'')+b.toFixed(2));gauge('bt','ba',b/1.2);
-T('map',v.map==null?'—':Math.round(v.map));
-T('speed',v.speed==null?'—':Math.round(v.speed));
-T('coolant',v.coolant==null?'—':Math.round(v.coolant));
-const cc=v.coolant>=110,cw=v.coolant>=103;V('coolantV',cc?'crit':cw?'warn':'');
+// q[k] marks a field as held rather than freshly read. Every threshold below is
+// gated on it: a held reading must never raise a warning, and must never keep one
+// lit either, because a stale number cannot tell you whether the engine is still
+// overheating. Held values are dimmed and the header says how many are being held.
+function render(v,q){
+T('rpm',v.rpm==null?'—':Math.round(v.rpm),q.rpm);gauge('rt','ra',v.rpm/6500);
+F('rpmF',!q.rpm&&v.rpm>=5500,'warn','▲ approaching redline');
+const b=(v.map!=null&&v.baro!=null)?(v.map-v.baro)/100:null,qb=q.map||q.baro;v.boost=b;q.boost=qb;
+T('boost',b==null?'—':(b>=0?'+':'')+b.toFixed(2),qb);gauge('bt','ba',b/1.2);
+T('map',v.map==null?'—':Math.round(v.map),q.map);
+T('speed',v.speed==null?'—':Math.round(v.speed),q.speed);
+T('coolant',v.coolant==null?'—':Math.round(v.coolant),q.coolant);
+const cc=!q.coolant&&v.coolant>=110,cw=!q.coolant&&v.coolant>=103;V('coolantV',cc?'crit':cw?'warn':'');
 F('coolantF',cw,cc?'crit':'warn',cc?'⚠ overheating — stop safely':'⚠ running hot');
-T('oil',v.oil==null?'—':Math.round(v.oil));V('oilV',v.oil>=125?'crit':v.oil>=115?'warn':'');
-F('oilF',v.oil>=115,v.oil>=125?'crit':'warn','⚠ oil temperature high');
-T('iat',v.iat==null?'—':Math.round(v.iat));T('load',n(v.load));T('throttle',n(v.throttle));
-T('lambda',n(v.lambda,3));const ln=v.lambda>=1.10,ri=v.lambda<=0.85;V('lambdaV',ln?'warn':'');
+T('oil',v.oil==null?'—':Math.round(v.oil),q.oil);
+V('oilV',q.oil?'':v.oil>=125?'crit':v.oil>=115?'warn':'');
+F('oilF',!q.oil&&v.oil>=115,v.oil>=125?'crit':'warn','⚠ oil temperature high');
+T('iat',v.iat==null?'—':Math.round(v.iat),q.iat);T('load',n(v.load),q.load);T('throttle',n(v.throttle),q.throttle);
+T('lambda',n(v.lambda,3),q.lambda);const ln=!q.lambda&&v.lambda>=1.10,ri=!q.lambda&&v.lambda<=0.85;V('lambdaV',ln?'warn':'');
 F('lambdaF',ln||ri,'warn',ln?'⚠ running lean':'● running rich');
-T('stft',v.stft==null?'—':(v.stft>0?'+':'')+n(v.stft));
-T('ltft',v.ltft==null?'—':(v.ltft>0?'+':'')+n(v.ltft));
-F('trimF',Math.abs(v.stft+v.ltft)>20,'warn','⚠ total trim beyond ±20% — check for a leak');
-T('cat',n(v.cat));V('catV',v.cat>=900?'crit':v.cat>=800?'warn':'');
-F('catF',v.cat>=800,v.cat>=900?'crit':'warn','⚠ catalyst very hot');
-T('timing',n(v.timing));T('fuelRate',n(v.fuelRate,2));
-document.getElementById('econ').textContent=(v.speed>0&&v.fuelRate>0)?(v.speed/v.fuelRate).toFixed(1)+' km/L instantaneous':(v.fuelRate>0?'idling':'');
-T('volt',n(v.volt,2));const vl=v.volt<12.2,vh=v.volt>15.2;V('voltV',(vl||vh)?'warn':'');
+T('stft',v.stft==null?'—':(v.stft>0?'+':'')+n(v.stft),q.stft);
+T('ltft',v.ltft==null?'—':(v.ltft>0?'+':'')+n(v.ltft),q.ltft);
+F('trimF',!q.stft&&!q.ltft&&Math.abs(v.stft+v.ltft)>20,'warn','⚠ total trim beyond ±20% — check for a leak');
+T('cat',n(v.cat),q.cat);V('catV',q.cat?'':v.cat>=900?'crit':v.cat>=800?'warn':'');
+F('catF',!q.cat&&v.cat>=800,v.cat>=900?'crit':'warn','⚠ catalyst very hot');
+T('timing',n(v.timing),q.timing);T('fuelRate',n(v.fuelRate,2),q.fuelRate);
+document.getElementById('econ').textContent=(!q.speed&&!q.fuelRate&&v.speed>0&&v.fuelRate>0)?(v.speed/v.fuelRate).toFixed(1)+' km/L instantaneous':(!q.fuelRate&&v.fuelRate>0?'idling':'');
+T('volt',n(v.volt,2),q.volt);const vl=!q.volt&&v.volt<12.2,vh=!q.volt&&v.volt>15.2;V('voltV',(vl||vh)?'warn':'');
 F('voltF',vl||vh,'warn',vl?'⚠ not charging':'⚠ overcharging');
-T('runtime',hhmmss(v.runtime));
-push('rpm',v.rpm);push('boost',b);push('speed',v.speed);push('coolant',v.coolant);
+T('runtime',hhmmss(v.runtime),q.runtime);
+// Only fresh readings enter the history - replaying a held value would draw a flat
+// run in the sparkline that the car never actually did.
+push('rpm',q.rpm?null:v.rpm);push('boost',qb?null:b);push('speed',q.speed?null:v.speed);push('coolant',q.coolant?null:v.coolant);
 spark('spRpm',hist.rpm,css('--blue'),1);spark('spBoost',hist.boost,css('--orange'),0);
 spark('spSpeed',hist.speed,css('--aqua'),1);spark('spCool',hist.coolant,css('--yellow'),0);
-document.getElementById('tb').innerHTML=ROWS.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td class="num">${n(v[r[2]],r[4])}</td><td>${r[3]}</td></tr>`).join('')}
+document.getElementById('tb').innerHTML=ROWS.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td class="num${q[r[2]]?' stale':''}">${n(v[r[2]],r[4])}</td><td>${r[3]}</td></tr>`).join('')}
 function st(c,t){document.getElementById('dot').className='dot '+c;document.getElementById('st').textContent=t}
 async function tick(){try{const r=await fetch('/data',{cache:'no-store'});const j=await r.json();
-if(j.ok){samples++;render(j.v);st('live','live');
-document.getElementById('hz').textContent='· '+(samples/((Date.now()-t0)/1000)).toFixed(1)+' Hz'}
+if(j.ok){const[v,q,held]=merge(j.v);render(v,q);
+rate.push(Date.now());if(rate.length>20)rate.shift();
+st('live',held?'live · holding '+held:'live');
+document.getElementById('hz').textContent=hz()}
 else st('stale',j.error||'no data')}catch(e){st('dead','ESP32 unreachable')}
 finally{setTimeout(tick,120)}}
 tick();

@@ -108,7 +108,13 @@ static bool canSend(uint32_t id, const uint8_t *d, uint8_t len) {
 
 // One request, one reassembled response. Handles single frame, first frame +
 // flow control + consecutive frames, and the 0x78 "responsePending" negative reply.
-// Returns payload length, or -1 on timeout, or -2 on a real negative response.
+// Returns payload length, or -1 on timeout, -2 on a real negative response, or
+// -3 when reassembly started but never completed.
+//
+// -3 has to be distinct from a short payload. Returning however many bytes did
+// arrive makes a truncated reply indistinguishable from a complete one, so the
+// caller parses half a batch and treats the PIDs that never arrived as absent -
+// which is what blanks the dashboard mid-drive.
 static int canIsoTp(uint32_t reqId, uint32_t rspId,
                     const uint8_t *payload, uint8_t plen,
                     uint8_t *out, size_t outCap, uint32_t timeoutMs) {
@@ -138,33 +144,31 @@ static int canIsoTp(uint32_t reqId, uint32_t rspId,
         if (m.data[3] == 0x78) { deadline = millis() + timeoutMs + 200; continue; }  // pending
         return -2;
       }
-      size_t n = min((size_t)len, outCap);
-      memcpy(out, &m.data[1], n);
-      return (int)n;
+      if (len > outCap) return -3;                  // will not fit - do not half-copy it
+      memcpy(out, &m.data[1], len);
+      return (int)len;
     }
     else if (pci == 0x1) {                          // first frame
       total = (((size_t)(m.data[0] & 0x0F)) << 8) | m.data[1];
+      if (total > outCap) return -3;                // would truncate during reassembly
       multi = true;
-      got = 0;
-      size_t n = min((size_t)6, outCap);
-      memcpy(out, &m.data[2], n);
-      got = n;
+      got = min((size_t)6, total);
+      memcpy(out, &m.data[2], got);
       uint8_t fc[3] = {0x30, 0x00, 0x00};           // clear to send, no block, no delay
       canSend(reqId, fc, 3);
       nextSeq = 1;
       deadline = millis() + timeoutMs + 300;
     }
     else if (pci == 0x2 && multi) {                 // consecutive frame
-      if ((m.data[0] & 0x0F) != nextSeq) return -1;
+      if ((m.data[0] & 0x0F) != nextSeq) return -3; // dropped or reordered frame
       nextSeq = (nextSeq + 1) & 0x0F;
-      size_t n = min((size_t)7, (size_t)(total > got ? total - got : 0));
-      n = min(n, outCap - got);
+      size_t n = min((size_t)7, total - got);
       memcpy(out + got, &m.data[1], n);
       got += n;
       if (got >= total) return (int)got;
     }
   }
-  return multi ? (int)got : -1;
+  return multi ? -3 : -1;                           // a partial reassembly is not a result
 }
 
 // ---------------------------------------------------------------- BLE transport
@@ -206,7 +210,8 @@ static int bleIsoTp(uint32_t reqId, uint32_t rspId,
   snprintf(want, sizeof(want), "%03X", (unsigned)rspId);
 
   size_t got = 0, total = 0;
-  bool multi = false, negative = false;
+  bool multi = false, negative = false, broken = false;
+  uint8_t nextSeq = 1;
 
   int start = 0;
   while (start < (int)resp.length()) {
@@ -238,27 +243,32 @@ static int bleIsoTp(uint32_t reqId, uint32_t rspId,
     if ((pci & 0xF0) == 0x00) {                 // single frame
       size_t len = pci & 0x0F;
       if (len >= 3 && tn >= 3 && tmp[0] == 0x7F) { negative = true; continue; }
-      size_t cnt = min(min(len, tn), outCap);
-      memcpy(out, tmp, cnt);
-      return (int)cnt;
+      if (len > tn || len > outCap) { broken = true; continue; }   // line cut short
+      memcpy(out, tmp, len);
+      return (int)len;
     } else if ((pci & 0xF0) == 0x10) {          // first frame: 12-bit length
       if (tn < 1) continue;
       total = (((size_t)(pci & 0x0F)) << 8) | tmp[0];
+      if (total > outCap) { broken = true; continue; }
       multi = true;
-      size_t cnt = min(tn - 1, outCap);
-      memcpy(out, tmp + 1, cnt);
-      got = cnt;
+      got = min(tn - 1, total);
+      memcpy(out, tmp + 1, got);
+      nextSeq = 1;
     } else if ((pci & 0xF0) == 0x20 && multi) { // consecutive frame
-      size_t room = (outCap > got) ? outCap - got : 0;
-      size_t cnt = min(tn, room);
-      if (total > got) cnt = min(cnt, total - got);
+      // Sequence has to be checked here, not just the byte count: this clone drops
+      // whole responses (see FINDINGS), and a missing middle frame otherwise slots
+      // the following frame's bytes into the gap and corrupts everything after it.
+      if ((pci & 0x0F) != nextSeq) { broken = true; continue; }
+      nextSeq = (nextSeq + 1) & 0x0F;
+      size_t cnt = min(tn, total - got);
       memcpy(out + got, tmp, cnt);
       got += cnt;
+      if (got >= total) return (int)got;
     }
   }
 
-  if (multi && got) return (int)got;
-  return negative ? -2 : -1;
+  if (negative) return -2;
+  return (multi || broken) ? -3 : -1;           // started but never completed
 }
 
 // Dispatcher - everything above the transport layer calls this.
@@ -306,15 +316,32 @@ static void applyPid(Live &L, uint8_t pid, const uint8_t *d) {
 }
 
 // One batched mode-01 request carrying up to 6 PIDs.
+//
+// A truncated reply is retried once rather than parsed. Six PIDs is 14-ish payload
+// bytes, so every batch is a multi-frame exchange, and applying the half that
+// arrived leaves the rest of Live at NAN - which the dashboard renders as blanks
+// on top of readings that were good a moment earlier.
+//
+// A silent ECU (-1) or a refusal (-2) is not retried: there is nothing to wait for,
+// and a second full timeout on all three batches makes /data crawl with the
+// ignition off. 400 ms on CAN rather than 200 covers first frame + flow control +
+// two consecutive frames with margin for ECU turnaround.
 static bool pollBatch(Live &L, const uint8_t *pids, uint8_t n) {
   uint8_t req[7];
   req[0] = 0x01;
   memcpy(&req[1], pids, n);
 
+  const uint32_t tmo = (activeTransport == TR_BLE) ? 900 : 400;
   uint8_t buf[64];
-  int len = obdIsoTp(ID_ECM_REQ, ID_ECM_RSP, req, n + 1, buf, sizeof(buf),
-                     activeTransport == TR_BLE ? 900 : 200);
-  if (len < 2 || buf[0] != 0x41) return false;
+  int len = -1;
+
+  for (int attempt = 0; attempt < 2; attempt++) {
+    len = obdIsoTp(ID_ECM_REQ, ID_ECM_RSP, req, n + 1, buf, sizeof(buf), tmo);
+    if (len >= 2 && buf[0] == 0x41) break;
+    if (len == -1 || len == -2) return false;
+    len = -1;
+  }
+  if (len < 2) return false;
 
   int i = 1;
   while (i < len) {
@@ -377,6 +404,12 @@ static void scanStep(uint16_t budget) {
     uint8_t buf[64];
     int len = obdIsoTp(reqId, rspId, req, 3, buf, sizeof(buf),
                        activeTransport == TR_BLE ? 130 : 25);
+
+    // Truncated reply: retry once with a longer window. A DID that answers at all
+    // is the find here, so dropping it over a lost frame would undercount the sweep
+    // exactly the way a single ELM327 pass already does (FINDINGS).
+    if (len == -3) len = obdIsoTp(reqId, rspId, req, 3, buf, sizeof(buf),
+                                  activeTransport == TR_BLE ? 260 : 50);
 
     if (len == -2) { scan.negatives++; continue; }
     if (len < 3) continue;
@@ -497,6 +530,10 @@ static void handleDtc() {
     uint8_t buf[64];
     int len = obdIsoTp(req[e], rsp[e], req03, 1, buf, sizeof(buf),
                        activeTransport == TR_BLE ? 1500 : 300);
+    // A half-read DTC list would report fewer codes than are actually stored, so a
+    // truncated reply gets one retry rather than being parsed as far as it goes.
+    if (len == -3) len = obdIsoTp(req[e], rsp[e], req03, 1, buf, sizeof(buf),
+                                  activeTransport == TR_BLE ? 2500 : 600);
     bool first = true;
     if (len >= 2 && buf[0] == 0x43) {
       uint8_t count = buf[1];

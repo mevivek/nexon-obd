@@ -32,6 +32,14 @@ it says so.
 | `/dtc` | Stored + pending fault codes as JSON |
 | `/data` | Current sample as JSON |
 
+A poll can come back with only some of its PIDs — the dashboard reads them in three
+batched requests, and one batch can time out while the others answer. When that
+happens the affected gauges keep showing their last reading, dimmed, and the header
+reports `live · holding N`. After 2.5 s without a fresh value they fall back to `—`
+rather than showing stale data indefinitely, and a held reading never raises or
+sustains a warning — a value from two seconds ago cannot tell you whether the engine
+is still overheating.
+
 The onboard LED encodes state, which matters when the board is hidden under the dash:
 
 - **slow blink (1 Hz)** — alive, Wi-Fi up, ECU not answering
@@ -110,6 +118,20 @@ Current size: **1.18 MB flash (35 %)**, 48 KB RAM (14 %).
 
 The default `default_8MB` partition already provides `ota_0` + `ota_1` at 3.19 MB each,
 so OTA works without changing the partition scheme.
+
+### Tests
+
+```bash
+firmware/test/run.sh          # needs g++, python3 and node — no ESP32 core, no board
+```
+
+The ISO-TP layer and the mode-01 batch poller are extracted straight out of
+`NexonOBD.ino` and compiled against fake TWAI and ELM327 shims, so frame sequences
+that are impractical to stage against a real car — a dropped consecutive frame, a
+reordered sequence number, a reply that stops halfway — are covered. The dashboard's
+hold-last-value logic is pulled out of the served pages and run under node, which
+also parse-checks every page script; they are JavaScript inside C++ raw string
+literals, so nothing else in the build ever compiles them.
 
 ### OTA
 
