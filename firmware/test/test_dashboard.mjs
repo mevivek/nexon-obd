@@ -444,13 +444,24 @@ console.log('\nversion stamp');
     return m ? Function('return ' + m[1].replace(/UL|U|\b_\b/g, ''))() : NaN;
   };
   eq(konst('HIST_SLOTS') * konst('HIST_PERIOD_MS'), 3600000, 'the buffer spans exactly one hour');
-  // The board is usually wired to lose power with the ignition, so RTC memory and the
-  // save on the way into deep sleep both contribute nothing - this heartbeat is the
-  // only thing that saves a trip's history, and it bounds what a power cut costs.
-  ok(konst('HIST_SAVE_MS') <= 60000,
-     `history is flushed at least once a minute (${konst('HIST_SAVE_MS')} ms)`);
-  ok(konst('HIST_SAVE_MS') >= 20000,
-     'but not so often it burns flash endurance');
+  eq(konst('HIST_SLOTS') % konst('HIST_CHUNK'), 0, 'chunks divide the ring evenly');
+
+  // The board loses power with the ignition, so RTC memory and the save on the way
+  // into deep sleep both contribute nothing - this flush is the only thing that
+  // keeps a trip's history, and its interval is what a power cut costs.
+  ok(konst('HIST_SAVE_MS') <= konst('HIST_PERIOD_MS'),
+     `history is flushed as often as it is recorded (${konst('HIST_SAVE_MS')} ms)`);
+
+  // Flushing that often is only affordable because a flush writes the chunk that
+  // moved rather than the whole ring. Rewriting all of it at this interval would
+  // burn NVS endurance in a couple of years.
+  const ring = konst('HIST_SLOTS') * 8, chunk = konst('HIST_CHUNK') * 8;
+  ok(chunk * 8 <= ring,
+     `a flush writes a small fraction of the ring (${chunk} of ${ring} bytes)`);
+  // ...and each chunk still has to cover enough time that one flush rarely touches
+  // two of them.
+  ok(konst('HIST_CHUNK') * konst('HIST_PERIOD_MS') >= 60000,
+     'a chunk spans at least a minute of data');
 
   const build = readFileSync(join(here, '../build.sh'), 'utf8');
   ok(/FW_VERSION/.test(build) && /NexonOBD-v\$VERSION\.bin/.test(build),

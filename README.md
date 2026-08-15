@@ -133,18 +133,21 @@ permanently-live OBD pin 16 it deep-sleeps after 10 idle minutes and wakes every
 | Store | Survives | Written |
 |---|---|---|
 | RTC slow memory (4.8 KB) | deep sleep | every 6 s, free |
-| NVS (flash) | power loss | every 60 s, and before sleeping |
+| NVS (flash) | power loss | every 6 s (each new sample), and before sleeping |
 
 Which store matters depends on how the board is powered. Wired to the ignition it
 simply loses power when the car goes off — RTC memory does not survive that, and the
 save on the way into deep sleep never runs, so the periodic flash write is the only
-thing keeping a trip's history. It runs every 60 s, so a power cut costs at most the
-last minute. Wired to the permanently-live pin 16 the board deep-sleeps instead, and
-RTC memory carries the buffer across for free.
+thing keeping a trip's history. It runs on every new sample, so switching off costs
+at most 6 seconds. Wired to the permanently-live pin 16 the board deep-sleeps
+instead, and RTC memory carries the buffer across for free.
 
-Flash is still written sparingly — roughly sixty writes per hour of driving, which is
-comfortably inside NVS endurance; every few seconds would not be, and would buy
-very little.
+Flushing that often is only affordable because a flush writes **the 400-byte chunk
+that moved**, not the whole 4800-byte ring. Rewriting all of it — which is what it
+did until v1.3.0 — costs somewhere over a flash sector erase per save, so shortening
+the interval that way would have burned through NVS endurance in a couple of years.
+Chunked, ten times the flush rate still churns less flash than the old
+sixty-second full-buffer write did.
 
 The onboard LED encodes state, which matters when the board is hidden under the dash:
 

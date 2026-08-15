@@ -23,16 +23,30 @@
 // nothing, so it runs about once a minute rather than the ten it began with. A power
 // cut then costs at most the last minute.
 //
-// Roughly sixty writes per hour of driving is comfortably inside NVS endurance;
-// writing every few seconds instead would not be, and would buy very little.
+// The flush therefore runs as often as a slot is recorded, so a power cut costs at
+// most one 6-second sample rather than a chunk of the drive.
+//
+// That is only affordable because a flush writes the slots that changed, not the
+// whole ring. Rewriting all 4800 bytes every time - which is what it used to do -
+// costs somewhere over a sector erase per save, and at these intervals would burn
+// through NVS endurance in a couple of years. Writing one 400-byte chunk instead is
+// about a tenth of that, so saving ten times more often still churns less flash
+// than the old sixty-second full-buffer write did.
 //
 // 600 slots x 6 s = 3600 s exactly. Four int16 series is 4800 bytes, which fits the
 // 8 KB of RTC slow memory with room to spare.
 
 static const uint16_t HIST_SLOTS     = 600;
 static const uint32_t HIST_PERIOD_MS = 6000;
-static const uint32_t HIST_SAVE_MS   = 60UL * 1000UL;          // NVS heartbeat
+static const uint32_t HIST_SAVE_MS   = 6000;                   // i.e. every new slot
 static const int16_t  HIST_NONE      = INT16_MIN;              // nothing recorded
+
+// The ring is persisted in chunks so a flush only rewrites what moved. 50 slots is
+// five minutes of data, so any one flush touches a single chunk in normal running.
+static const uint16_t HIST_CHUNK  = 50;
+static const uint16_t HIST_CHUNKS = HIST_SLOTS / HIST_CHUNK;
+static_assert(HIST_SLOTS % HIST_CHUNK == 0, "chunks must divide the ring evenly");
+static_assert(HIST_CHUNKS <= 16, "the dirty mask is 16 bits");
 
 struct HistSlot {
   int16_t rpm;        // rpm
@@ -52,7 +66,7 @@ RTC_DATA_ATTR static HistSlot histBuf[HIST_SLOTS];
 static Preferences histPrefs;
 static uint32_t    histLastPush = 0;
 static uint32_t    histLastSave = 0;
-static bool        histDirty    = false;
+static uint16_t    histDirtyMask = 0;      // one bit per chunk awaiting a flush
 
 static void histReset() {
   histMagic = HIST_MAGIC;
@@ -62,14 +76,24 @@ static void histReset() {
     histBuf[i] = {HIST_NONE, HIST_NONE, HIST_NONE, HIST_NONE};
 }
 
+static void histChunkKey(char *out, size_t n, uint16_t c) {
+  snprintf(out, n, "c%u", (unsigned)c);
+}
+
 static void histSave() {
-  if (!histDirty) return;
+  if (!histDirtyMask) return;
   if (!histPrefs.begin("nexonhist", false)) return;
+  char key[8];
+  for (uint16_t c = 0; c < HIST_CHUNKS; c++) {
+    if (!(histDirtyMask & (uint16_t)(1u << c))) continue;
+    histChunkKey(key, sizeof(key), c);
+    histPrefs.putBytes(key, &histBuf[c * HIST_CHUNK],
+                       (size_t)HIST_CHUNK * sizeof(HistSlot));
+  }
   histPrefs.putUShort("head", histHead);
   histPrefs.putUShort("count", histCount);
-  histPrefs.putBytes("buf", histBuf, sizeof(histBuf));
   histPrefs.end();
-  histDirty = false;
+  histDirtyMask = 0;
   histLastSave = millis();
 }
 
@@ -81,17 +105,38 @@ static void histBegin() {
     return;
   }
   histReset();
-  if (histPrefs.begin("nexonhist", true)) {
-    size_t n = histPrefs.getBytesLength("buf");
-    if (n == sizeof(histBuf)) {
-      histPrefs.getBytes("buf", histBuf, sizeof(histBuf));
-      histHead  = histPrefs.getUShort("head", 0);
-      histCount = histPrefs.getUShort("count", 0);
-      if (histCount > HIST_SLOTS || histHead >= HIST_SLOTS) histReset();
-      else Serial.printf("[hist] %u samples restored from flash\n", histCount);
-    }
+  if (!histPrefs.begin("nexonhist", false)) return;   // read-write: may need to migrate
+
+  // Firmware before 1.3.0 kept the whole ring under one 4800-byte key. Left in
+  // place that would occupy most of the NVS partition and starve the chunked
+  // writes, so it is read once, carried over, and removed.
+  if (histPrefs.getBytesLength("buf") == sizeof(histBuf)) {
+    histPrefs.getBytes("buf", histBuf, sizeof(histBuf));
+    histHead  = histPrefs.getUShort("head", 0);
+    histCount = histPrefs.getUShort("count", 0);
+    histPrefs.remove("buf");
+    histDirtyMask = (uint16_t)((1u << HIST_CHUNKS) - 1);   // rewrite it chunked
+    if (histCount > HIST_SLOTS || histHead >= HIST_SLOTS) histReset();
+    else Serial.printf("[hist] %u samples migrated from the old layout\n", histCount);
     histPrefs.end();
+    return;
   }
+
+  uint16_t head = histPrefs.getUShort("head", 0xFFFF);
+  uint16_t count = histPrefs.getUShort("count", 0xFFFF);
+  if (head < HIST_SLOTS && count <= HIST_SLOTS) {
+    char key[8];
+    for (uint16_t c = 0; c < HIST_CHUNKS; c++) {
+      histChunkKey(key, sizeof(key), c);
+      if (histPrefs.getBytesLength(key) == (size_t)HIST_CHUNK * sizeof(HistSlot))
+        histPrefs.getBytes(key, &histBuf[c * HIST_CHUNK],
+                           (size_t)HIST_CHUNK * sizeof(HistSlot));
+    }
+    histHead = head;
+    histCount = count;
+    Serial.printf("[hist] %u samples restored from flash\n", histCount);
+  }
+  histPrefs.end();
 }
 
 static int16_t histQuant(float v, float scale) {
@@ -113,9 +158,9 @@ static void histTick(const Live &L) {
 
   histBuf[histHead] = {histQuant(L.rpm, 1.0f), histQuant(L.speed, 1.0f),
                        histQuant(boostBar, 100.0f), histQuant(L.coolant, 1.0f)};
+  histDirtyMask |= (uint16_t)(1u << (histHead / HIST_CHUNK));
   histHead = (uint16_t)((histHead + 1) % HIST_SLOTS);
   if (histCount < HIST_SLOTS) histCount++;
-  histDirty = true;
 
   if (now - histLastSave > HIST_SAVE_MS) histSave();
 }
