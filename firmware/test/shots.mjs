@@ -63,6 +63,7 @@ const PAGES = [
   ['scan', '../NexonOBD/scan_html.h'],
   ['update', '../NexonOBD/ota_html.h'],
   ['monitors', '../NexonOBD/mon_html.h'],
+  ['trips', '../NexonOBD/trip_html.h'],
 ];
 
 const WIDTHS = [[390, 'phone'], [768, 'tablet']];
@@ -106,6 +107,15 @@ const server = http.createServer((req, res) => {
   if (url.startsWith('/time')) {
     res.writeHead(200, { 'content-type': 'application/json' });
     return res.end(JSON.stringify({ set: true, epoch: 1755000000000 }));
+  }
+  if (url === '/trips/list') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ fs: true, used: 486539, total: 1572864,
+      live: '/t0007.csv', trips: [
+        { name: '/t0007.csv', size: 128400 },
+        { name: '/t0006.csv', size: 291733 },
+        { name: '/t0005.csv', size: 66406 },
+      ] }));
   }
   if (url === '/mon') {
     // Two O2 monitors, which is what this car's support mask implies: one comfortably
@@ -173,7 +183,7 @@ for (const [width, wname] of WIDTHS) {
   }
 
   ok = true; scanning = false; sample = CRUISING;
-  for (const p of ['scan', 'update', 'monitors']) {
+  for (const p of ['scan', 'update', 'monitors', 'trips']) {
     await page.goto(`${base}/${p}`);
     await page.waitForTimeout(500);
     const f = join(outDir, `${p}-${wname}.png`);
