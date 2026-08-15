@@ -40,6 +40,8 @@ const CRUISING = {
   coolant: 89, oil: 96, iat: 34, ambient: 34, volt: 14.32, stft: 2.3,
   ltft: -1.6, lambda: 0.998, cat: 642.5, timing: 18.5, fuelRate: 4.85,
   fuel: 100, runtime: 1284,
+  // Accumulated by the board over the drive, not sampled: 23.6 km on 1.66 L.
+  tripKm: 23.62, tripL: 1.661,
 };
 
 const SCENARIOS = {

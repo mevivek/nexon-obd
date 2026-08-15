@@ -81,6 +81,10 @@ below &mdash; the ones the scanner found are listed for you.</div>
 <input type="text" id="man" class="full" placeholder="1002, 1003, T0140"></div>
 </div>
 <div class="pick" id="pick"></div>
+<div class="hint" id="imp">Identifiers found by a sweep on <em>this</em> board are listed
+above. A <code>did_hits.csv</code> exported from an earlier firmware can be loaded here
+instead &mdash; it stays in this browser, nothing is uploaded.
+<input type="file" id="file" accept=".csv,text/csv"></div>
 <div class="row" style="margin-top:10px">
 <button id="apply">Apply</button>
 <button class="ghost" id="clear">Watch nothing</button>
@@ -218,10 +222,52 @@ $('apply').onclick=()=>{
 $('clear').onclick=()=>{sel.clear();drawPick();cost();apply('')};
 $('per').onchange=cost;
 
+// Parse a did_hits.csv exported by the scanner page: ecu,did,len,hex,ascii, with
+// the ascii column quoted because it can contain a comma. Only the first four
+// matter here, so the quoted tail is simply not read.
+function parseCsv(text){
+ const out=[];
+ for(const line of text.split(/\r?\n/)){
+  const c=line.split(',');
+  if(c.length<4)continue;
+  const ecu=c[0].trim().toUpperCase(), did=c[1].trim().toUpperCase();
+  if(ecu!=='ECM'&&ecu!=='TCM')continue;          // skips the header row too
+  if(!/^[0-9A-F]{4}$/.test(did))continue;
+  out.push({ecu,did,len:+c[2]||0,hex:(c[3]||'').trim()});
+ }
+ return out;
+}
+// Merge rather than replace: a board that has its own hits should not lose them
+// because a file was loaded, and vice versa.
+function addHits(list){
+ const seen=new Set(hits.map(h=>h.ecu+h.did));
+ for(const h of list) if(!seen.has(h.ecu+h.did)){seen.add(h.ecu+h.did);hits.push(h)}
+ hits.sort((a,b)=>(a.ecu+a.did).localeCompare(b.ecu+b.did));
+ drawPick();
+}
+$('file').onchange=e=>{
+ const f=e.target.files&&e.target.files[0];
+ if(!f)return;
+ const r=new FileReader();
+ r.onload=()=>{
+  const found=parseCsv(String(r.result));
+  addHits(found);
+  // Kept in the browser so a reload does not send you back to the file picker.
+  // This is a convenience list, not a source of truth - the board owns the hits it
+  // found itself, and this never writes to it.
+  try{localStorage.setItem('nexonHits',JSON.stringify(hits.slice(0,2000)))}catch(_){}
+  $('msg').className='msg ok';
+  $('msg').textContent=found.length?`Loaded ${found.length} identifiers from ${f.name}.`
+                                   :`No identifiers found in ${f.name}.`;
+ };
+ r.readAsText(f);
+};
+try{const s=localStorage.getItem('nexonHits');if(s)hits=JSON.parse(s)||[]}catch(_){}
+
 // The scanner's results are the natural source of identifiers to watch, so they are
 // offered as checkboxes rather than leaving you to copy hex off another page.
 fetch('/scan/status',{cache:'no-store'}).then(r=>r.json()).then(j=>{
- hits=(j.hits||[]).slice(0,400);drawPick();
+ addHits((j.hits||[]).slice(0,400));
 }).catch(()=>drawPick());
 
 // The board has no clock of its own. Whichever page you open hands over the

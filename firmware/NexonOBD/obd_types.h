@@ -15,6 +15,9 @@ struct Live {
   // the engine's reference torque (PID 63), which is a constant read once.
   float pedalD = NAN, pedalE = NAN, cmdThrottle = NAN;
   float torqDem = NAN, torqAct = NAN, torqRef = NAN, absLoad = NAN;
+  // Accumulated over this run of the board rather than sampled, like baro above.
+  // The board loses power with the ignition, so one run is one drive.
+  float tripKm = NAN, tripL = NAN;
   bool  ok = false;
 };
 

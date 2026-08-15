@@ -81,6 +81,16 @@ live values update slowly. It keeps going if you leave this page.</div>
 <svg class="spark" id="spCool" preserveAspectRatio="none" aria-label="Coolant temperature, recent history"></svg></div>
 </div>
 
+<div class="tiles vital">
+<div class="tile"><div class="label">Mileage</div>
+<div class="value"><span id="kmpl">&mdash;</span><span class="unit">km/L</span></div>
+<div class="note" id="tripNote">this drive</div></div>
+
+<div class="tile"><div class="label">Right now</div>
+<div class="value"><span id="kmplNow">&mdash;</span><span class="unit">km/L</span></div>
+<div class="note" id="rateNote"></div></div>
+</div>
+
 <h2 class="sec">Engine</h2>
 <div class="tiles">
 <div class="tile"><div class="label">Oil temp</div>
@@ -142,8 +152,7 @@ live values update slowly. It keeps going if you leave this page.</div>
 <div class="flag" id="trimF"></div></div>
 
 <div class="tile"><div class="label">Fuel rate</div>
-<div class="value"><span id="fuelRate">&mdash;</span><span class="unit">L/h</span></div>
-<div class="note" id="econ"></div></div>
+<div class="value"><span id="fuelRate">&mdash;</span><span class="unit">L/h</span></div></div>
 
 <div class="tile"><div class="label">Catalyst B1S1</div>
 <div class="value" id="catV"><span id="cat">&mdash;</span><span class="unit">&deg;C</span></div>
@@ -179,6 +188,8 @@ live values update slowly. It keeps going if you leave this page.</div>
 // The board keeps that across restarts and serves it at /history, so the charts
 // have shape the moment the page loads instead of starting flat.
 const HSLOT=600,HP=6000,HOLD=2500,hist={rpm:[],boost:[],speed:[],coolant:[]},keep={};
+// How much of a drive there has to be before an average means anything.
+const TRIP_MIN_KM=0.5,TRIP_MIN_L=0.1;
 let rate=[],hb=0,miss=0,lastStatus='',lastSeq=-1,alive=true;
 // A sample can arrive with only some fields filled in: /data reports ok as soon as
 // any one of the three batched mode-01 requests answers, so a single batch timing
@@ -268,7 +279,21 @@ F('trimF',!q.stft&&!q.ltft&&Math.abs(v.stft+v.ltft)>20,'warn','⚠ total trim be
 T('cat',n(v.cat),q.cat);V('catV',q.cat?'':v.cat>=900?'crit':v.cat>=800?'warn':'');
 F('catF',!q.cat&&v.cat>=800,v.cat>=900?'crit':'warn','⚠ catalyst very hot');
 T('timing',n(v.timing),q.timing);T('fuelRate',n(v.fuelRate,2),q.fuelRate);
-document.getElementById('econ').textContent=(!q.speed&&!q.fuelRate&&v.speed>0&&v.fuelRate>0)?(v.speed/v.fuelRate).toFixed(1)+' km/L instantaneous':(!q.fuelRate&&v.fuelRate>0?'idling':'');
+// Mileage. The average is what a drive is actually judged on, and the board
+// integrates it so that closing this page does not lose it. Both figures are held
+// back until there is enough drive to divide by: 0.4 km over 0.02 L is arithmetic,
+// not a mileage, and it swings by tens of km/L between polls.
+const tkm=v.tripKm,tl=v.tripL;
+const avg=(tkm!=null&&tl!=null&&tkm>=TRIP_MIN_KM&&tl>=TRIP_MIN_L)?tkm/tl:null;
+T('kmpl',avg==null?'—':avg.toFixed(1));
+document.getElementById('tripNote').textContent=(tkm==null||tl==null)?'this drive'
+ :tkm.toFixed(1)+' km · '+tl.toFixed(2)+' L'+(avg==null?' — too early to average':'');
+// Instantaneous is only meaningful while moving; standing still it is a division by
+// nothing, and the useful thing to say instead is that fuel is being burned anyway.
+const inst=(!q.speed&&!q.fuelRate&&v.speed>0&&v.fuelRate>0)?v.speed/v.fuelRate:null;
+T('kmplNow',inst==null?'—':inst.toFixed(1),q.speed||q.fuelRate);
+document.getElementById('rateNote').textContent=v.fuelRate==null?''
+ :(v.fuelRate>0&&!(v.speed>0)?'idling · ':'')+v.fuelRate.toFixed(2)+' L/h';
 T('volt',n(v.volt,2),q.volt);const vl=!q.volt&&v.volt<12.2,vh=!q.volt&&v.volt>15.2;V('voltV',(vl||vh)?'warn':'');
 F('voltF',vl||vh,'warn',vl?'⚠ not charging':'⚠ overcharging');
 T('runtime',hhmmss(v.runtime),q.runtime);

@@ -126,6 +126,41 @@ The dashboard stops requesting while the page is off screen, and the Hz readout
 counts *published samples* rather than fetches — the same cached sample can be
 fetched several times and must not inflate the rate.
 
+### Mileage
+
+Two figures, in the glance area under boost and coolant:
+
+- **Mileage** — the average over this drive, with the totals it came from
+  (`23.6 km · 1.66 L`) underneath so the number can be checked rather than trusted.
+- **Right now** — instantaneous km/L, which is what the pedal moves. Standing still
+  it reads `—` and says `idling` instead, because speed ÷ nothing is not a mileage.
+
+There is no PID for fuel economy, so it is integrated on the board from speed
+(`0D`) and fuel rate (`5E`), both confirmed supported on this ECU. On the board and
+not on the page, so locking the phone or closing the browser does not lose the drive.
+Two rules keep it honest:
+
+- **Both inputs or neither.** Fuel rate lives in the `b2` batch and refreshes half as
+  often as speed, so it goes absent regularly. Counting the distance anyway would
+  divide real kilometres by an understated litre count and report a mileage better
+  than the car achieved.
+- **Gaps are not driving.** An interval longer than 5 s — a BLE dropout, a scan taking
+  the bus, a wake from sleep — is skipped rather than integrated at the last known
+  speed. The clock still moves, so the interval after an outage is one interval, not
+  the whole outage.
+
+The average is withheld until roughly the first 0.5 km and 0.1 L. Before that it
+swings by tens of km/L between polls and reads as a broken gauge.
+
+Totals start at zero each time the board powers up, which — given the
+accessory-socket supply — is exactly one drive. They also go into the trip CSV as
+`trip_km` and `trip_l`, so economy over any stretch of a drive can be recovered by
+differencing two rows.
+
+One caveat worth knowing: `5E` is the ECU's injection model, not a flow meter. Trip
+km/L from it typically reads a few percent optimistic against tank-to-tank. It is
+excellent for comparing drives and weaker as an absolute.
+
 ### Driver demand vs. delivery
 
 Six of the 55 PIDs the ECM supports trace one chain: **accelerator pedal (`49`/`4A`)
@@ -198,6 +233,14 @@ continuously and shows them next to rpm, speed, coolant, intake, load and thrott
 each with a sparkline. Blip the throttle and an rpm-linked value gives itself away.
 The ones the scanner found are offered as checkboxes, so there is no copying hex
 between pages.
+
+**Coming from a build before 1.7.0:** those sweeps kept their hits in RAM only —
+nothing was written to flash — so an updated board comes up with an empty picker
+even though the sweep happened. The `did_hits.csv` you exported is the only copy,
+and the picker loads it directly: choose the file and the identifiers appear as
+checkboxes, merged with anything the board found itself. It is parsed in the
+browser and kept in `localStorage`; nothing is uploaded, and there is no endpoint
+that would make a browser a second source of truth for what the board found.
 
 The same readings become extra columns on the trip CSV — two per identifier: the
 bytes decoded big-endian, and the raw bytes beside them. Two bytes might equally be

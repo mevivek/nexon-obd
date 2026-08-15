@@ -53,6 +53,10 @@ static const TripCol TRIP_COLS[] = {
   {"torqdem_pc",  &Live::torqDem,     1},
   {"torqact_pc",  &Live::torqAct,     1},
   {"runtime_s",   &Live::runtime,     0},
+  // Integrated on the board, not sampled - so a row carries the drive's totals and
+  // km/L over any span of the file can be recovered by differencing two rows.
+  {"trip_km",     &Live::tripKm,      3},
+  {"trip_l",      &Live::tripL,       4},
 };
 static const uint8_t TRIP_NCOLS = sizeof(TRIP_COLS) / sizeof(TRIP_COLS[0]);
 

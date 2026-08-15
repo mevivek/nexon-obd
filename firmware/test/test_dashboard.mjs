@@ -582,6 +582,71 @@ console.log('\ntab switching');
      `both ECUs, request and retry, stay under five seconds (${tmos.reduce((a, b) => a + b, 0) * 2} ms)`);
 }
 
+// ---------------------------------------------------------------- mileage
+//
+// The board integrates the totals (covered in the C++ suite); this is the display
+// side, where the risk is showing a number that is arithmetically correct and
+// completely misleading - an average over the first four hundred metres swings by
+// tens of km/L between polls and reads as a broken gauge.
+function suiteMileage(label, file) {
+  console.log(`\n${label} — mileage`);
+  const m = load(file);
+  const txt = (id) => m.el(id).textContent;
+
+  const base = { rpm: 2000, speed: 60, fuelRate: 6, coolant: 88 };
+  {
+    const [v, q] = m.merge({ ...base, tripKm: 0.2, tripL: 0.02 });
+    m.render(v, q);
+    eq(txt('kmpl'), '—', 'no average until there is a drive to average over');
+    ok(txt('tripNote').includes('too early'), 'and it says why rather than sitting blank');
+  }
+  {
+    const [v, q] = m.merge({ ...base, tripKm: 23.6, tripL: 1.66 });
+    m.render(v, q);
+    eq(txt('kmpl'), '14.2', 'average is distance over fuel');
+    ok(txt('tripNote').includes('23.6 km') && txt('tripNote').includes('1.66 L'),
+       'with the totals it came from, so the figure can be checked');
+  }
+  {
+    // 60 km/h on 6 L/h is 10 km/L, and that is the number the pedal moves.
+    const [v, q] = m.merge({ ...base, speed: 60, fuelRate: 6, tripKm: 23.6, tripL: 1.66 });
+    m.render(v, q);
+    eq(txt('kmplNow'), '10.0', 'instantaneous is speed over fuel rate');
+    ok(txt('rateNote').includes('6.00 L/h'), 'with the raw rate beside it');
+  }
+  {
+    // Stopped but burning: the division is meaningless, so it is not shown, and the
+    // useful thing to say is that fuel is going nowhere.
+    const [v, q] = m.merge({ ...base, speed: 0, fuelRate: 0.8, tripKm: 23.6, tripL: 1.66 });
+    m.render(v, q);
+    eq(txt('kmplNow'), '—', 'standing still has no instantaneous mileage');
+    ok(txt('rateNote').includes('idling'), 'and says it is idling instead');
+    eq(txt('kmpl'), '14.2', 'while the drive average is unaffected by the stop');
+  }
+  {
+    // The blanking bug this whole dashboard was rebuilt around: a missing value
+    // must not be coerced to zero and rendered as a reading.
+    const [v, q] = m.merge({ ...base, speed: null, fuelRate: null,
+                             tripKm: 23.6, tripL: 1.66 });
+    m.render(v, q);
+    ok(m.el('kmplNow').classList.contains('stale') || txt('kmplNow') === '—',
+       'a held speed or rate does not present as a fresh instantaneous figure');
+    eq(txt('kmpl'), '14.2', 'the average still stands - it is accumulated, not sampled');
+  }
+  {
+    // A page that has only just loaded, against a board that has sent nothing.
+    // Needs its own instance: merge() holds the last value it saw, and holding a
+    // running total is right - the totals are monotonic and board-side, so a null
+    // in one sample means "not in this reply", never "back to zero".
+    const fresh = load(file);
+    const [v, q] = fresh.merge({ rpm: null, speed: null, fuelRate: null,
+                                 tripKm: null, tripL: null });
+    fresh.render(v, q);
+    eq(fresh.el('kmpl').textContent, '—', 'nothing received yet shows no average');
+    eq(fresh.el('tripNote').textContent, 'this drive', 'and the note stays neutral');
+  }
+}
+
 // ---------------------------------------------------------------- DID watch
 //
 // The sweep finds identifiers that answer; it cannot say what they hold. The watch
@@ -634,6 +699,57 @@ console.log('\nDID watch');
      'identifiers are offered from the scan results, not typed from another page');
   ok(/Reference/.test(html) && /rrpm/.test(html) && /rcool/.test(html),
      'live reference values sit next to the watched ones, which is the whole point');
+
+  // Hits found before 1.7.0 were never written to flash, so a board updated from an
+  // older build comes up with an empty picker even though the sweep happened. The
+  // exported CSV is the only copy, and it has to be usable without re-driving.
+  ok(/FileReader/.test(html) && /parseCsv/.test(html),
+     'a did_hits.csv exported by an older build can be loaded back');
+  ok(/localStorage/.test(html), 'and survives a page reload');
+  ok(/nothing is uploaded/.test(html),
+     'the page says the file stays local, because it does - there is no upload route');
+  ok(!/\/scan\/hits\/(set|import|upload)/.test(ino),
+     'and no endpoint was added that would make the browser a second source of hits');
+
+  // Run the page's own parser against the exact shape the scanner page exports, so
+  // a change to either format is caught here rather than on the car.
+  const parse = new Function(
+    scriptsOf(html)[0].match(/function parseCsv[\s\S]*?\n}/)[0] + '\n;return parseCsv;')();
+  const exported = ['ecu,did,len,hex,ascii',
+                    'ECM,1002,2,154F,".O"',
+                    'ECM,F18A,13,424F534348204C494D49544544,"BOSCH LIMITED"',
+                    'TCM,0140,2,1068,".h"',
+                    ''].join('\n');
+  const got = parse(exported);
+  eq(got.length, 3, 'parses the exported rows');
+  ok(got[0].ecu === 'ECM' && got[0].did === '1002' && got[0].hex === '154F',
+     'and keeps the fields the picker needs');
+  eq(parse('ecu,did,len,hex,ascii\nECM,zzzz,2,0000,""').length, 0,
+     'a malformed identifier is dropped rather than watched');
+  // The ascii column is quoted because it can contain a comma - splitting naively
+  // would misalign every field after it if those columns were read.
+  ok(parse('ECM,1006,2,618F,"a,b"')[0].hex === '618F',
+     'a comma inside the quoted ascii column does not shift the hex column');
+}
+
+// ---------------------------------------------------------------- trip columns
+console.log('\ntrip totals');
+{
+  const ino = readFileSync(join(here, '../NexonOBD/NexonOBD.ino'), 'utf8');
+  const trip = readFileSync(join(here, '../NexonOBD/triplog.h'), 'utf8');
+  const types = readFileSync(join(here, '../NexonOBD/obd_types.h'), 'utf8');
+
+  ok(/float tripKm = NAN, tripL = NAN;/.test(types),
+     'the totals ride on Live, so /data and the CSV both get them for free');
+  ok(/\{"trip_km",\s+&Live::tripKm/.test(trip) && /\{"trip_l",\s+&Live::tripL/.test(trip),
+     'and appear as CSV columns through the same table as every other column');
+  ok(/jsonNum\(s, "tripKm"/.test(ino) && /jsonNum\(s, "tripL"/.test(ino),
+     'and in /data');
+
+  // The integration must see the merged, staleness-checked sample - not the raw
+  // batch - or a held fuel rate would be integrated as though it had just arrived.
+  ok(/if \(any\) tripIntegrate\(pub\.speed, pub\.fuelRate, millis\(\)\);/.test(ino),
+     'integration runs on the published sample, after staleness has been applied');
 }
 
 // ---------------------------------------------------------------- syntax
@@ -672,6 +788,7 @@ await suiteStatus('firmware dashboard (dashboard_html.h)', '../NexonOBD/dashboar
 await suiteVisibility('firmware dashboard (dashboard_html.h)', '../NexonOBD/dashboard_html.h');
 await suiteScanBanner('firmware dashboard (dashboard_html.h)', '../NexonOBD/dashboard_html.h');
 await suiteSeed('firmware dashboard (dashboard_html.h)', '../NexonOBD/dashboard_html.h');
+suiteMileage('firmware dashboard (dashboard_html.h)', '../NexonOBD/dashboard_html.h');
 
 console.log(`\n${ran} checks, ${failed} failed`);
 process.exit(failed ? 1 : 0);

@@ -947,6 +947,39 @@ static uint32_t pickBackoff(uint32_t cur) {
   return next > PICK_MAX_MS ? PICK_MAX_MS : next;
 }
 
+// ---------------------------------------------------------------- trip totals
+//
+// Fuel economy is the number that says something about a drive, and it cannot be
+// read off the bus - it has to be integrated, from speed (PID 0D) and fuel rate
+// (PID 5E), both of which this ECU supports. Accumulated on the board rather than
+// on the page, so closing the browser or locking the phone does not lose the drive.
+//
+// Totals start at zero every time the board powers up. Given the accessory-socket
+// supply that is exactly one drive, which is the span an average is worth over.
+static float    g_tripKm  = 0.0f;
+static float    g_tripL   = 0.0f;
+static uint32_t tripIntAt = 0;
+
+// A longer gap than this is not an interval anything is known about - a BLE
+// dropout, a scan taking the bus, a wake from sleep. Integrating across it would
+// invent distance and fuel that were never measured.
+static const uint32_t TRIP_INT_MAX_MS = 5000;
+
+// Both inputs or neither. Counting distance while the fuel rate is missing would
+// quietly bias the average optimistic, and that is the one direction a mileage
+// figure must never drift.
+static void tripIntegrate(float speedKmh, float rateLph, uint32_t now) {
+  uint32_t prev = tripIntAt;
+  tripIntAt = now;
+  if (!prev) return;                          // first sample: no interval yet
+  uint32_t dt = now - prev;
+  if (dt == 0 || dt > TRIP_INT_MAX_MS) return;
+  if (isnan(speedKmh) || isnan(rateLph)) return;
+  if (speedKmh < 0 || rateLph < 0) return;    // a decode that went wrong
+  g_tripKm += speedKmh * dt / 3600000.0f;
+  g_tripL  += rateLph  * dt / 3600000.0f;
+}
+
 static uint32_t pickWaitMs = PICK_MIN_MS;
 
 // One cached reply per batch, with the moment it arrived.
@@ -1011,6 +1044,10 @@ static void samplerStep() {
   }
   pub.baro = g_baro;
   pub.ok   = any;
+
+  if (any) tripIntegrate(pub.speed, pub.fuelRate, millis());
+  pub.tripKm = g_tripKm;
+  pub.tripL  = g_tripL;
 
   if (any) {
     g_live   = pub;
@@ -1086,6 +1123,7 @@ static void handleData() {
   jsonNum(s, "cmdThrottle", L.cmdThrottle, 1);
   jsonNum(s, "torqDem", L.torqDem, 1);jsonNum(s, "torqAct", L.torqAct, 1);
   jsonNum(s, "torqRef", L.torqRef, 0);jsonNum(s, "absLoad", L.absLoad, 1);
+  jsonNum(s, "tripKm", L.tripKm, 3);  jsonNum(s, "tripL",   L.tripL, 4);
   s.remove(s.length() - 1);           // trailing comma
   s += "}}";
   server.send(200, "application/json", s);

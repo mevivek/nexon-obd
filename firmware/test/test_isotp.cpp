@@ -545,6 +545,107 @@ static void test_pollbatch_keeps_bytes() {
   eq((int)again.rpm, 700, "and decode to the same values");
 }
 
+// ------------------------------------------------------------------ trip totals
+//
+// Fuel economy has to be integrated - there is no PID for it. The failure modes are
+// all quiet ones: a gap counted as if it were driven, distance accumulated while
+// the fuel rate was missing, a stale reading integrated twice. Each of those moves
+// the average in the flattering direction, which is exactly the direction a mileage
+// figure must not drift on its own.
+
+static void tripReset() {
+  g_tripKm = 0.0f;
+  g_tripL = 0.0f;
+  tripIntAt = 0;
+}
+
+static void test_trip_integrates_distance_and_fuel() {
+  printf("trip: integrates speed and fuel rate over time\n");
+  tripReset();
+  tripIntegrate(60.0f, 6.0f, 1000);              // first call only starts the clock
+  eq((int)(g_tripKm * 1000), 0, "the first sample has no interval behind it");
+
+  // 60 km/h for one second is 1/60 km; 6 L/h for one second is 1/600 L.
+  tripIntegrate(60.0f, 6.0f, 2000);
+  ok(fabsf(g_tripKm - 60.0f / 3600.0f) < 1e-5f, "one second at 60 km/h is 16.7 m");
+  ok(fabsf(g_tripL - 6.0f / 3600.0f) < 1e-6f, "and burns 1.67 ml at 6 L/h");
+
+  for (uint32_t t = 3000; t <= 3600000; t += 1000) tripIntegrate(60.0f, 6.0f, t);
+  ok(fabsf(g_tripKm - 60.0f) < 0.05f, "an hour at 60 km/h is 60 km");
+  ok(fabsf(g_tripL - 6.0f) < 0.01f, "and 6 litres at 6 L/h");
+  ok(fabsf(g_tripKm / g_tripL - 10.0f) < 0.01f, "which is 10 km/L");
+}
+
+static void test_trip_skips_intervals_it_knows_nothing_about() {
+  printf("trip: a gap is not driving\n");
+  tripReset();
+  tripIntegrate(60.0f, 6.0f, 1000);
+  tripIntegrate(60.0f, 6.0f, 2000);
+  float km = g_tripKm, l = g_tripL;
+
+  // A BLE dropout, a scan taking the bus, a wake from sleep. The car may have been
+  // stationary or at 100 km/h; integrating the last known speed across it invents
+  // a distance nobody measured.
+  tripIntegrate(60.0f, 6.0f, 2000 + TRIP_INT_MAX_MS + 1);
+  ok(g_tripKm == km && g_tripL == l, "a gap longer than the cap is not integrated");
+
+  // ...but the clock still moves, so the next interval is measured from the gap's
+  // end rather than accumulating the whole outage on the following sample.
+  tripIntegrate(60.0f, 6.0f, 2000 + TRIP_INT_MAX_MS + 1001);
+  ok(fabsf(g_tripKm - (km + 60.0f / 3600.0f)) < 1e-5f,
+     "and the interval after it is one second, not the whole outage");
+}
+
+static void test_trip_needs_both_inputs() {
+  printf("trip: both inputs or neither\n");
+  tripReset();
+  tripIntegrate(60.0f, 6.0f, 1000);
+  tripIntegrate(60.0f, 6.0f, 2000);
+  float km = g_tripKm, l = g_tripL;
+
+  // Fuel rate is in the b2 batch and refreshes half as often as speed, so it goes
+  // absent regularly. Counting the distance anyway would divide real kilometres by
+  // an understated litre count and report a mileage better than the car achieved.
+  tripIntegrate(60.0f, NAN, 3000);
+  ok(g_tripKm == km, "distance is not counted while the fuel rate is missing");
+  ok(g_tripL == l, "and neither is fuel");
+
+  tripIntegrate(NAN, 6.0f, 4000);
+  ok(g_tripKm == km && g_tripL == l, "nor the other way round");
+
+  // A misframed reply that decoded to something impossible.
+  tripIntegrate(-5.0f, 6.0f, 5000);
+  ok(g_tripKm == km && g_tripL == l, "a negative decode is refused rather than subtracted");
+
+  tripIntegrate(60.0f, 6.0f, 6000);
+  ok(g_tripKm > km, "and it resumes once both are back");
+}
+
+static void test_trip_totals_only_grow() {
+  printf("trip: totals are monotonic\n");
+  tripReset();
+  float lastKm = 0, lastL = 0;
+  bool monotonic = true;
+  for (uint32_t t = 1000; t <= 60000; t += 1000) {
+    // A drive with stops, missing samples and idling.
+    float sp = (t / 1000) % 7 == 0 ? 0.0f : 45.0f;
+    float fr = (t / 1000) % 5 == 0 ? NAN : 4.2f;
+    tripIntegrate(sp, fr, t);
+    if (g_tripKm < lastKm || g_tripL < lastL) monotonic = false;
+    lastKm = g_tripKm;
+    lastL = g_tripL;
+  }
+  ok(monotonic, "neither total ever goes backwards across a minute of mixed driving");
+  ok(lastKm > 0 && lastL > 0, "and both accumulate");
+  ok(lastKm / lastL > 0 && lastKm / lastL < 100, "and gives a plausible km/L");
+  // Idling burns fuel while covering no ground, which is the whole reason a trip
+  // average is worth having and the instantaneous figure is not.
+  tripReset();
+  for (uint32_t t = 1000; t <= 60000; t += 1000) tripIntegrate(0.0f, 0.8f, t);
+  eq((int)(g_tripKm * 1000), 0, "idling covers no distance");
+  ok(g_tripL > 0, "but does burn fuel");
+}
+
 // ------------------------------------------------------------------ DID watch
 //
 // The scanner finds identifiers; the watch reads a chosen few of them repeatedly
@@ -789,6 +890,11 @@ int main() {
   test_sample_merge_drops_stale();
   test_sample_merge_nothing_fresh();
   test_pollbatch_keeps_bytes();
+
+  test_trip_integrates_distance_and_fuel();
+  test_trip_skips_intervals_it_knows_nothing_about();
+  test_trip_needs_both_inputs();
+  test_trip_totals_only_grow();
 
   test_watch_value_is_big_endian();
   test_watch_freshness();
