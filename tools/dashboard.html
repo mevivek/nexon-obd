@@ -239,14 +239,23 @@ let lastOk = 0, rate = [];
 // sends six nulls and used to blank six gauges at once. Re-show the last known
 // value for HOLD_MS instead, dimmed. After that it reverts to '—' rather than
 // showing something indefinitely stale as though it were live.
+// How long a value may be re-shown, scaled to how fast samples actually arrive. A
+// fixed window is wrong on a slow link: holding for less than a few samples means
+// fields blink to an em-dash between updates that are working perfectly well.
+function holdMs() {
+  if (rate.length < 3) return HOLD_MS;
+  const d = (rate[rate.length - 1] - rate[0]) / (rate.length - 1);
+  return Math.max(HOLD_MS, Math.min(15000, d * 4));
+}
+
 function merge(sample) {
-  const now = Date.now(), v = {}, q = {};
+  const now = Date.now(), v = {}, q = {}, w = holdMs();
   let held = 0;
   for (const k in sample) {
     const x = sample[k];
     if (x !== null && x !== undefined && !isNaN(x)) {
       keep[k] = { v: x, t: now }; v[k] = x; q[k] = false;
-    } else if (keep[k] && now - keep[k].t <= HOLD_MS) {
+    } else if (keep[k] && now - keep[k].t <= w) {
       v[k] = keep[k].v; q[k] = true; held++;
     } else {
       v[k] = null; q[k] = true;

@@ -91,7 +91,7 @@ function load(file, opts = {}) {
 
   const api = new Function(
     'document', 'getComputedStyle', 'fetch', 'setTimeout',
-    js + '\n;return { merge, render, hz };'
+    js + '\n;return { merge, render, hz, holdMs, rate };'
   )(dom.document, dom.getComputedStyle, fetchImpl, setTimeoutImpl);
 
   return {
@@ -214,6 +214,32 @@ function suiteRate(label, m) {
   // reading once polling recovers, which the old cumulative average never did.
   const s = m.hz();
   ok(typeof s === 'string', 'hz() returns a string');
+}
+
+function suiteHold(label, m) {
+  console.log(`\n${label} — hold window follows the sample rate`);
+  if (!m.holdMs) { ok(false, 'holdMs is exported'); return; }
+
+  m.rate.length = 0;
+  eq(m.holdMs(), 2500, 'falls back to the floor before a rate is known');
+
+  // Fast link: samples 100 ms apart. The floor still applies.
+  m.rate.length = 0;
+  for (let i = 0; i < 10; i++) m.rate.push(1000 + i * 100);
+  eq(m.holdMs(), 2500, 'a fast link keeps the floor');
+
+  // Slow BLE link: samples 2 s apart. A fixed 2.5 s window is barely one sample,
+  // so a field that simply has not come round yet blinks to an em-dash - which is
+  // exactly what made the All values table flicker.
+  m.rate.length = 0;
+  for (let i = 0; i < 10; i++) m.rate.push(1000 + i * 2000);
+  eq(m.holdMs(), 8000, 'a slow link holds for several samples');
+
+  // ...but never so long that a genuinely dead field looks alive.
+  m.rate.length = 0;
+  for (let i = 0; i < 10; i++) m.rate.push(1000 + i * 60000);
+  eq(m.holdMs(), 15000, 'and is capped');
+  m.rate.length = 0;
 }
 
 async function suiteStatus(label, file) {
@@ -393,6 +419,7 @@ for (const [label, file, ids] of PAGES) {
   suiteMerge(label, load(file));
   suiteFlags(label, load(file), ids);
   suiteRate(label, load(file));
+  suiteHold(label, load(file));
 }
 
 // Hysteresis and seeding are firmware-page behaviour; the laptop dashboard is

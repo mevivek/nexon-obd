@@ -160,10 +160,17 @@ let rate=[],hb=0,miss=0,lastStatus='',lastSeq=-1,alive=true;
 // out sends six nulls and used to blank six gauges at once. Re-show the last known
 // value for HOLD ms instead, dimmed. After that it reverts to '—' rather than
 // showing something indefinitely stale as though it were live.
-function merge(j){const now=Date.now(),v={},q={};let held=0;
+// How long a value may be re-shown, scaled to how fast samples are actually
+// arriving. A fixed window is wrong for the same reason it was wrong on the board:
+// over BLE a sample can be seconds apart, and holding for less than a few samples
+// means fields blink to an em-dash between updates that are working perfectly well.
+function holdMs(){if(rate.length<3)return HOLD;
+const d=(rate[rate.length-1]-rate[0])/(rate.length-1);
+return Math.max(HOLD,Math.min(15000,d*4))}
+function merge(j){const now=Date.now(),v={},q={},w=holdMs();let held=0;
 for(const k in j){const x=j[k];
 if(x!=null&&!isNaN(x)){keep[k]={v:x,t:now};v[k]=x;q[k]=0}
-else if(keep[k]&&now-keep[k].t<=HOLD){v[k]=keep[k].v;q[k]=1;held++}
+else if(keep[k]&&now-keep[k].t<=w){v[k]=keep[k].v;q[k]=1;held++}
 else{v[k]=null;q[k]=1}}
 return[v,q,held]}
 // Rate over a trailing window. The old reading averaged over the whole page

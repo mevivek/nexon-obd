@@ -295,6 +295,19 @@ static void test_sample_order_favours_live_values() {
   ok(count[1] > 0 && count[2] > 0, "the slower batches are still polled");
 }
 
+static void test_stale_window_tracks_the_cycle() {
+  printf("sampleStaleMs: derived from how often a batch comes round\n");
+  // b2 and b3 are polled once every four batches, so the window has to outlast a
+  // full pass or they expire before their next turn. A fixed 3 s only survives if a
+  // batch completes in under 750 ms - true on CAN, not on BLE, where it blanked
+  // twelve of the twenty rows on every cycle.
+  ok(sampleStaleMs(3200) > 3200, "a 3.2 s BLE cycle gets a window longer than the cycle");
+  ok(sampleStaleMs(3200) >= 3 * 3200, "with room for a couple of missed turns");
+  eq((int)sampleStaleMs(200), 3000, "a fast CAN cycle still drops dead data promptly");
+  eq((int)sampleStaleMs(0), 3000, "and an unmeasured cycle falls back to the floor");
+  ok(sampleStaleMs(60000) <= 20000, "a stall cannot leave minutes-old numbers on screen");
+}
+
 static void test_sample_merge_combines_batches() {
   printf("sampleMerge: a published sample carries every fresh batch\n");
   uint8_t bufs[3][40] = {};
@@ -391,6 +404,7 @@ int main() {
   test_batch_silent_does_not_retry();
 
   test_sample_order_favours_live_values();
+  test_stale_window_tracks_the_cycle();
   test_sample_merge_combines_batches();
   test_sample_merge_drops_stale();
   test_sample_merge_nothing_fresh();

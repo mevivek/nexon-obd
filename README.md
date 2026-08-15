@@ -73,8 +73,17 @@ move fast enough to deserve equal billing:
 | `b2` — oil, IAT, voltage, trims, fuel rate | every 4 batches |
 | `b3` — lambda, catalyst, timing, run time, ambient, fuel | every 4 batches |
 
-A batch older than 3 s is dropped to `null` rather than published as current, so
-carrying values forward can never present a stale number as live.
+A batch that has not answered for three of its own polling cycles is dropped to
+`null` rather than published as current, so carrying values forward can never
+present a stale number as live. That window is measured, not fixed: `b2` and `b3`
+come round once every four batches, so a flat timeout only holds if a batch
+completes quickly. Over BLE it does not, and those two batches then expire before
+their next turn — blanking twelve of the twenty rows in **All values** on every
+cycle. The dashboard's own hold window scales the same way, off the observed sample
+interval.
+
+The `[alive]` serial line prints `batch=`, `cycle=` and `stale=` so all three are
+visible rather than inferred.
 
 **On BLE, the bus transaction rate is the limit**, and it is mostly round-trip
 latency rather than the ECU. The connection interval is the floor: at a default of

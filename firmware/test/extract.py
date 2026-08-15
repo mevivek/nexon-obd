@@ -10,11 +10,12 @@ import sys
 import pathlib
 
 WANT = ["hexNib", "canIsoTp", "bleIsoTp", "obdIsoTp",
-        "pidLen", "applyPid", "mode01Walk", "pollBatch", "sampleBatchPids", "sampleMerge"]
+        "pidLen", "applyPid", "mode01Walk", "pollBatch", "sampleBatchPids", "sampleStaleMs", "sampleMerge"]
 
 # File-scope data the extracted functions reference. Pulled verbatim so the tests
 # exercise the real PID lists rather than a copy that can drift.
-WANT_VARS = ["PID_B1", "PID_B2", "PID_B3", "SAMPLE_ORDER"]
+WANT_VARS = ["PID_B1", "PID_B2", "PID_B3", "SAMPLE_ORDER",
+             "SAMPLE_STALE_MIN_MS", "SAMPLE_STALE_MAX_MS"]
 
 
 def extract(src: str, name: str) -> str:
@@ -37,8 +38,8 @@ def extract(src: str, name: str) -> str:
 
 
 def extract_var(src: str, name: str) -> str:
-    m = re.search(r"^static\s[^\n]*\b" + re.escape(name) + r"\s*\[[^\]]*\]\s*=[^;]*;",
-                  src, re.M)
+    m = re.search(r"^static\s[^\n]*\b" + re.escape(name) +
+                  r"\s*(?:\[[^\]]*\])?\s*=[^;]*;", src, re.M)
     if not m:
         sys.exit(f"extract: no definition of {name} found")
     return m.group(0)

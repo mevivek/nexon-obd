@@ -439,7 +439,23 @@ static const uint8_t SAMPLE_ORDER[4] = {0, 1, 0, 2};
 // Longest a cached batch may keep contributing to a published sample. Past this it
 // is dropped to NAN rather than presented as current - the dashboard then holds it
 // briefly and finally shows an em-dash, instead of a stale number reading as live.
-static const uint32_t SAMPLE_STALE_MS = 3000;
+//
+// This has to be derived from how often a batch is actually polled, not fixed. b2
+// and b3 come round once every four batches, so a flat 3 s only holds if a batch
+// completes in under 750 ms. Over BLE a batch is comfortably longer than that, and
+// those two batches then expire before their next turn - blanking twelve of the
+// twenty rows on every cycle. Three cycles of headroom, floored so a fast CAN link
+// still drops genuinely dead data promptly, and capped so a stall cannot leave
+// minutes-old numbers on screen.
+static const uint32_t SAMPLE_STALE_MIN_MS = 3000;
+static const uint32_t SAMPLE_STALE_MAX_MS = 20000;
+
+static uint32_t sampleStaleMs(uint32_t cycleMs) {
+  uint32_t w = cycleMs * 3;
+  if (w < SAMPLE_STALE_MIN_MS) w = SAMPLE_STALE_MIN_MS;
+  if (w > SAMPLE_STALE_MAX_MS) w = SAMPLE_STALE_MAX_MS;
+  return w;
+}
 
 static const uint8_t *sampleBatchPids(uint8_t b) {
   return (b == 0) ? PID_B1 : (b == 1) ? PID_B2 : PID_B3;
@@ -538,8 +554,10 @@ static uint32_t g_seq    = 0;      // increments per published sample
 static uint8_t  sampBuf[3][40];
 static uint8_t  sampLen[3]  = {0, 0, 0};
 static uint32_t sampStamp[3] = {0, 0, 0};
-static uint8_t  sampTurn    = 0;
-static uint32_t sampBatchMs = 0;     // how long the last batch took, for the log
+static uint8_t  sampTurn     = 0;
+static uint32_t sampBatchMs  = 0;    // how long the last batch took, for the log
+static uint32_t sampCycleMs  = 0;    // measured duration of one SAMPLE_ORDER pass
+static uint32_t sampCycleAt  = 0;
 
 // One batch per turn, and a fresh sample published after every one of them.
 //
@@ -562,8 +580,14 @@ static void samplerStep() {
     sampSharedMs = millis();
   }
 
+  const uint8_t turns = sizeof(SAMPLE_ORDER) / sizeof(SAMPLE_ORDER[0]);
   uint8_t b = SAMPLE_ORDER[sampTurn];
-  sampTurn = (uint8_t)((sampTurn + 1) % (sizeof(SAMPLE_ORDER) / sizeof(SAMPLE_ORDER[0])));
+  sampTurn = (uint8_t)((sampTurn + 1) % turns);
+  if (sampTurn == 0) {                 // a full pass just finished - time it
+    uint32_t now = millis();
+    if (sampCycleAt) sampCycleMs = now - sampCycleAt;
+    sampCycleAt = now;
+  }
 
   Live scratch;
   uint8_t buf[40], len = 0;
@@ -578,7 +602,8 @@ static void samplerStep() {
   }
 
   Live pub;
-  bool any = sampleMerge(pub, sampBuf, sampLen, sampStamp, millis(), SAMPLE_STALE_MS);
+  bool any = sampleMerge(pub, sampBuf, sampLen, sampStamp, millis(),
+                         sampleStaleMs(sampCycleMs));
 
   if (any && isnan(g_baro)) {
     Live t;
@@ -903,7 +928,8 @@ void loop() {
   static uint32_t lastLog = 0;
   if (millis() - lastLog > 3000) {
     lastLog = millis();
-    Serial.printf("[alive] up=%lus tr=%s can=%s ble=%s ap=%s clients=%u ecu=%s scan=%s batch=%lums\n",
+    Serial.printf("[alive] up=%lus tr=%s can=%s ble=%s ap=%s clients=%u ecu=%s scan=%s "
+                  "batch=%lums cycle=%lums stale=%lums\n",
                   millis() / 1000UL,
                   transportName(),
                   canUp ? "ok" : "FAIL",
@@ -912,7 +938,9 @@ void loop() {
                   WiFi.softAPgetStationNum(),
                   (millis() - lastEcuOkMs < 3000) ? "ok" : "silent",
                   scan.running ? "running" : "idle",
-                  (unsigned long)sampBatchMs);
+                  (unsigned long)sampBatchMs,
+                  (unsigned long)sampCycleMs,
+                  (unsigned long)sampleStaleMs(sampCycleMs));
   }
 
   // Re-pick the transport periodically while nothing is answering: covers the
