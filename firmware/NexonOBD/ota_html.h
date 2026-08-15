@@ -1,6 +1,7 @@
 #pragma once
 #include <pgmspace.h>
 #include "ui_css.h"
+#include "version.h"
 
 // Over-the-air firmware upload at http://192.168.4.1/update
 // Browser-based on purpose: no tooling needed, so a phone can flash the board
@@ -21,7 +22,7 @@ color:var(--ink2);font-size:14px}
 
 <header>
 <div class="bar"><h1>Firmware Update</h1>
-<span class="sub">over the air</span></div>
+<span class="sub">running v)rawliteral" FW_VERSION R"rawliteral(</span></div>
 <nav><a href="/">Live</a><a href="/scan">DID scanner</a><a class="on" href="/update">Firmware</a></nav>
 </header>
 

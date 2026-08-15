@@ -1,6 +1,7 @@
 #pragma once
 #include <pgmspace.h>
 #include "ui_css.h"
+#include "version.h"
 
 // Live gauge dashboard served at http://192.168.4.1/
 //
@@ -32,12 +33,13 @@ letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 .dial .gv .unit{margin-top:1px;font-size:10px;font-weight:400;color:var(--ink2)}
 .vital{grid-template-columns:repeat(auto-fit,minmax(158px,1fr));margin-top:8px}
 .value.sm{font-size:19px}
+@media(min-width:361px){.sub{display:inline}}
 .sep{color:var(--muted);margin:0 3px;font-weight:400}
 </style></head><body>
 
 <header>
 <div class="bar"><h1>Nexon Live</h1>
-<span class="sub">XIAO ESP32S3 &middot; CAN 11/500</span>
+<span class="sub">v)rawliteral" FW_VERSION R"rawliteral( &middot; <span id="tr">&mdash;</span></span>
 <div class="status"><span class="dot" id="dot"></span><span id="st">connecting&hellip;</span>
 <span id="hz" style="color:var(--muted)"></span></div></div>
 <nav><a class="on" href="/">Live</a><a href="/scan">DID scanner</a><a href="/update">Firmware</a></nav>
@@ -139,7 +141,11 @@ letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 </div>
 
 <script>
-const H=120,HOLD=2500,hist={rpm:[],boost:[],speed:[],coolant:[]},keep={};let rate=[];
+// HSLOT/HP mirror the firmware's history buffer: 600 slots at 6 s is one hour.
+// The board keeps that across restarts and serves it at /history, so the charts
+// have shape the moment the page loads instead of starting flat.
+const HSLOT=600,HP=6000,HOLD=2500,hist={rpm:[],boost:[],speed:[],coolant:[]},keep={};
+let rate=[],hb=0,miss=0,lastStatus='';
 // A sample can arrive with only some fields filled in: /data reports ok as soon as
 // any one of the three batched mode-01 requests answers, so a single batch timing
 // out sends six nulls and used to blank six gauges at once. Re-show the last known
@@ -164,11 +170,13 @@ e.setAttribute('d',arc(64,64,52,135,405));
 g.setAttribute('d',f<=.001?'':arc(64,64,52,135,135+270*f))}
 function spark(id,d,c,z){const e=document.getElementById(id);if(!e||d.length<2)return;
 const w=e.clientWidth||220,h=26,p=3;let lo=Math.min(...d),hi=Math.max(...d);if(z)lo=Math.min(0,lo);
-if(hi-lo<1e-6)hi=lo+1;const dx=w/(H-1);
+if(hi-lo<1e-6)hi=lo+1;const dx=w/(d.length-1);
 const pts=d.map((v,i)=>`${(i*dx).toFixed(1)},${(p+(h-2*p)*(1-(v-lo)/(hi-lo))).toFixed(1)}`).join(' ');
 e.setAttribute('viewBox',`0 0 ${w} ${h}`);
 e.innerHTML=`<polyline points="${pts}" fill="none" stroke="${c}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`}
-function push(k,v){if(v==null||isNaN(v))return;const a=hist[k];a.push(v);if(a.length>H)a.shift()}
+function push(k,v,fresh){if(v==null||isNaN(v))return;const a=hist[k];
+if(fresh||!a.length)a.push(v);else a[a.length-1]=v;
+if(a.length>HSLOT)a.shift()}
 const n=(v,d=1)=>(v==null||isNaN(v))?'—':Number(v).toFixed(d);
 const T=(i,s,q)=>{const e=document.getElementById(i);if(!e)return;e.textContent=s;e.classList.toggle('stale',!!q)};
 function F(i,on,c,m){const e=document.getElementById(i);if(!e)return;e.className='flag'+(on?' on '+c:'');if(on&&m)e.textContent=m}
@@ -220,17 +228,37 @@ F('voltF',vl||vh,'warn',vl?'⚠ not charging':'⚠ overcharging');
 T('runtime',hhmmss(v.runtime),q.runtime);
 // Only fresh readings enter the history - replaying a held value would draw a flat
 // run in the sparkline that the car never actually did.
-push('rpm',q.rpm?null:v.rpm);push('boost',qb?null:b);push('speed',q.speed?null:v.speed);push('coolant',q.coolant?null:v.coolant);
+const now=Date.now(),fresh=now-hb>=HP;if(fresh)hb=now;
+push('rpm',q.rpm?null:v.rpm,fresh);push('boost',qb?null:b,fresh);
+push('speed',q.speed?null:v.speed,fresh);push('coolant',q.coolant?null:v.coolant,fresh);
 spark('spRpm',hist.rpm,css('--blue'),1);spark('spBoost',hist.boost,css('--orange'),0);
 spark('spSpeed',hist.speed,css('--aqua'),1);spark('spCool',hist.coolant,css('--yellow'),0);
 document.getElementById('tb').innerHTML=ROWS.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td class="num${q[r[2]]?' stale':''}">${n(v[r[2]],r[4])}</td><td>${r[3]}</td></tr>`).join('')}
-function st(c,t){document.getElementById('dot').className='dot '+c;document.getElementById('st').textContent=t}
+function st(c,t){if(t===lastStatus)return;lastStatus=t;
+document.getElementById('dot').className='dot '+c;document.getElementById('st').textContent=t}
+// One failed poll is not "the ECU is gone". A dropped reply happens - the values are
+// held through it anyway - so the status only changes after MISS_MAX consecutive
+// failures. Without this the text flipped between live and "no response" about once
+// a second, which reads as a fault when nothing is actually wrong.
+const MISS_MAX=5;
 async function tick(){try{const r=await fetch('/data',{cache:'no-store'});const j=await r.json();
-if(j.ok){const[v,q,held]=merge(j.v);render(v,q);
+if(j.ok){miss=0;const[v,q,held]=merge(j.v);render(v,q);
 rate.push(Date.now());if(rate.length>20)rate.shift();
+if(j.tr)T('tr',j.tr);
 st('live',held?'live · holding '+held:'live');
 document.getElementById('hz').textContent=hz()}
-else st('stale',j.error||'no data')}catch(e){st('dead','ESP32 unreachable')}
+else if(++miss>=MISS_MAX){rate.length=0;st('stale',j.error||'no data');
+document.getElementById('hz').textContent=''}}
+catch(e){if(++miss>=MISS_MAX)st('dead','ESP32 unreachable')}
 finally{setTimeout(tick,120)}}
-tick();
+// Seed the charts from the board's stored hour before the first poll lands.
+async function seed(){try{
+ const h=await(await fetch('/history',{cache:'no-store'})).json();
+ for(const k of ['rpm','speed','boost','coolant'])
+  if(Array.isArray(h[k]))hist[k]=h[k].filter(x=>x!=null&&!isNaN(x));
+ hb=Date.now();
+ spark('spRpm',hist.rpm,css('--blue'),1);spark('spBoost',hist.boost,css('--orange'),0);
+ spark('spSpeed',hist.speed,css('--aqua'),1);spark('spCool',hist.coolant,css('--yellow'),0);
+}catch(e){}}
+seed().then(tick);
 </script></body></html>)rawliteral";

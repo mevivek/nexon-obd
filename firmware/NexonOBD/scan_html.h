@@ -1,6 +1,7 @@
 #pragma once
 #include <pgmspace.h>
 #include "ui_css.h"
+#include "version.h"
 
 // UDS DID scanner UI at http://192.168.4.1/scan
 // Service 0x22 reads only - the page cannot issue any state-changing service.
@@ -23,7 +24,7 @@ R"rawliteral(
 
 <header>
 <div class="bar"><h1>DID Scanner</h1>
-<span class="sub">UDS service 0x22</span>
+<span class="sub">v)rawliteral" FW_VERSION R"rawliteral( &middot; service 0x22</span>
 <div class="status"><span class="dot" id="dot"></span><span id="state">idle</span></div></div>
 <nav><a href="/">Live</a><a class="on" href="/scan">DID scanner</a><a href="/update">Firmware</a></nav>
 </header>

@@ -52,17 +52,48 @@ function fakeDom() {
   };
 }
 
-// Load a page's script wholesale, so the tests drive the shipped render() rather
-// than a reimplementation of it. fetch/setTimeout are inert, so the tick() call at
-// the end of the script starts and then parks without doing anything.
-function load(file) {
+// Load a page's script wholesale, so the tests drive the shipped render() and
+// tick() rather than a reimplementation of them.
+//
+// fetch and setTimeout are supplied by the harness: /data answers come from a queue
+// the test fills, and the self-rescheduling tick is captured instead of run, so a
+// poll loop can be stepped one iteration at a time.
+const flush = () => new Promise(r => setImmediate(r));
+
+function load(file, opts = {}) {
   const js = scriptsOf(pageSource(file))[0];
   const dom = fakeDom();
+  const queue = [];
+  let pending = null;
+
+  const fetchImpl = (url) => {
+    if (String(url).startsWith('/history')) {
+      return Promise.resolve({ json: () => Promise.resolve(opts.history || {}) });
+    }
+    if (!queue.length) return new Promise(() => {});      // park: no more scripted polls
+    const r = queue.shift();
+    if (r === 'offline') return Promise.reject(new Error('offline'));
+    return Promise.resolve({ json: () => Promise.resolve(r) });
+  };
+  const setTimeoutImpl = (fn) => { pending = fn; return 0; };
+
   const api = new Function(
     'document', 'getComputedStyle', 'fetch', 'setTimeout',
     js + '\n;return { merge, render, hz };'
-  )(dom.document, dom.getComputedStyle, () => new Promise(() => {}), () => 0);
-  return { ...api, el: dom.el };
+  )(dom.document, dom.getComputedStyle, fetchImpl, setTimeoutImpl);
+
+  return {
+    ...api, el: dom.el, queue,
+    // Exactly one poll per call: run whatever tick() last rescheduled, then let the
+    // promises settle. The first call has nothing scheduled yet and simply lets
+    // seed().then(tick) get going. Firing at the end instead would run an extra
+    // tick that parks on the empty queue and kills the loop.
+    async step() {
+      const fn = pending; pending = null;
+      if (fn) fn();
+      for (let i = 0; i < 8; i++) await flush();
+    },
+  };
 }
 
 // ---------------------------------------------------------------- suites
@@ -171,6 +202,62 @@ function suiteRate(label, m) {
   ok(typeof s === 'string', 'hz() returns a string');
 }
 
+async function suiteStatus(label, file) {
+  console.log(`\n${label} — status hysteresis`);
+  const m = load(file);
+  const good = { ok: true, tr: 'can', v: { rpm: 800, speed: 0, coolant: 88, map: 100, baro: 100 } };
+  const bad = { ok: false, error: 'no response from ECU (ignition off?)' };
+  const text = () => m.el('st').textContent;
+
+  m.queue.push(good);
+  await m.step();
+  eq(text(), 'live', 'a good sample reads live');
+
+  // Four dropped polls in a row is a rough patch, not a dead ECU. This is the
+  // flicker: the values are held through it, so the status must be too.
+  m.queue.push(bad, bad, bad, bad);
+  for (let i = 0; i < 4; i++) { await m.step(); }
+  eq(text(), 'live', 'four consecutive failures do not change the status');
+
+  m.queue.push(bad);
+  await m.step();
+  eq(text(), 'no response from ECU (ignition off?)', 'the fifth does');
+
+  m.queue.push(good);
+  await m.step();
+  eq(text(), 'live', 'recovering clears it');
+
+  // ...and the counter reset means it takes a fresh run of five to trip again.
+  m.queue.push(bad, bad, bad, bad);
+  for (let i = 0; i < 4; i++) { await m.step(); }
+  eq(text(), 'live', 'the miss counter reset on success');
+
+  // A transport failure is the same story.
+  const n = load(file);
+  n.queue.push(good, 'offline', 'offline');
+  await n.step(); await n.step(); await n.step();
+  eq(n.el('st').textContent, 'live', 'two fetch failures do not report the board unreachable');
+}
+
+async function suiteSeed(label, file) {
+  console.log(`\n${label} — history seeding`);
+  const hist = { period: 6, n: 300, rpm: [], speed: [], boost: [], coolant: [] };
+  for (let i = 0; i < 300; i++) {
+    hist.rpm.push(1000 + i); hist.speed.push(i % 90);
+    hist.boost.push(-0.2 + i / 1000); hist.coolant.push(70 + i / 20);
+  }
+  // One null in the middle, as the board emits for a slot it never filled.
+  hist.speed[100] = null;
+
+  const m = load(file, { history: hist });
+  await m.step();
+  const pts = (m.el('spSpeed').innerHTML.match(/points="([^"]*)"/) || [, ''])[1];
+  const n = pts ? pts.trim().split(/\s+/).length : 0;
+  ok(n > 200, `sparkline is seeded from the board's history (${n} points, not flat)`);
+  ok(!/NaN/.test(m.el('spSpeed').innerHTML), 'nulls in the stored history do not produce NaN geometry');
+  ok(/^0[,.]/.test(pts) || pts.startsWith('0,'), 'the trace starts at the left edge');
+}
+
 // ---------------------------------------------------------------- syntax
 //
 // The firmware pages are JavaScript inside C++ raw string literals, so nothing in
@@ -200,6 +287,11 @@ for (const [label, file, ids] of PAGES) {
   suiteFlags(label, load(file), ids);
   suiteRate(label, load(file));
 }
+
+// Hysteresis and seeding are firmware-page behaviour; the laptop dashboard is
+// served by a different tool and has its own polling loop.
+await suiteStatus('firmware dashboard (dashboard_html.h)', '../NexonOBD/dashboard_html.h');
+await suiteSeed('firmware dashboard (dashboard_html.h)', '../NexonOBD/dashboard_html.h');
 
 console.log(`\n${ran} checks, ${failed} failed`);
 process.exit(failed ? 1 : 0);

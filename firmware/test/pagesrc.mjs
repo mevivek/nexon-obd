@@ -26,17 +26,31 @@ function uiCss() {
   return cssCache;
 }
 
+// The pages splice the version literal in the same way they splice the stylesheet.
+let verCache = null;
+export function fwVersion() {
+  if (verCache === null) {
+    const src = readFileSync(join(here, '../NexonOBD/version.h'), 'utf8');
+    const m = src.match(/#define\s+FW_VERSION\s+"([^"]+)"/);
+    if (!m) throw new Error('no FW_VERSION in version.h');
+    verCache = m[1];
+  }
+  return verCache;
+}
+
 // file is relative to firmware/test/.
 export function pageSource(file) {
   const src = readFileSync(join(here, file), 'utf8');
   if (file.endsWith('.html')) return src;          // already plain HTML
 
   let out = '';
-  const re = /R"rawliteral\(([\s\S]*?)\)rawliteral"|\bUI_CSS\b/g;
+  const re = /R"rawliteral\(([\s\S]*?)\)rawliteral"|\bUI_CSS\b|\bFW_VERSION\b/g;
   let m, found = false;
   while ((m = re.exec(src)) !== null) {
     found = true;
-    out += m[1] !== undefined ? m[1] : uiCss();
+    if (m[1] !== undefined) out += m[1];
+    else if (m[0] === 'UI_CSS') out += uiCss();
+    else out += fwVersion();
   }
   if (!found) throw new Error(`no page literal in ${file}`);
   return out;

@@ -20,6 +20,8 @@
 #include "driver/twai.h"
 #include "obd_types.h"
 #include "elm_ble.h"
+#include "version.h"
+#include "history.h"
 #include <Update.h>
 #include "dashboard_html.h"
 #include "scan_html.h"
@@ -93,9 +95,20 @@ static bool canBegin() {
   return true;
 }
 
+// Drain until the bus has actually gone quiet, not just until the queue happens to
+// be empty this instant.
+//
+// A request that timed out mid-reassembly leaves its consecutive frames still in
+// flight. A single non-blocking drain returns before they land, so they arrive
+// inside the *next* request's read loop, where a stale CF with the wrong sequence
+// number kills a perfectly good exchange - one failed poll turning into a run of
+// them, which is what made the status text flicker between live and "no response".
 static void canFlush() {
   twai_message_t m;
-  while (twai_receive(&m, 0) == ESP_OK) { /* drop stale frames */ }
+  uint32_t quietSince = millis();
+  while (millis() - quietSince < 4) {
+    if (twai_receive(&m, pdMS_TO_TICKS(1)) == ESP_OK) quietSince = millis();
+  }
 }
 
 static bool canSend(uint32_t id, const uint8_t *d, uint8_t len) {
@@ -435,19 +448,24 @@ static void jsonNum(String &s, const char *k, float v, int dp) {
   s += ",";
 }
 
+static const char *transportName();
+
 static uint32_t lastEcuOkMs;
 static bool     everSawEcu = false;
 
 static void handleData() {
   Live L = pollAll();
   if (L.ok) { lastEcuOkMs = millis(); everSawEcu = true; }   // real reply resets the sleep timer
+  histTick(L);
   String s = "{";
   if (!L.ok) {
     s += "\"ok\":false,\"error\":\"no response from ECU (ignition off?)\"}";
     server.send(200, "application/json", s);
     return;
   }
-  s += "\"ok\":true,\"v\":{";
+  s += "\"ok\":true,\"fw\":\"" FW_VERSION "\",\"tr\":\"";
+  s += transportName();
+  s += "\",\"v\":{";
   jsonNum(s, "rpm", L.rpm, 0);        jsonNum(s, "speed", L.speed, 0);
   jsonNum(s, "map", L.map_, 0);       jsonNum(s, "baro", L.baro, 0);
   jsonNum(s, "throttle", L.throttle, 1); jsonNum(s, "load", L.load, 1);
@@ -556,6 +574,38 @@ static void handleDtc() {
   server.send(200, "application/json", s);
 }
 
+// Trend history, oldest first. Chunked because the full hour is ~14 KB of JSON and
+// assembling that in one String risks the heap on a board this size.
+static void handleHistory() {
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json", "");
+
+  char head[96];
+  snprintf(head, sizeof(head), "{\"period\":%lu,\"n\":%u,",
+           (unsigned long)(HIST_PERIOD_MS / 1000), histCount);
+  server.sendContent(head);
+
+  const char *names[4] = {"rpm", "speed", "boost", "coolant"};
+  for (int series = 0; series < 4; series++) {
+    String chunk = "\"";
+    chunk += names[series];
+    chunk += "\":[";
+    for (uint16_t i = 0; i < histCount; i++) {
+      const HistSlot &h = histBuf[histIndex(i)];
+      int16_t raw = series == 0 ? h.rpm : series == 1 ? h.speed
+                  : series == 2 ? h.boost : h.coolant;
+      if (i) chunk += ",";
+      if (raw == HIST_NONE) chunk += "null";
+      else if (series == 2) chunk += String(raw / 100.0f, 2);   // centibar -> bar
+      else chunk += raw;
+      if (chunk.length() > 1024) { server.sendContent(chunk); chunk = ""; }
+    }
+    chunk += (series == 3) ? "]}" : "],";
+    server.sendContent(chunk);
+  }
+  server.sendContent("");
+}
+
 // ---------------------------------------------------------------- OTA
 
 // Browser-driven OTA. The ESP32 writes into the inactive OTA partition and only
@@ -625,6 +675,7 @@ static void chooseTransport() {
 
 void setup() {
   Serial.begin(115200);
+  Serial.println("[fw] NexonOBD " FW_VERSION);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);        // solid on through boot, so power is visible
   delay(300);
@@ -645,11 +696,13 @@ void setup() {
   server.on("/update", HTTP_POST, handleOtaDone, handleOtaUpload);
   server.on("/data",        handleData);
   server.on("/dtc",         handleDtc);
+  server.on("/history",     handleHistory);
   server.on("/scan/start",  handleScanStart);
   server.on("/scan/stop",   handleScanStop);
   server.on("/scan/status", handleScanStatus);
   server.begin();
 
+  histBegin();
   lastEcuOkMs = millis();
   chooseTransport();
 }
@@ -693,6 +746,7 @@ void loop() {
   // bench board with no transceiver wired would sleep mid-test and look dead.
   if (everSawEcu && millis() - lastEcuOkMs > IDLE_SLEEP_MS) {
     Serial.println("[pwr] idle - deep sleep");
+    histSave();
     twai_stop();
     twai_driver_uninstall();
     esp_sleep_enable_timer_wakeup(SLEEP_WAKE_US);

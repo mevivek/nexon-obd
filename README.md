@@ -30,7 +30,11 @@ it says so.
 | `/scan` | UDS service `0x22` identifier sweep, with CSV export |
 | `/update` | Upload a new `.bin` over Wi-Fi |
 | `/dtc` | Stored + pending fault codes as JSON |
-| `/data` | Current sample as JSON |
+| `/data` | Current sample as JSON, plus firmware version and active transport |
+| `/history` | The stored trend buffer as JSON |
+
+The header shows the running firmware version and which transport is actually live
+(`can` or `ble`), so a flashed image can be confirmed at a glance.
 
 A poll can come back with only some of its PIDs — the dashboard reads them in three
 batched requests, and one batch can time out while the others answer. When that
@@ -39,6 +43,31 @@ reports `live · holding N`. After 2.5 s without a fresh value they fall back to
 rather than showing stale data indefinitely, and a held reading never raises or
 sustains a warning — a value from two seconds ago cannot tell you whether the engine
 is still overheating.
+
+A single dropped poll is not reported as a fault either — the status only changes to
+`no response from ECU` after five consecutive failures. Dropped replies happen, the
+values are held through them, and flipping the status on each one reads as a problem
+when nothing is wrong.
+
+### Trend history
+
+The board keeps one hour of RPM, speed, boost and coolant at 6-second resolution and
+serves it at `/history`, so the sparklines have shape the moment the page loads
+instead of starting flat.
+
+It survives restarts, which matters more than it sounds: OBD pin 16 is permanently
+live, so the board never really power-cycles — it deep-sleeps after 10 minutes idle
+and wakes every 30 s, running `setup()` each time. History in ordinary RAM would be
+wiped every time you got back in the car.
+
+| Store | Survives | Written |
+|---|---|---|
+| RTC slow memory (4.8 KB) | deep sleep | every 6 s, free |
+| NVS (flash) | power loss | before sleeping, and every 10 min |
+
+Flash is deliberately written rarely — a 4.8 KB blob every few seconds would burn
+endurance to save data nobody misses. An unexpected power cut costs the last few
+minutes, nothing more.
 
 The onboard LED encodes state, which matters when the board is hidden under the dash:
 
@@ -111,9 +140,12 @@ First run installs `arduino-cli` and the ESP32 core into `firmware/.toolchain/`
 (~6 GB unpacked, several minutes) and reuses them after that. Nothing lands outside
 the repo, so deleting `firmware/.toolchain/` undoes the install completely.
 
-The output you want is **`firmware/build/NexonOBD.ino.bin`** — the app image, which is
-what `/update` takes. `NexonOBD.ino.merged.bin` in the same directory is a full-flash
-image for USB recovery; feeding *that* to `/update` will not work.
+The output you want is **`firmware/build/NexonOBD-v<version>.bin`** — the app image,
+which is what `/update` takes. The version comes from
+[`firmware/NexonOBD/version.h`](firmware/NexonOBD/version.h); bump it there and the
+filename, the dashboard header and the serial banner all follow.
+`NexonOBD.ino.merged.bin` in the same directory is a full-flash image for USB
+recovery; feeding *that* to `/update` will not work.
 
 By hand, if you would rather not use the script:
 
@@ -127,7 +159,8 @@ arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32S3 --output-dir build firmware/
 arduino-cli upload -p COM3 --fqbn esp32:esp32:XIAO_ESP32S3 firmware/NexonOBD
 ```
 
-Current size: **1.21 MB flash (36 %)**, 48 KB RAM (14 %).
+Current size: **1.22 MB flash (36 %)**, 48 KB RAM (14 %), plus 4.8 KB of RTC
+slow memory for the trend buffer.
 
 The default `default_8MB` partition already provides `ota_0` + `ota_1` at 3.19 MB each,
 so OTA works without changing the partition scheme.
@@ -159,8 +192,9 @@ code, since that is the state that used to blank the dashboard.
 
 ### OTA
 
-Run `firmware/build.sh`, join `NexonOBD`, and upload `firmware/build/NexonOBD.ino.bin`
-at `http://192.168.4.1/update`.
+Run `firmware/build.sh`, join `NexonOBD`, and upload
+`firmware/build/NexonOBD-v<version>.bin` at `http://192.168.4.1/update`. The header
+shows the new version once it reboots, which is how you confirm the flash took.
 
 The board runs from `app0`; an upload streams into `app1`; `otadata` only flips once
 `Update.end()` verifies the image, then it reboots. An interrupted or corrupt upload never

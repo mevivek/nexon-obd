@@ -73,8 +73,22 @@ const server = http.createServer((req, res) => {
   const url = req.url.split('?')[0];
   if (url === '/data') {
     res.writeHead(200, { 'content-type': 'application/json' });
-    return res.end(JSON.stringify(ok ? { ok: true, v: sample }
+    return res.end(JSON.stringify(ok ? { ok: true, fw: 'test', tr: 'can', v: sample }
                                      : { ok: false, error: 'no response from ECU (ignition off?)' }));
+  }
+  if (url === '/history') {
+    // Stands in for the board's stored hour, so the shots show charts with the
+    // shape they have on a page that has only just loaded.
+    const n = 600, h = { period: 6, n, rpm: [], speed: [], boost: [], coolant: [] };
+    for (let i = 0; i < n; i++) {
+      const t = i / n;
+      h.rpm.push(Math.round(1500 + 850 * Math.sin(t * 7.1) + 260 * Math.sin(t * 23)));
+      h.speed.push(Math.round(36 + 22 * Math.sin(t * 4.3) + 5 * Math.sin(t * 17)));
+      h.boost.push(+(-0.22 + 0.48 * Math.sin(t * 6.4) + 0.07 * Math.sin(t * 19)).toFixed(2));
+      h.coolant.push(Math.round(74 + 15 * t + 1.2 * Math.sin(t * 9)));
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify(h));
   }
   if (url === '/dtc') {
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -118,23 +132,10 @@ for (const [width, wname] of WIDTHS) {
     await page.goto(`${base}/`);
     await page.waitForTimeout(700);
 
-    // Filling the 120-sample history honestly would mean idling here for 15 s per
-    // shot, and a 7-sample sparkline is a stub that says nothing about the design.
-    // Seed it with a plausible trace instead; the page keeps appending on top.
-    await page.evaluate(() => {
-      if (typeof hist === 'undefined') return;
-      for (const k of Object.keys(hist)) hist[k].length = 0;
-      for (let i = 0; i < 120; i++) {
-        const t = i / 120;
-        hist.rpm.push(1500 + 850 * Math.sin(t * 7.1) + 260 * Math.sin(t * 23));
-        hist.speed.push(36 + 22 * Math.sin(t * 4.3) + 5 * Math.sin(t * 17));
-        hist.boost.push(-0.22 + 0.48 * Math.sin(t * 6.4) + 0.07 * Math.sin(t * 19));
-        hist.coolant.push(74 + 15 * t + 1.2 * Math.sin(t * 9));
-      }
-    });
-
     if (sname === 'no-data') ok = false; else sample = s;
-    await page.waitForTimeout(600);
+    // The status only flips after five consecutive failures, so the no-data shot
+    // needs longer than one poll interval to actually reach that state.
+    await page.waitForTimeout(sname === 'no-data' ? 1600 : 700);
 
     const f = join(outDir, `dashboard-${wname}-${sname}.png`);
     await page.screenshot({ path: f, fullPage: true });

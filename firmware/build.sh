@@ -63,14 +63,24 @@ fi
 echo "==> host tests"
 "$HERE/test/run.sh"
 
-echo "==> compiling"
+VERSION=$(sed -n 's/.*#define[[:space:]]\+FW_VERSION[[:space:]]\+"\([^"]*\)".*/\1/p' \
+          "$HERE/NexonOBD/version.h")
+[ -n "$VERSION" ] || { echo "could not read FW_VERSION from version.h" >&2; exit 1; }
+
+echo "==> compiling v$VERSION"
 "$CLI" compile --fqbn "$FQBN" --output-dir "$OUT" --warnings default "$HERE/NexonOBD"
 
+# Name the image after the version so a .bin sitting in a downloads folder still
+# says which build it is. arduino-cli always writes NexonOBD.ino.bin, so copy.
+IMAGE="$OUT/NexonOBD-v$VERSION.bin"
+cp "$OUT/NexonOBD.ino.bin" "$IMAGE"
+
 echo
-echo "OTA image: $OUT/NexonOBD.ino.bin"
-ls -lh "$OUT/NexonOBD.ino.bin"
+echo "OTA image: $IMAGE"
+ls -lh "$IMAGE"
 echo
 echo "Upload it at http://192.168.4.1/update after joining the board's Wi-Fi."
+echo "The dashboard header shows v$VERSION once it boots, so you can confirm it took."
 echo "NexonOBD.ino.merged.bin is a full-flash image for USB recovery - do NOT"
 echo "feed that one to /update, it is not an OTA app image."
 
