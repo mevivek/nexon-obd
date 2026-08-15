@@ -188,6 +188,7 @@ live values update slowly. It keeps going if you leave this page.</div>
 // The board keeps that across restarts and serves it at /history, so the charts
 // have shape the moment the page loads instead of starting flat.
 const HSLOT=600,HP=6000,HOLD=2500,hist={rpm:[],boost:[],speed:[],coolant:[]},keep={};
+let tbInit=false;
 // How much of a drive there has to be before an average means anything.
 const TRIP_MIN_KM=0.5,TRIP_MIN_L=0.1;
 let rate=[],hb=0,miss=0,lastStatus='',lastSeq=-1,alive=true;
@@ -315,7 +316,17 @@ push('rpm',q.rpm?null:v.rpm,fresh);push('boost',qb?null:b,fresh);
 push('speed',q.speed?null:v.speed,fresh);push('coolant',q.coolant?null:v.coolant,fresh);
 spark('spRpm',hist.rpm,css('--blue'),1);spark('spBoost',hist.boost,css('--orange'),0);
 spark('spSpeed',hist.speed,css('--aqua'),1);spark('spCool',hist.coolant,css('--yellow'),0);
-document.getElementById('tb').innerHTML=ROWS.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td class="num${q[r[2]]?' stale':''}">${n(v[r[2]],r[4])}</td><td>${r[3]}</td></tr>`).join('')}
+if(!tbInit){
+document.getElementById('tb').innerHTML=ROWS.map((r,i)=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td id="tr_${i}" class="num"></td><td>${r[3]}</td></tr>`).join('');
+tbInit=true;
+}
+for(let i=0;i<ROWS.length;i++){
+ const r=ROWS[i];
+ const td=document.getElementById('tr_'+i);
+ td.className='num'+(q[r[2]]?' stale':'');
+ td.textContent=n(v[r[2]],r[4]);
+}
+}
 function st(c,t){if(t===lastStatus)return;lastStatus=t;
 document.getElementById('dot').className='dot '+c;document.getElementById('st').textContent=t}
 // One failed poll is not "the ECU is gone". A dropped reply happens - the values are
