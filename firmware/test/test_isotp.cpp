@@ -254,6 +254,30 @@ static void test_batch_rejects_misframed() {
   ok(isnan(L.rpm), "nothing from a misframed reply is applied");
 }
 
+static void test_new_pid_lengths() {
+  printf("pidLen: the demand/delivery PIDs\n");
+  // A wrong length is not a wrong number - mode01Walk validates against pidLen, so
+  // it rejects the batch outright. That is the safety net for PIDs added without a
+  // car to check them against, but it means the lengths have to be right or those
+  // readings simply never appear.
+  eq(pidLen(0x49), 1, "accelerator pedal D is one byte");
+  eq(pidLen(0x4A), 1, "accelerator pedal E is one byte");
+  eq(pidLen(0x4C), 1, "commanded throttle is one byte");
+  eq(pidLen(0x61), 1, "demanded torque is one byte");
+  eq(pidLen(0x62), 1, "actual torque is one byte");
+  eq(pidLen(0x43), 2, "absolute load is two");
+  eq(pidLen(0x63), 2, "reference torque is two");
+
+  // ...and a b4 reply has to walk cleanly end to end with those lengths.
+  uint8_t reply[] = {0x41, 0x49, 0x33, 0x4A, 0x34, 0x4C, 0x28,
+                     0x61, 0x8C, 0x62, 0x8A, 0x43, 0x00, 0x64};
+  Live L;
+  eq(mode01Walk(reply, sizeof(reply), PID_B4, 6, &L), 6, "a full b4 reply verifies");
+  eq((int)L.pedalD, 20, "pedal decodes");            // 0x33 * 100 / 255
+  eq((int)L.torqDem, 15, "demanded torque decodes"); // 0x8C - 125
+  eq((int)L.torqAct, 13, "actual torque decodes");   // 0x8A - 125
+}
+
 static void test_mode01_walk() {
   printf("mode01Walk: verification\n");
   static const uint8_t pids[2] = {0x0C, 0x05};
@@ -305,13 +329,17 @@ static void test_pick_backoff() {
 
 static void test_sample_order_favours_live_values() {
   printf("SAMPLE_ORDER: b1 gets the most turns\n");
-  int count[3] = {0, 0, 0};
+  int count[4] = {0, 0, 0, 0};
   for (size_t i = 0; i < sizeof(SAMPLE_ORDER) / sizeof(SAMPLE_ORDER[0]); i++)
     count[SAMPLE_ORDER[i]]++;
   // b1 is rpm, speed, MAP, throttle, load, coolant - everything with a sparkline.
   // On BLE each batch is a full round trip, so giving all three equal billing held
   // the values that actually move to a third of the achievable rate.
   ok(count[0] > count[1] && count[0] > count[2], "b1 is polled more often than b2/b3");
+  // b4 is pedal, commanded throttle and torque - driver input and the engine's
+  // answer to it. A pedal position sampled every few seconds says nothing, so it
+  // rides at b1's cadence rather than with the temperatures.
+  eq(count[3], count[0], "b4 keeps pace with b1");
   ok(count[1] > 0 && count[2] > 0, "the slower batches are still polled");
 }
 
@@ -330,9 +358,9 @@ static void test_stale_window_tracks_the_cycle() {
 
 static void test_sample_merge_combines_batches() {
   printf("sampleMerge: a published sample carries every fresh batch\n");
-  uint8_t bufs[3][40] = {};
-  uint8_t lens[3] = {0, 0, 0};
-  uint32_t stamps[3] = {0, 0, 0};
+  uint8_t bufs[4][40] = {};
+  uint8_t lens[4] = {0, 0, 0, 0};
+  uint32_t stamps[4] = {0, 0, 0, 0};
 
   // b1 answered: 41 0C 0AF0 0D 00
   const uint8_t r1[] = {0x41, 0x0C, 0x0A, 0xF0, 0x0D, 0x00};
@@ -350,9 +378,9 @@ static void test_sample_merge_combines_batches() {
 
 static void test_sample_merge_drops_stale() {
   printf("sampleMerge: a batch that stopped answering is dropped\n");
-  uint8_t bufs[3][40] = {};
-  uint8_t lens[3] = {0, 0, 0};
-  uint32_t stamps[3] = {0, 0, 0};
+  uint8_t bufs[4][40] = {};
+  uint8_t lens[4] = {0, 0, 0, 0};
+  uint32_t stamps[4] = {0, 0, 0, 0};
 
   const uint8_t r1[] = {0x41, 0x0C, 0x0A, 0xF0};
   memcpy(bufs[0], r1, sizeof(r1)); lens[0] = sizeof(r1); stamps[0] = 10000;
@@ -369,9 +397,9 @@ static void test_sample_merge_drops_stale() {
 
 static void test_sample_merge_nothing_fresh() {
   printf("sampleMerge: everything stale\n");
-  uint8_t bufs[3][40] = {};
-  uint8_t lens[3] = {0, 0, 0};
-  uint32_t stamps[3] = {0, 0, 0};
+  uint8_t bufs[4][40] = {};
+  uint8_t lens[4] = {0, 0, 0, 0};
+  uint32_t stamps[4] = {0, 0, 0, 0};
   const uint8_t r1[] = {0x41, 0x0C, 0x0A, 0xF0};
   memcpy(bufs[0], r1, sizeof(r1)); lens[0] = sizeof(r1); stamps[0] = 1000;
 
@@ -416,6 +444,7 @@ int main() {
   test_ble_no_data();
   test_ble_negative();
 
+  test_new_pid_lengths();
   test_mode01_walk();
   test_batch_complete();
   test_batch_retries_for_a_complete_reply();

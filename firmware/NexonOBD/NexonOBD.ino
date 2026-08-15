@@ -305,7 +305,8 @@ static int obdIsoTp(uint32_t reqId, uint32_t rspId,
 // Data-field byte count per SAE J1979 PID.
 static uint8_t pidLen(uint8_t pid) {
   switch (pid) {
-    case 0x0C: case 0x1F: case 0x3C: case 0x42: case 0x5E: return 2;
+    case 0x0C: case 0x1F: case 0x3C: case 0x42: case 0x5E:
+    case 0x43: case 0x63: return 2;
     case 0x34: return 4;
     default:   return 1;
   }
@@ -333,6 +334,18 @@ static void applyPid(Live &L, uint8_t pid, const uint8_t *d) {
     case 0x46: L.ambient  = A - 40;              break;
     case 0x5C: L.oil      = A - 40;              break;
     case 0x5E: L.fuelRate = (256 * A + B) / 20.0f; break;
+    // Driver demand -> ECU decision -> delivered torque. Scalings are the J1979
+    // ones; they have not been checked against this car, which is what the torque
+    // question in FINDINGS is about. A wrong *length* would be caught by
+    // mode01Walk, but a wrong scaling would not, so treat the numbers as
+    // provisional until they have been watched under load.
+    case 0x43: L.absLoad     = (256 * A + B) * 100.0f / 255.0f; break;
+    case 0x49: L.pedalD      = A * 100.0f / 255.0f; break;
+    case 0x4A: L.pedalE      = A * 100.0f / 255.0f; break;
+    case 0x4C: L.cmdThrottle = A * 100.0f / 255.0f; break;
+    case 0x61: L.torqDem     = A - 125.0f;          break;
+    case 0x62: L.torqAct     = A - 125.0f;          break;
+    case 0x63: L.torqRef     = 256 * A + B;         break;
   }
 }
 
@@ -420,11 +433,19 @@ static bool pollBatch(Live &L, const uint8_t *pids, uint8_t n,
 }
 
 static float g_baro = NAN;
+// Engine reference torque (PID 63) is a constant for the engine, and PIDs 61/62
+// report torque as a percentage of it - so it is read once and cached, like baro,
+// rather than spending a slot in every rotation.
+static float g_torqRef = NAN;
 
 // The three batched mode-01 requests that make up one sample.
 static const uint8_t PID_B1[6] = {0x0C, 0x0D, 0x0B, 0x11, 0x04, 0x05};
 static const uint8_t PID_B2[6] = {0x5C, 0x0F, 0x42, 0x06, 0x07, 0x5E};
 static const uint8_t PID_B3[6] = {0x34, 0x3C, 0x0E, 0x1F, 0x46, 0x2F};
+// Driver demand and the engine's answer to it. Grouped together and polled at b1's
+// cadence because these are the fastest-moving values on the car - a pedal input
+// sampled every few seconds tells you nothing.
+static const uint8_t PID_B4[6] = {0x49, 0x4A, 0x4C, 0x61, 0x62, 0x43};
 
 // Which batch to poll on each turn.
 //
@@ -434,7 +455,9 @@ static const uint8_t PID_B3[6] = {0x34, 0x3C, 0x0E, 0x1F, 0x46, 0x2F};
 // justify equal billing, and on BLE every batch is a full ELM round trip, so equal
 // billing is exactly what was holding the interesting numbers to a third of the
 // achievable rate.
-static const uint8_t SAMPLE_ORDER[4] = {0, 1, 0, 2};
+// b1 and b4 are the fast pair - what the car is doing and what the driver asked for.
+// b2 and b3 are temperatures, trims and the like, which do not need equal billing.
+static const uint8_t SAMPLE_ORDER[6] = {0, 3, 1, 0, 3, 2};
 
 // Longest a cached batch may keep contributing to a published sample. Past this it
 // is dropped to NAN rather than presented as current - the dashboard then holds it
@@ -458,18 +481,19 @@ static uint32_t sampleStaleMs(uint32_t cycleMs) {
 }
 
 static const uint8_t *sampleBatchPids(uint8_t b) {
-  return (b == 0) ? PID_B1 : (b == 1) ? PID_B2 : PID_B3;
+  return (b == 0) ? PID_B1 : (b == 1) ? PID_B2 : (b == 2) ? PID_B3 : PID_B4;
 }
+static const uint8_t SAMPLE_BATCHES = 4;
 
 // Rebuild a sample from whichever cached batches are still fresh.
 //
 // Caching the accepted bytes rather than merging three Live structs means the
 // staleness rule is one timestamp per batch, and re-walking is the same verified
 // parse that accepted them in the first place.
-static bool sampleMerge(Live &out, const uint8_t bufs[3][40], const uint8_t *lens,
+static bool sampleMerge(Live &out, const uint8_t bufs[4][40], const uint8_t *lens,
                         const uint32_t *stamps, uint32_t now, uint32_t staleMs) {
   bool any = false;
-  for (uint8_t b = 0; b < 3; b++) {
+  for (uint8_t b = 0; b < SAMPLE_BATCHES; b++) {
     if (!lens[b] || !stamps[b]) continue;
     if (now - stamps[b] > staleMs) continue;
     if (mode01Walk(bufs[b], lens[b], sampleBatchPids(b), 6, &out) > 0) any = true;
@@ -569,9 +593,9 @@ static uint32_t pickBackoff(uint32_t cur) {
 static uint32_t pickWaitMs = PICK_MIN_MS;
 
 // One cached reply per batch, with the moment it arrived.
-static uint8_t  sampBuf[3][40];
-static uint8_t  sampLen[3]  = {0, 0, 0};
-static uint32_t sampStamp[3] = {0, 0, 0};
+static uint8_t  sampBuf[4][40];
+static uint8_t  sampLen[4]   = {0, 0, 0, 0};
+static uint32_t sampStamp[4] = {0, 0, 0, 0};
 static uint8_t  sampTurn     = 0;
 static uint32_t sampBatchMs  = 0;    // how long the last batch took, for the log
 static uint32_t sampCycleMs  = 0;    // measured duration of one SAMPLE_ORDER pass
@@ -699,6 +723,10 @@ static void handleData() {
   jsonNum(s, "cat", L.cat, 1);        jsonNum(s, "timing", L.timing, 1);
   jsonNum(s, "fuelRate", L.fuelRate, 2); jsonNum(s, "fuel", L.fuel, 1);
   jsonNum(s, "runtime", L.runtime, 0);
+  jsonNum(s, "pedalD", L.pedalD, 1);  jsonNum(s, "pedalE", L.pedalE, 1);
+  jsonNum(s, "cmdThrottle", L.cmdThrottle, 1);
+  jsonNum(s, "torqDem", L.torqDem, 1);jsonNum(s, "torqAct", L.torqAct, 1);
+  jsonNum(s, "torqRef", L.torqRef, 0);jsonNum(s, "absLoad", L.absLoad, 1);
   s.remove(s.length() - 1);           // trailing comma
   s += "}}";
   server.send(200, "application/json", s);

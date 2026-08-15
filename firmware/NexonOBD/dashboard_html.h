@@ -105,6 +105,32 @@ live values update slowly. It keeps going if you leave this page.</div>
 <div class="flag" id="voltF"></div></div>
 </div>
 
+<h2 class="sec">Driver demand</h2>
+<div class="tiles">
+<div class="tile"><div class="label">Accelerator pedal</div>
+<div class="value"><span id="pedalD">&mdash;</span><span class="unit">%</span></div>
+<div class="note">2nd track <span id="pedalE">&mdash;</span> %</div></div>
+
+<div class="tile"><div class="label">Commanded throttle</div>
+<div class="value"><span id="cmdThrottle">&mdash;</span><span class="unit">%</span></div>
+<div class="note">actual <span id="thrEcho">&mdash;</span> %</div></div>
+
+<div class="tile"><div class="label">Torque demanded</div>
+<div class="value"><span id="torqDem">&mdash;</span><span class="unit">%</span></div>
+<div class="note" id="torqDemNm"></div></div>
+
+<div class="tile"><div class="label">Torque delivered</div>
+<div class="value"><span id="torqAct">&mdash;</span><span class="unit">%</span></div>
+<div class="note" id="torqActNm"></div></div>
+
+<div class="tile"><div class="label">Absolute load</div>
+<div class="value"><span id="absLoad">&mdash;</span><span class="unit">%</span></div></div>
+
+<div class="tile"><div class="label">Reference torque</div>
+<div class="value sm"><span id="torqRef">&mdash;</span><span class="unit">N&middot;m</span></div>
+<div class="note">engine constant</div></div>
+</div>
+
 <h2 class="sec">Mixture &amp; exhaust</h2>
 <div class="tiles">
 <div class="tile"><div class="label">Lambda</div>
@@ -206,7 +232,12 @@ const ROWS=[['0C','Engine RPM','rpm','rpm',0],['0D','Vehicle speed','speed','km/
 ['34','Lambda','lambda','',3],['3C','Catalyst temp B1S1','cat','°C',1],
 ['0E','Timing advance','timing','° BTDC',1],['5E','Fuel rate','fuelRate','L/h',2],
 ['42','Module voltage','volt','V',2],['33','Barometric pressure','baro','kPa',0],
-['2F','Fuel tank level','fuel','%',1],['1F','Engine run time','runtime','s',0]];
+['2F','Fuel tank level','fuel','%',1],['1F','Engine run time','runtime','s',0],
+['49','Accelerator pedal D','pedalD','%',1],['4A','Accelerator pedal E','pedalE','%',1],
+['4C','Commanded throttle actuator','cmdThrottle','%',1],
+['61','Driver demanded torque','torqDem','%',1],['62','Actual engine torque','torqAct','%',1],
+['63','Engine reference torque','torqRef','N·m',0],
+['43','Absolute load value','absLoad','%',1]];
 function hhmmss(s){if(s==null||isNaN(s))return'—';const h=Math.floor(s/3600),m=Math.floor(s%3600/60),q=Math.floor(s%60);
 return(h?h+'h ':'')+m+'m '+String(q).padStart(2,'0')+'s'}
 function css(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim()}
@@ -242,6 +273,17 @@ document.getElementById('econ').textContent=(!q.speed&&!q.fuelRate&&v.speed>0&&v
 T('volt',n(v.volt,2),q.volt);const vl=!q.volt&&v.volt<12.2,vh=!q.volt&&v.volt>15.2;V('voltV',(vl||vh)?'warn':'');
 F('voltF',vl||vh,'warn',vl?'⚠ not charging':'⚠ overcharging');
 T('runtime',hhmmss(v.runtime),q.runtime);
+T('pedalD',n(v.pedalD),q.pedalD);T('pedalE',n(v.pedalE),q.pedalE);
+T('cmdThrottle',n(v.cmdThrottle),q.cmdThrottle);
+T('thrEcho',n(v.throttle),q.throttle);
+T('torqDem',n(v.torqDem),q.torqDem);T('torqAct',n(v.torqAct),q.torqAct);
+T('torqRef',v.torqRef==null?'—':Math.round(v.torqRef),q.torqRef);
+T('absLoad',n(v.absLoad),q.absLoad);
+// 61/62 are a percentage of the engine's reference torque, so the newton-metres are
+// only meaningful once 63 has been read. Shown as a note rather than a headline
+// because the J1979 scaling has not been checked against this car.
+const nm=(x,q2)=>(x==null||v.torqRef==null||q2)?'':(v.torqRef*x/100).toFixed(0)+' N·m';
+T('torqDemNm',nm(v.torqDem,q.torqDem));T('torqActNm',nm(v.torqAct,q.torqAct));
 // Only fresh readings enter the history - replaying a held value would draw a flat
 // run in the sparkline that the car never actually did.
 const now=Date.now(),fresh=now-hb>=HP;if(fresh)hb=now;

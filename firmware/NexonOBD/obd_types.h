@@ -11,6 +11,10 @@ struct Live {
   float coolant = NAN, oil = NAN, iat = NAN, ambient = NAN, volt = NAN;
   float stft = NAN, ltft = NAN, lambda = NAN, cat = NAN, timing = NAN;
   float fuelRate = NAN, fuel = NAN, runtime = NAN;
+  // Driver demand through to engine response. Torque is reported as a percentage of
+  // the engine's reference torque (PID 63), which is a constant read once.
+  float pedalD = NAN, pedalE = NAN, cmdThrottle = NAN;
+  float torqDem = NAN, torqAct = NAN, torqRef = NAN, absLoad = NAN;
   bool  ok = false;
 };
 

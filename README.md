@@ -26,7 +26,7 @@ it says so.
 
 | Page | What it does |
 |---|---|
-| `/` | Live gauges — RPM, boost, temps, trims, lambda, catalyst |
+| `/` | Live gauges — RPM, boost, temps, trims, lambda, catalyst, driver demand |
 | `/scan` | UDS service `0x22` identifier sweep, with CSV export |
 | `/update` | Upload a new `.bin` over Wi-Fi |
 | `/dtc` | Stored + pending fault codes as JSON |
@@ -69,9 +69,10 @@ move fast enough to deserve equal billing:
 
 | | Refresh |
 |---|---|
-| `b1` — rpm, speed, MAP, throttle, load, coolant | every 2 batches |
-| `b2` — oil, IAT, voltage, trims, fuel rate | every 4 batches |
-| `b3` — lambda, catalyst, timing, run time, ambient, fuel | every 4 batches |
+| `b1` — rpm, speed, MAP, throttle, load, coolant | every 3 batches |
+| `b4` — pedal, commanded throttle, torque, absolute load | every 3 batches |
+| `b2` — oil, IAT, voltage, trims, fuel rate | every 6 batches |
+| `b3` — lambda, catalyst, timing, run time, ambient, fuel | every 6 batches |
 
 A batch that has not answered for three of its own polling cycles is dropped to
 `null` rather than published as current, so carrying values forward can never
@@ -96,6 +97,24 @@ may refuse either, in which case nothing is worse than before. The serial log pr
 The dashboard stops requesting while the page is off screen, and the Hz readout
 counts *published samples* rather than fetches — the same cached sample can be
 fetched several times and must not inflate the rate.
+
+### Driver demand vs. delivery
+
+Six of the 55 PIDs the ECM supports trace one chain: **accelerator pedal (`49`/`4A`)
+→ commanded throttle (`4C`) → actual throttle (`11`) → demanded torque (`61`) →
+delivered torque (`62`)**, with absolute load (`43`) alongside. That is what you
+asked the car for, what the ECU decided to do about it, and what the engine actually
+produced — which on a small turbo is the interesting part.
+
+Torque is reported as a percentage of the engine's reference torque (`63`), a
+constant read once at startup like barometric pressure, so the newton-metre figures
+are derived rather than read.
+
+> The scalings are the J1979 ones and have **not been verified against this car** —
+> `FINDINGS.md` lists the torque PID scaling as an open question precisely because it
+> needs data under load. A wrong data *length* is caught (`mode01Walk` rejects the
+> batch), but a wrong *scaling* would not be. Treat the numbers as provisional until
+> they have been watched under load and found sane.
 
 ### The DID scan runs in the background
 
