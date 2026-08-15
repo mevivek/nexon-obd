@@ -21,3 +21,6 @@ tools/arduino-cli.exe
 .idea/
 Thumbs.db
 desktop.ini
+
+# Local toolchain installed by firmware/build.sh
+firmware/.toolchain/

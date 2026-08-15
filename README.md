@@ -102,7 +102,20 @@ Power from OBD pin 16 (+12 V) and pin 4/5 (GND) into the buck, 5 V out to the XI
 
 ## Building
 
-Requires `arduino-cli` and the ESP32 core (note: ~6 GB unpacked).
+```bash
+firmware/build.sh              # tests, then compile
+firmware/build.sh --upload     # …then flash over USB (PORT=… to pick the port)
+```
+
+First run installs `arduino-cli` and the ESP32 core into `firmware/.toolchain/`
+(~6 GB unpacked, several minutes) and reuses them after that. Nothing lands outside
+the repo, so deleting `firmware/.toolchain/` undoes the install completely.
+
+The output you want is **`firmware/build/NexonOBD.ino.bin`** — the app image, which is
+what `/update` takes. `NexonOBD.ino.merged.bin` in the same directory is a full-flash
+image for USB recovery; feeding *that* to `/update` will not work.
+
+By hand, if you would rather not use the script:
 
 ```bash
 arduino-cli config add board_manager.additional_urls \
@@ -110,11 +123,11 @@ arduino-cli config add board_manager.additional_urls \
 arduino-cli core update-index
 arduino-cli core install esp32:esp32
 
-arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32S3 firmware/NexonOBD
+arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32S3 --output-dir build firmware/NexonOBD
 arduino-cli upload -p COM3 --fqbn esp32:esp32:XIAO_ESP32S3 firmware/NexonOBD
 ```
 
-Current size: **1.18 MB flash (35 %)**, 48 KB RAM (14 %).
+Current size: **1.19 MB flash (35 %)**, 48 KB RAM (14 %).
 
 The default `default_8MB` partition already provides `ota_0` + `ota_1` at 3.19 MB each,
 so OTA works without changing the partition scheme.
@@ -135,27 +148,21 @@ literals, so nothing else in the build ever compiles them.
 
 ### OTA
 
-```bash
-arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32S3 --output-dir build firmware/NexonOBD
-```
-
-Then join `NexonOBD` and upload `build/NexonOBD.ino.bin` at `http://192.168.4.1/update`.
+Run `firmware/build.sh`, join `NexonOBD`, and upload `firmware/build/NexonOBD.ino.bin`
+at `http://192.168.4.1/update`.
 
 The board runs from `app0`; an upload streams into `app1`; `otadata` only flips once
 `Update.end()` verifies the image, then it reboots. An interrupted or corrupt upload never
 touches `otadata`, so **a failed OTA cannot brick the board** — it reboots into the
 firmware it was already running.
 
-**From a phone, with no dev machine:** [`ci/build.yml`](ci/build.yml) compiles the firmware
-on every push and publishes `NexonOBD.ino.bin` as a build artifact. Download it from the
-Actions tab on your phone, join the board's Wi-Fi, upload it at `/update`.
+So the loop is: build locally → copy the `.bin` to your phone → join the board's Wi-Fi →
+upload at `/update`. No dev machine needed at the car, only to produce the image.
 
-That is the whole edit-from-mobile loop: change code → push → CI builds → download `.bin`
-→ flash over Wi-Fi.
-
-> **The workflow is parked at `ci/build.yml` and is not active yet.** Pushing a file under
-> `.github/workflows/` needs the `workflow` OAuth scope, which this repo's token lacks.
-> To enable it:
+> **CI is not in use.** [`ci/build.yml`](ci/build.yml) is kept current — it runs the host
+> tests and compiles the firmware — but it is parked outside `.github/workflows/`, since
+> pushing there needs the `workflow` OAuth scope this repo's token lacks. Build locally
+> with `firmware/build.sh`. To enable CI later:
 >
 > ```bash
 > gh auth refresh -h github.com -s workflow
