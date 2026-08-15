@@ -14,11 +14,19 @@
 // same suite runs against both and fails if they drift apart.
 
 import { pageSource, scriptsOf, fwVersion, uiCss } from './pagesrc.mjs';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+// Every page the board serves, in one list, because these checks had already
+// drifted apart: the trips page was added in 1.7.0 and three of the four loops
+// below never picked it up. A page missing from here is caught by the first test
+// in the tab-switching suite, which compares this against what is on disk.
+const FW_PAGES = ['../NexonOBD/dashboard_html.h', '../NexonOBD/scan_html.h',
+                  '../NexonOBD/ota_html.h', '../NexonOBD/mon_html.h',
+                  '../NexonOBD/trip_html.h', '../NexonOBD/watch_html.h'];
 
 let ran = 0, failed = 0;
 function ok(cond, what) {
@@ -435,8 +443,7 @@ console.log('\nversion stamp');
   const v = fwVersion();
   ok(/^\d+\.\d+\.\d+$/.test(v), `version.h holds a version (${v})`);
 
-  for (const f of ['../NexonOBD/dashboard_html.h', '../NexonOBD/scan_html.h',
-                   '../NexonOBD/ota_html.h', '../NexonOBD/mon_html.h']) {
+  for (const f of FW_PAGES) {
     const html = pageSource(f);
     const name = f.split('/').pop();
     const sub = (html.match(/<span class="sub">([\s\S]*?)<\/span>/) || [, ''])[1];
@@ -481,8 +488,7 @@ console.log('\nversion stamp');
 
   // The board has no clock, so every page has to hand over the browser's time -
   // whichever one you happen to open is the only chance it gets.
-  for (const f of ['../NexonOBD/dashboard_html.h', '../NexonOBD/scan_html.h',
-                   '../NexonOBD/ota_html.h', '../NexonOBD/mon_html.h']) {
+  for (const f of FW_PAGES) {
     const html = pageSource(f);
     ok(/fetch\('\/time\?ms='\+Date\.now\(\)/.test(html),
        `${f.split('/').pop()}: sends the browser clock to the board`);
@@ -511,9 +517,16 @@ console.log('\nversion stamp');
 console.log('\ntab switching');
 {
   const v = fwVersion();
-  const ALL = ['../NexonOBD/dashboard_html.h', '../NexonOBD/scan_html.h',
-               '../NexonOBD/ota_html.h', '../NexonOBD/mon_html.h',
-               '../NexonOBD/trip_html.h'];
+  const ALL = FW_PAGES;
+
+  // A page added to the firmware but not to FW_PAGES would silently skip every
+  // check in this file. Compare the list against what is actually on disk.
+  const onDisk = readdirSync(join(here, '../NexonOBD'))
+    .filter(n => n.endsWith('_html.h')).sort();
+  const listed = ALL.map(f => f.split('/').pop()).sort();
+  ok(onDisk.join() === listed.join(),
+     `FW_PAGES covers every served page${onDisk.join() === listed.join() ? ''
+       : ` (on disk: ${onDisk.join(', ')})`}`);
 
   for (const f of ALL) {
     const html = pageSource(f);
@@ -569,15 +582,67 @@ console.log('\ntab switching');
      `both ECUs, request and retry, stay under five seconds (${tmos.reduce((a, b) => a + b, 0) * 2} ms)`);
 }
 
+// ---------------------------------------------------------------- DID watch
+//
+// The sweep finds identifiers that answer; it cannot say what they hold. The watch
+// reads a chosen few continuously and records them beside the live PIDs so they can
+// be identified by correlation. The decoding and the CSV column pairing are covered
+// properly in the C++ suite, which compiles didwatch.h directly; what is left here
+// is the wiring - the parts that only exist as source and would fail silently.
+console.log('\nDID watch');
+{
+  const ino = readFileSync(join(here, '../NexonOBD/NexonOBD.ino'), 'utf8');
+  const trip = readFileSync(join(here, '../NexonOBD/triplog.h'), 'utf8');
+  const html = pageSource('../NexonOBD/watch_html.h');
+
+  ok(/server\.on\("\/watch",/.test(ino) && /server\.on\("\/watch\/list",/.test(ino)
+     && /server\.on\("\/watch\/set",/.test(ino), 'the watch page and its endpoints are routed');
+  ok(/watchStep\(\);/.test(ino), 'the poller runs in loop()');
+
+  // A sweep is already hours long and shares the bus with the sampler; a third
+  // claimant would do both jobs badly, so the watch stands down while one runs.
+  ok(/if \(!watchN \|\| scan\.running\) return;/.test(ino),
+     'watching pauses while a sweep has the bus');
+
+  // Filing bytes under the wrong identifier would poison a correlation without ever
+  // looking wrong, which is the worst way for this to fail.
+  ok(/!= w\.did\) return;/.test(ino), 'a reply about a different identifier is discarded');
+  ok(/buf\[0\] != 0x62/.test(ino), 'only a positive ReadDataByIdentifier reply is filed');
+
+  // Service 0x22 is a read. Only the identifier varies here, never the service, so
+  // the read-only guarantee in the README still holds for a runtime-chosen request.
+  ok(/uint8_t req\[3\] = \{0x22,/.test(ino), 'the watch only ever sends service 0x22');
+
+  // The CSV gains a column pair per watched identifier. Both the header and the row
+  // must walk the same list through the same helpers, or columns shift under rows.
+  ok(/watchColNames\(watch\[i\], names, WATCH_COLS_PER_DID\)/.test(trip),
+     'the CSV header is built from the watch set');
+  ok(/watchColCells\(watch\[i\], now, cells, WATCH_COLS_PER_DID\)/.test(trip),
+     'and the rows are built by its counterpart');
+  ok(/tripWatchGen != watchGen/.test(trip),
+     'a changed watch set rotates the file rather than shifting its columns');
+
+  // Readings are restored as choices, not values - the set is loaded before the
+  // trip log opens, or the first file of a drive would miss its watch columns.
+  ok(ino.indexOf('watchLoad();') < ino.indexOf('tripBegin();'),
+     'the watch set is loaded before the first trip file is opened');
+
+  // Page wiring.
+  ok(/fetch\('\/watch\/list'/.test(html), 'the page reads the current values');
+  ok(/fetch\('\/watch\/set\?period='/.test(html), 'and can change the set');
+  ok(/fetch\('\/scan\/status'/.test(html),
+     'identifiers are offered from the scan results, not typed from another page');
+  ok(/Reference/.test(html) && /rrpm/.test(html) && /rcool/.test(html),
+     'live reference values sit next to the watched ones, which is the whole point');
+}
+
 // ---------------------------------------------------------------- syntax
 //
 // The firmware pages are JavaScript inside C++ raw string literals, so nothing in
 // the normal build ever parses them - a typo ships and shows up as a dead
 // dashboard on the car. Compile each page's script without running it.
 console.log('syntax');
-for (const f of ['../NexonOBD/dashboard_html.h', '../NexonOBD/scan_html.h',
-                 '../NexonOBD/ota_html.h', '../NexonOBD/mon_html.h',
-                 '../../tools/dashboard.html']) {
+for (const f of [...FW_PAGES, '../../tools/dashboard.html']) {
   const blocks = scriptsOf(pageSource(f));
   ok(blocks.length > 0, `${f}: has a script block`);
   for (const js of blocks) {

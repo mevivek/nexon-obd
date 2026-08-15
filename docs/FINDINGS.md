@@ -152,10 +152,26 @@ access needed for these.
 | ECU | Ranges swept | Result |
 |---|---|---|
 | ECM | `F1xx` `F4xx` `01xx` `02xx` `03xx` `20xx` `D0xx` `F3xx` | identification only |
+| ECM | full `0000`–`FFFF` pass (in progress) | **a dense `10xx` block** |
 | TCM | `F1xx` `01xx` | identification only |
 
-**No live-data DIDs found in any conventional range.** That is 8 of 256 possible ranges on
-the ECM — absence of evidence, not evidence of absence.
+This section previously concluded **"no live-data DIDs found in any conventional range"**,
+from 8 of 256 ranges on the ECM. The first full sweep contradicts it: by `233F` it had
+found 190 identifiers, heavily concentrated from `1000` upward and answering with one or
+two raw bytes each — not the ASCII strings the `F1xx` block returns. That is the shape of
+manufacturer measurement blocks, and `10xx` was never among the ranges tried.
+
+ISO 14229-1 puts `0100`–`A5FF` at the vehicle manufacturer's disposal, so nothing in the
+standard names these. Identifying them means correlation, not lookup — see the DID watch
+in the README.
+
+Two cautions on that 190:
+
+- **It is a floor.** The sweep ran over BLE at 6.0 identifiers/s, and this adapter drops
+  responses (below). A DID that stayed silent may well answer next time.
+- **Silence is not a refusal here.** 9023 tried produced exactly *one* negative response,
+  so this ECU ignores unsupported identifiers rather than returning `0x7F`. "No reply" and
+  "the adapter ate the reply" are therefore indistinguishable from the sweep alone.
 
 ### Identifiers that answer
 
@@ -172,6 +188,11 @@ the ECM — absence of evidence, not evidence of absence.
 | `F187` | TCM | spare part number |
 | `F180/81/82` | TCM | boot/app versions `06_N5_11`, `MA13`, `BB61` |
 | `F183/84/85` | TCM | programming date `22 05 17` → **17 May 2022** |
+| `1000`–`1008`… | ECM | manufacturer measurement block, 1–2 raw bytes each, meaning unknown |
+
+Observed from the `10xx` block: `1000` = `91`, `1001` = `00 A3`, `1002` = `15 4F`,
+`1003` = `14`, `1004` = `00 99`, `1005` = `00 D6`, `1006` = `61 8F`, `1007` = `00 20`.
+Contiguous, and starting at a round address — a block, not scattered identifiers.
 
 ### The ELM327 clone drops UDS responses
 
@@ -191,7 +212,10 @@ undercounts. This is the strongest argument for the direct-CAN transport — not
 
 ## Open questions
 
-- 248 of 256 ECM DID ranges unswept. A full `0000`–`FFFF` pass over direct CAN is ~30 min.
+- What the `10xx` block holds. The DID watch logs a chosen handful beside the live PIDs;
+  the work is fitting each column against a known value afterwards.
+- Whether `10xx` is contiguous all the way up, and where it ends. The sweep was at `233F`.
+- A repeat sweep over direct CAN, to find what the ELM327 dropped. ~30 min, versus 2h37m.
 - Mode 06 monitor test results never read.
 - Torque PIDs `61`/`62`/`63` scaling unverified — need data under load, not at idle.
 - Bosch ME/MED17-family DID lists circulate publicly and may shortcut the brute-force.

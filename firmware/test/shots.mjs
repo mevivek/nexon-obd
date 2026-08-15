@@ -64,6 +64,7 @@ const PAGES = [
   ['update', '../NexonOBD/ota_html.h'],
   ['monitors', '../NexonOBD/mon_html.h'],
   ['trips', '../NexonOBD/trip_html.h'],
+  ['watch', '../NexonOBD/watch_html.h'],
 ];
 
 const WIDTHS = [[390, 'phone'], [768, 'tablet']];
@@ -135,6 +136,25 @@ const server = http.createServer((req, res) => {
       { mid: '02', tid: '81', uas: '01', v: 12, lo: 0, hi: 40 },
     ] }));
   }
+  if (url === '/watch/list') {
+    // Three identifiers from the 10xx block the sweep turned up, in the states that
+    // matter: answering, answering with a single byte, and gone quiet.
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ max: 8, period: 1000, cycle: 3000, scanning: false,
+      dids: [
+        { name: 'E1002', did: '1002', ecu: 'ECM', len: 2, fresh: true,
+          val: 5455 + (seq % 40), hex: '154F', age: 320 },
+        { name: 'E1000', did: '1000', ecu: 'ECM', len: 1, fresh: true,
+          val: 145, hex: '91', age: 1180 },
+        { name: 'T0140', did: '0140', ecu: 'TCM', len: 2, fresh: false,
+          val: 4200, hex: '1068', age: 21400 },
+      ],
+      v: { rpm: 2150, speed: 58, coolant: 89, iat: 34, load: 34.5, throttle: 18.4 } }));
+  }
+  if (url === '/watch/set') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, n: 3, period: 1000, changed: true }));
+  }
   if (url === '/dtc') {
     res.writeHead(200, { 'content-type': 'application/json' });
     return res.end(JSON.stringify({ ecus: [{ name: 'ECM', codes: [] }, { name: 'TCM', codes: [] }] }));
@@ -190,7 +210,7 @@ for (const [width, wname] of WIDTHS) {
   }
 
   ok = true; scanning = false; sample = CRUISING;
-  for (const p of ['scan', 'update', 'monitors', 'trips']) {
+  for (const p of ['scan', 'update', 'monitors', 'trips', 'watch']) {
     await page.goto(`${base}/${p}`);
     await page.waitForTimeout(500);
     const f = join(outDir, `${p}-${wname}.png`);

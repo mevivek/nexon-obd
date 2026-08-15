@@ -4,6 +4,7 @@
 #include <Preferences.h>
 #include "obd_types.h"
 #include "clock.h"
+#include "didwatch.h"
 
 // Per-drive CSV logs on the 1.5 MB filesystem partition.
 //
@@ -61,6 +62,7 @@ static bool       tripOpen = false;
 static uint32_t   tripLastRow = 0;
 static uint32_t   tripLastFlush = 0;
 static uint32_t   tripSeq = 0;
+static uint32_t   tripWatchGen = 0;    // watch set this file's columns were built from
 static char       tripName[24] = {0};
 static Preferences tripPrefs;
 
@@ -137,8 +139,19 @@ static bool tripOpenNew() {
                   clockSet() ? "set" : "unset");
   tripFile.print("epoch_ms,uptime_ms");
   for (uint8_t i = 0; i < TRIP_NCOLS; i++) { tripFile.print(','); tripFile.print(TRIP_COLS[i].name); }
+
+  // Watched identifiers, appended after the fixed columns: a decoded big-endian
+  // unsigned and the raw bytes it came from. The set is chosen at runtime, so this
+  // file is pinned to the set it was opened with - see tripTick, which rotates
+  // rather than letting columns shift under rows already written.
+  tripWatchGen = watchGen;
+  for (uint8_t i = 0; i < watchN; i++) {
+    char names[WATCH_COLS_PER_DID][12];
+    uint8_t n = watchColNames(watch[i], names, WATCH_COLS_PER_DID);
+    for (uint8_t c = 0; c < n; c++) { tripFile.print(','); tripFile.print(names[c]); }
+  }
   tripFile.print('\n');
-  Serial.printf("[trip] logging to %s\n", tripName);
+  Serial.printf("[trip] logging to %s (%u watched)\n", tripName, watchN);
   return true;
 }
 
@@ -159,6 +172,14 @@ static void tripTick(const Live &L) {
   if (tripLastRow && now - tripLastRow < TRIP_PERIOD_MS) return;
   tripLastRow = now;
 
+  // The watch set changed, so this file's columns no longer describe what is being
+  // recorded. Start a new one rather than writing rows that do not match the header
+  // above them - a CSV whose columns shift halfway down is worse than two files.
+  if (tripOpen && tripWatchGen != watchGen) {
+    Serial.println("[trip] watch set changed - rotating");
+    tripClose();
+  }
+
   if (!tripOpen && !tripOpenNew()) return;
 
   // Rotate within a long drive so one file cannot swallow the partition.
@@ -169,6 +190,11 @@ static void tripTick(const Live &L) {
     float v = L.*(TRIP_COLS[i].field);
     tripFile.print(',');
     if (!isnan(v)) tripFile.print(v, TRIP_COLS[i].dp);   // absent stays empty, not zero
+  }
+  for (uint8_t i = 0; i < watchN; i++) {
+    char cells[WATCH_COLS_PER_DID][20];
+    uint8_t n = watchColCells(watch[i], now, cells, WATCH_COLS_PER_DID);
+    for (uint8_t c = 0; c < n; c++) { tripFile.print(','); tripFile.print(cells[c]); }
   }
   tripFile.print('\n');
 

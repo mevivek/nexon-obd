@@ -186,6 +186,40 @@ count behaves wildly differently per transport — 40 identifiers is about a sec
 CAN but roughly 22 s over BLE, during which nothing answers the web server and the
 board appears hung.
 
+### Watching identifiers to find out what they hold
+
+A sweep finds identifiers that answer. It cannot say what any of them contain — the
+manufacturer-specific block (ISO 14229-1 hands `0100`–`A5FF` to the manufacturer)
+comes back as one or two raw bytes with no name, unit or scaling, and that lives in
+an ODX database nobody outside the supplier has.
+
+What you can do is correlate. `/watch` reads up to **8** chosen identifiers
+continuously and shows them next to rpm, speed, coolant, intake, load and throttle,
+each with a sparkline. Blip the throttle and an rpm-linked value gives itself away.
+The ones the scanner found are offered as checkboxes, so there is no copying hex
+between pages.
+
+The same readings become extra columns on the trip CSV — two per identifier: the
+bytes decoded big-endian, and the raw bytes beside them. Two bytes might equally be
+one 16-bit value or two 8-bit ones and nothing in the reply says which, so the
+decode is a convenience and the raw column is the record. An identifier that has
+stopped answering writes **empty** cells rather than zeros, the same rule the PID
+columns already follow: a missing reading must not correlate as a value of nought.
+
+Changing the set **rotates the CSV**. Columns are fixed when a file is opened, and
+shifting them halfway down one is worse than having two files. Re-applying an
+identical set is not a change, so pressing Apply twice does not litter the partition.
+
+The cost is real and the page states it. Every watched identifier is one more bus
+exchange, and BLE affords about six a second in total — eight at the default one per
+second is roughly a sixth of the budget. Watching **pauses entirely while a sweep is
+running**; a sweep is already hours long and shares the bus with the sampler, and a
+third claimant would do both jobs badly.
+
+This gives correlation, not meaning. It will tell you `1002` tracks coolant; the
+offset and scale come from fitting the logged column against the PID afterwards.
+Service `0x22` is still a read — only the identifier varies, never the service.
+
 ### Trip logs
 
 A CSV row a second while the ECU is answering, written to the 1.5 MB filesystem

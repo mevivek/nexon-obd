@@ -31,7 +31,7 @@ color:var(--good)}
 <div class="bar"><h1>Trips</h1>
 <span class="sub">v)rawliteral" FW_VERSION R"rawliteral( &middot; CSV logs</span>
 <div class="status"><span class="dot" id="dot"></span><span id="state">reading&hellip;</span></div></div>
-<nav><a href="/">Live</a><a href="/monitors">Monitors</a><a class="on" href="/trips">Trips</a><a href="/scan">Scanner</a><a href="/update">Firmware</a></nav>
+<nav><a href="/">Live</a><a href="/monitors">Monitors</a><a class="on" href="/trips">Trips</a><a href="/watch">Watch</a><a href="/scan">Scanner</a><a href="/update">Firmware</a></nav>
 </header>
 
 <div class="wrap">

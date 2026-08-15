@@ -41,7 +41,7 @@ letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 <span class="sub">v)rawliteral" FW_VERSION R"rawliteral( &middot; <span id="tr">&mdash;</span></span>
 <div class="status"><span class="dot" id="dot"></span><span id="st">connecting&hellip;</span>
 <span id="hz" style="color:var(--muted)"></span></div></div>
-<nav><a class="on" href="/">Live</a><a href="/monitors">Monitors</a><a href="/trips">Trips</a><a href="/scan">Scanner</a><a href="/update">Firmware</a></nav>
+<nav><a class="on" href="/">Live</a><a href="/monitors">Monitors</a><a href="/trips">Trips</a><a href="/watch">Watch</a><a href="/scan">Scanner</a><a href="/update">Firmware</a></nav>
 </header>
 
 <div class="wrap">

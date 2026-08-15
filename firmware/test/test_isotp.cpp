@@ -8,6 +8,7 @@
 
 #include "shims.h"
 #include "isotp_extract.h"
+#include "../NexonOBD/didwatch.h"
 
 #include <cstdio>
 
@@ -544,6 +545,206 @@ static void test_pollbatch_keeps_bytes() {
   eq((int)again.rpm, 700, "and decode to the same values");
 }
 
+// ------------------------------------------------------------------ DID watch
+//
+// The scanner finds identifiers; the watch reads a chosen few of them repeatedly
+// and files the readings alongside the live PIDs. Everything here is a way that can
+// go wrong silently: a column appearing in the CSV header with no cell under it, a
+// value reading as zero when it never actually arrived, or a typo parsing as a
+// perfectly valid identifier 0000 and being watched forever.
+
+static WatchDid mk(uint16_t did, uint8_t ecu, std::vector<uint8_t> bytes, uint32_t stamp) {
+  WatchDid w;
+  w.did = did;
+  w.ecu = ecu;
+  w.len = (uint8_t)bytes.size();
+  for (size_t i = 0; i < bytes.size() && i < sizeof(w.data); i++) w.data[i] = bytes[i];
+  w.stamp = stamp;
+  return w;
+}
+
+static void test_watch_value_is_big_endian() {
+  printf("watch: decodes big-endian unsigned\n");
+  eq((int)watchValue(mk(0x1000, 0, {0x91}, 1)), 0x91, "one byte");
+  eq((int)watchValue(mk(0x1002, 0, {0x15, 0x4F}, 1)), 0x154F, "two bytes, high byte first");
+  eq((int)watchValue(mk(0x1002, 0, {0x00, 0x00, 0x01, 0x00}, 1)), 256, "four bytes");
+  // Longer than four bytes is a string or a structure, not a number - the raw column
+  // is the honest representation of those and the decode simply stops.
+  eq((int)watchValue(mk(0xF18A, 0, {0x42, 0x4F, 0x53, 0x43, 0x48}, 1)), 0x424F5343,
+     "stops at four bytes rather than overflowing");
+  WatchDid never;
+  eq((int)watchValue(never), 0, "an identifier that never answered decodes to nothing");
+}
+
+static void test_watch_freshness() {
+  printf("watch: a reading that missed its turn is not current\n");
+  watchN = 4;
+  watchPeriodMs = 1000;
+  uint32_t cycle = watchCycleMs();
+  eq((int)cycle, 4000, "a cycle is one read of each");
+
+  WatchDid never;
+  ok(!watchFresh(never, 10000), "never answered is never fresh");
+  ok(watchFresh(mk(0x1000, 0, {0x10}, 9500), 10000), "just read is fresh");
+  // One cycle plus a period of slack: this adapter drops replies (FINDINGS), and a
+  // single lost one must not flap the column between present and absent.
+  ok(watchFresh(mk(0x1000, 0, {0x10}, 10000 - (cycle + 900)), 10000),
+     "one dropped reply is tolerated");
+  ok(!watchFresh(mk(0x1000, 0, {0x10}, 10000 - (cycle + 1500)), 10000),
+     "but a reading that missed a whole extra cycle is stale");
+}
+
+static void test_watch_header_and_row_agree() {
+  printf("watch: every header column has a cell under it\n");
+  watchN = 2;
+  watchPeriodMs = 1000;
+  const uint32_t now = 100000;
+  // Every state a watched identifier can be in, including the ones that produce
+  // empty cells - an empty cell is still a cell, or the row shifts left and every
+  // column after it is read as the wrong thing.
+  WatchDid cases[] = {
+    WatchDid(),                                             // never answered
+    mk(0x1002, 0, {0x15, 0x4F}, now - 100),                 // fresh
+    mk(0x1002, 1, {0x15, 0x4F}, now - 60000),               // long stale
+    mk(0x1000, 0, {0x91}, now - 100),                       // single byte
+    mk(0xF190, 0, {1, 2, 3, 4, 5, 6, 7, 8}, now - 100),     // full width
+  };
+  for (const WatchDid &w : cases) {
+    char names[WATCH_COLS_PER_DID][12];
+    char cells[WATCH_COLS_PER_DID][20];
+    uint8_t nh = watchColNames(w, names, WATCH_COLS_PER_DID);
+    uint8_t nr = watchColCells(w, now, cells, WATCH_COLS_PER_DID);
+    eq(nr, nh, "header columns and row cells match");
+  }
+}
+
+static void test_watch_cells() {
+  printf("watch: cell contents\n");
+  watchN = 1;
+  watchPeriodMs = 1000;
+  const uint32_t now = 100000;
+  char cells[WATCH_COLS_PER_DID][20];
+
+  watchColCells(mk(0x1002, 0, {0x15, 0x4F}, now - 100), now, cells, WATCH_COLS_PER_DID);
+  ok(strcmp(cells[0], "5455") == 0, "decoded column carries the big-endian value");
+  ok(strcmp(cells[1], "154F") == 0, "raw column carries the bytes as sent");
+
+  // The whole reason an absent PID is written empty rather than zero: a watched
+  // identifier that stopped answering must not correlate as a value of nought.
+  watchColCells(mk(0x1002, 0, {0x15, 0x4F}, now - 90000), now, cells, WATCH_COLS_PER_DID);
+  ok(cells[0][0] == 0, "a stale reading leaves the value empty, not zero");
+  ok(cells[1][0] == 0, "and leaves the raw column empty too");
+
+  WatchDid never;
+  watchColCells(never, now, cells, WATCH_COLS_PER_DID);
+  ok(cells[0][0] == 0 && cells[1][0] == 0, "never answered writes two empty cells");
+}
+
+static void test_watch_column_names() {
+  printf("watch: column names distinguish the responder\n");
+  char names[WATCH_COLS_PER_DID][12];
+  watchColNames(mk(0x1002, 0, {}, 0), names, WATCH_COLS_PER_DID);
+  ok(strcmp(names[0], "E1002") == 0, "an ECM identifier names its column E....");
+  ok(strcmp(names[1], "E1002x") == 0, "and the raw column takes an x");
+  watchColNames(mk(0x0140, 1, {}, 0), names, WATCH_COLS_PER_DID);
+  ok(strcmp(names[0], "T0140") == 0, "the same DID on the TCM is a different column");
+}
+
+static void test_watch_nvs_round_trip() {
+  printf("watch: the set survives a restart\n");
+  WatchDid in[3] = { mk(0x1002, 0, {0x15, 0x4F}, 12345),
+                     mk(0x0140, 1, {0x01}, 12345),
+                     mk(0xF190, 0, {}, 0) };
+  uint8_t blob[WATCH_MAX * 3];
+  size_t n = watchEncode(in, 3, blob, sizeof(blob));
+  eq((int)n, 9, "three identifiers encode to nine bytes");
+
+  WatchDid out[WATCH_MAX];
+  uint8_t got = watchDecode(blob, n, out, WATCH_MAX);
+  eq(got, 3, "and decode back to three");
+  ok(out[0].did == 0x1002 && out[0].ecu == 0, "the first survives");
+  ok(out[1].did == 0x0140 && out[1].ecu == 1, "the responder survives too");
+  // Readings are deliberately not persisted: a value from before the ignition went
+  // off is not a reading, and restoring one would put a stale number into the first
+  // rows of the next drive's CSV.
+  eq(out[0].len, 0, "readings are not restored, only the choice of identifier");
+  eq((int)out[0].stamp, 0, "so nothing looks fresh on the first row after a restart");
+
+  WatchDid two[2];
+  eq(watchDecode(blob, n, two, 2), 2, "decode honours the caller's capacity");
+  eq((int)watchEncode(in, 3, blob, 4), 3, "encode honours the buffer it was given");
+}
+
+static void test_watch_parse() {
+  printf("watch: parsing identifiers\n");
+  WatchDid w;
+  ok(watchParseOne("E1002", w) && w.did == 0x1002 && w.ecu == 0, "E prefix is the ECM");
+  ok(watchParseOne("T0140", w) && w.did == 0x0140 && w.ecu == 1, "T prefix is the TCM");
+  ok(watchParseOne("1002", w) && w.did == 0x1002 && w.ecu == 0, "bare hex assumes the ECM");
+  ok(watchParseOne("f18a", w) && w.did == 0xF18A, "lower case is accepted");
+  // A typo has to drop the entry rather than fall through to identifier 0000, which
+  // is a real address and would then be watched silently forever.
+  ok(!watchParseOne("10G2", w), "a non-hex digit is rejected");
+  ok(!watchParseOne("102", w), "three digits is rejected");
+  ok(!watchParseOne("10022", w), "five digits is rejected");
+  ok(!watchParseOne("", w), "empty is rejected");
+  ok(!watchParseOne("E", w), "a bare prefix is rejected");
+}
+
+static void test_watch_parse_list() {
+  printf("watch: parsing a list\n");
+  WatchDid out[WATCH_MAX];
+  eq(watchParseList("1002,1003,T0140", out, WATCH_MAX), 3, "comma separated");
+  ok(out[2].ecu == 1 && out[2].did == 0x0140, "the responder carries through the list");
+  eq(watchParseList("1002, 1003 ,1002", out, WATCH_MAX), 2,
+     "a duplicate does not get a second turn of the round robin");
+  eq(watchParseList("E1002,T1002", out, WATCH_MAX), 2,
+     "the same DID on two ECUs is not a duplicate");
+  eq(watchParseList("1002,zzz,1003", out, WATCH_MAX), 2, "junk is dropped, the rest kept");
+  eq(watchParseList("", out, WATCH_MAX), 0, "an empty list watches nothing");
+  eq(watchParseList("1000,1001,1002,1003,1004,1005,1006,1007,1008,1009", out, WATCH_MAX),
+     WATCH_MAX, "and the set cannot exceed the cap");
+}
+
+static void test_watch_apply_detects_a_real_change() {
+  printf("watch: only a real change rotates the CSV\n");
+  WatchDid empty[1];
+  watchApply(empty, 0, 1000);                     // known starting point
+  eq((int)watchN, 0, "starts watching nothing");
+
+  WatchDid a[2] = { mk(0x1002, 0, {}, 0), mk(0x1003, 0, {}, 0) };
+  uint32_t gen0 = watchGen;
+  ok(watchApply(a, 2, 1000), "a new set is a change");
+  eq((int)(watchGen - gen0), 1, "and bumps the generation, so the trip file rotates");
+  eq((int)watchN, 2, "both are watched");
+  eq((int)watchTurn, 0, "the round robin restarts");
+
+  // The page re-sends its selection on every Apply. If an identical list counted as
+  // a change, a drive would become a pile of one-row CSVs.
+  uint32_t gen1 = watchGen;
+  ok(!watchApply(a, 2, 1000), "re-applying the same set is not a change");
+  eq((int)(watchGen - gen1), 0, "so the file it is writing stays open");
+
+  ok(watchApply(a, 2, 2000), "changing only the period is still a change");
+  WatchDid reordered[2] = { mk(0x1003, 0, {}, 0), mk(0x1002, 0, {}, 0) };
+  ok(watchApply(reordered, 2, 2000), "reordering changes the column order, so it counts");
+
+  // A reading taken under the old set does not belong under the new header.
+  watch[0].len = 2; watch[0].data[0] = 0x15; watch[0].stamp = 4242;
+  watchApply(a, 2, 2000);
+  eq((int)watch[0].len, 0, "applying a set clears readings taken under the last one");
+
+  watchApply(a, 2, 1);
+  eq((int)watchPeriodMs, (int)WATCH_PERIOD_MIN, "an absurd period is clamped up");
+  watchApply(a, 2, 99999);
+  eq((int)watchPeriodMs, (int)WATCH_PERIOD_MAX, "and a lazy one is clamped down");
+
+  WatchDid many[WATCH_MAX + 2];
+  for (uint8_t i = 0; i < WATCH_MAX + 2; i++) many[i] = mk((uint16_t)(0x2000 + i), 0, {}, 0);
+  watchApply(many, WATCH_MAX + 2, 1000);
+  eq((int)watchN, (int)WATCH_MAX, "more than the cap is truncated, not overflowed");
+}
+
 // ------------------------------------------------------------------
 
 int main() {
@@ -588,6 +789,16 @@ int main() {
   test_sample_merge_drops_stale();
   test_sample_merge_nothing_fresh();
   test_pollbatch_keeps_bytes();
+
+  test_watch_value_is_big_endian();
+  test_watch_freshness();
+  test_watch_header_and_row_agree();
+  test_watch_cells();
+  test_watch_column_names();
+  test_watch_nvs_round_trip();
+  test_watch_parse();
+  test_watch_parse_list();
+  test_watch_apply_detects_a_real_change();
 
   printf("\n%d checks, %d failed\n", g_ran, g_fail);
   return g_fail ? 1 : 0;

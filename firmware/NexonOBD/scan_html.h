@@ -25,7 +25,7 @@ R"rawliteral(<!doctype html>
 <div class="bar"><h1>DID Scanner</h1>
 <span class="sub">v)rawliteral" FW_VERSION R"rawliteral( &middot; service 0x22</span>
 <div class="status"><span class="dot" id="dot"></span><span id="state">idle</span></div></div>
-<nav><a href="/">Live</a><a href="/monitors">Monitors</a><a href="/trips">Trips</a><a class="on" href="/scan">Scanner</a><a href="/update">Firmware</a></nav>
+<nav><a href="/">Live</a><a href="/monitors">Monitors</a><a href="/trips">Trips</a><a href="/watch">Watch</a><a class="on" href="/scan">Scanner</a><a href="/update">Firmware</a></nav>
 </header>
 
 <div class="wrap">

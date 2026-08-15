@@ -24,12 +24,14 @@
 #include "version.h"
 #include "history.h"
 #include "clock.h"
+#include "didwatch.h"
 #include "triplog.h"
 #include <Update.h>
 #include "dashboard_html.h"
 #include "scan_html.h"
 #include "mon_html.h"
 #include "trip_html.h"
+#include "watch_html.h"
 #include "ota_html.h"
 
 // Two ways to reach the car, picked at runtime:
@@ -775,6 +777,70 @@ static void scanStep(uint32_t budgetMs) {
   }
 }
 
+// ---------------------------------------------------------------- DID watch
+
+static Preferences watchPrefs;
+
+static void watchSave() {
+  if (!watchPrefs.begin("nexonwatch", false)) return;
+  uint8_t blob[WATCH_MAX * 3];
+  size_t n = watchEncode(watch, watchN, blob, sizeof(blob));
+  watchPrefs.putBytes("set", blob, n);
+  watchPrefs.putULong("period", watchPeriodMs);
+  watchPrefs.end();
+}
+
+static void watchLoad() {
+  if (!watchPrefs.begin("nexonwatch", true)) return;
+  uint8_t blob[WATCH_MAX * 3];
+  size_t n = watchPrefs.getBytes("set", blob, sizeof(blob));
+  watchN = watchDecode(blob, n, watch, WATCH_MAX);
+  watchPeriodMs = watchPrefs.getULong("period", 1000);
+  watchPrefs.end();
+  if (watchPeriodMs < WATCH_PERIOD_MIN) watchPeriodMs = WATCH_PERIOD_MIN;
+  if (watchPeriodMs > WATCH_PERIOD_MAX) watchPeriodMs = WATCH_PERIOD_MAX;
+  if (watchN) Serial.printf("[watch] %u identifiers, every %lums\n",
+                            watchN, (unsigned long)watchPeriodMs);
+}
+
+// One identifier per period, round robin. Deliberately modest: every read is an
+// extra bus exchange, and BLE only affords about six a second in total, so a set of
+// eight at the default 1 s costs roughly a sixth of the budget. The page states
+// that cost rather than leaving the live rate to quietly sag.
+//
+// Paused entirely while a sweep runs. A sweep is already hours long and shares the
+// bus with the sampler; adding a third claimant would do both jobs badly.
+static void watchStep() {
+  if (!watchN || scan.running) return;
+  if (millis() - watchLastMs < watchPeriodMs) return;
+  watchLastMs = millis();
+
+  if (watchTurn >= watchN) watchTurn = 0;
+  WatchDid &w = watch[watchTurn];
+  watchTurn = (uint8_t)((watchTurn + 1) % watchN);
+
+  uint32_t reqId = w.ecu ? ID_TCM_REQ : ID_ECM_REQ;
+  uint32_t rspId = w.ecu ? ID_TCM_RSP : ID_ECM_RSP;
+  uint8_t req[3] = {0x22, (uint8_t)(w.did >> 8), (uint8_t)(w.did & 0xFF)};
+  uint8_t buf[40];
+  int len = obdIsoTp(reqId, rspId, req, 3, buf, sizeof(buf),
+                     activeTransport == TR_BLE ? 550 : 25);
+  if (len == -3) len = obdIsoTp(reqId, rspId, req, 3, buf, sizeof(buf),
+                                activeTransport == TR_BLE ? 900 : 50);
+
+  // 62 <did hi> <did lo> <data...>. A reply about a different identifier is this
+  // adapter demultiplexing badly, not an answer - drop it rather than filing the
+  // bytes under the wrong name, which would poison the correlation silently.
+  if (len < 4 || buf[0] != 0x62) return;
+  if ((((uint16_t)buf[1] << 8) | buf[2]) != w.did) return;
+
+  uint8_t n = (uint8_t)(len - 3);
+  if (n > sizeof(w.data)) n = sizeof(w.data);
+  memcpy(w.data, &buf[3], n);
+  w.len   = n;
+  w.stamp = millis();
+}
+
 // Monitor discovery and refresh run in loop() like everything else that touches the
 // bus, and only while someone is actually looking at the page - a request to /mon
 // arms it for MON_WANTED_MS. Polling monitors continuously would spend bus time on
@@ -1304,6 +1370,81 @@ static void handleOtaDone() {
   if (!bad) { delay(600); ESP.restart(); }
 }
 
+// The watched identifiers and their latest readings, plus enough live values to
+// correlate against without the page having to poll /data as well.
+static void handleWatchList() {
+  uint32_t now = millis();
+  String s = "{\"max\":";
+  s += WATCH_MAX;
+  s += ",\"period\":";
+  s += watchPeriodMs;
+  s += ",\"cycle\":";
+  s += watchCycleMs();
+  s += ",\"scanning\":";
+  s += scan.running ? "true" : "false";
+  s += ",\"dids\":[";
+  for (uint8_t i = 0; i < watchN; i++) {
+    const WatchDid &w = watch[i];
+    char nm[12];
+    watchColName(nm, sizeof(nm), w, false);
+    if (i) s += ",";
+    s += "{\"name\":\"";  s += nm;
+    s += "\",\"did\":\"";
+    char hex[8];
+    snprintf(hex, sizeof(hex), "%04X", (unsigned)w.did);
+    s += hex;
+    s += "\",\"ecu\":\""; s += (w.ecu ? "TCM" : "ECM");
+    s += "\",\"len\":";   s += w.len;
+    s += ",\"fresh\":";   s += watchFresh(w, now) ? "true" : "false";
+    if (w.len) {
+      s += ",\"val\":";  s += watchValue(w);
+      s += ",\"hex\":\"";
+      for (uint8_t k = 0; k < w.len; k++) {
+        snprintf(hex, sizeof(hex), "%02X", w.data[k]);
+        s += hex;
+      }
+      s += "\",\"age\":"; s += (now - w.stamp);
+    }
+    s += "}";
+  }
+  s += "],\"v\":{";
+  Live L = g_live;
+  bool fresh = g_seq && (millis() - g_liveMs < 4000);
+  jsonNum(s, "rpm",     fresh ? L.rpm : NAN, 0);
+  jsonNum(s, "speed",   fresh ? L.speed : NAN, 0);
+  jsonNum(s, "coolant", fresh ? L.coolant : NAN, 0);
+  jsonNum(s, "load",    fresh ? L.load : NAN, 1);
+  jsonNum(s, "throttle", fresh ? L.throttle : NAN, 1);
+  jsonNum(s, "iat",     fresh ? L.iat : NAN, 0);
+  s.remove(s.length() - 1);            // trailing comma
+  s += "}}";
+  server.send(200, "application/json", s);
+}
+
+static void handleWatchSet() {
+  WatchDid next[WATCH_MAX];
+  uint8_t n = 0;
+  if (server.hasArg("d")) n = watchParseList(server.arg("d").c_str(), next, WATCH_MAX);
+
+  uint32_t p = watchPeriodMs;
+  if (server.hasArg("period")) p = (uint32_t)strtoul(server.arg("period").c_str(), nullptr, 10);
+
+  bool changed = watchApply(next, n, p);
+  if (changed) {
+    watchSave();
+    Serial.printf("[watch] set to %u identifiers, every %lums\n",
+                  watchN, (unsigned long)watchPeriodMs);
+  }
+  String s = "{\"ok\":true,\"n\":";
+  s += watchN;
+  s += ",\"period\":";
+  s += watchPeriodMs;
+  s += ",\"changed\":";
+  s += changed ? "true" : "false";
+  s += "}";
+  server.send(200, "application/json", s);
+}
+
 // ---------------------------------------------------------------- static assets
 //
 // A page only changes when the firmware does, so a tab switch should be a
@@ -1406,12 +1547,16 @@ void setup() {
   server.on("/trips/del",   handleTripDelete);
   server.on("/trips",       []() { sendPage(TRIP_HTML); });
   server.on("/monitors",    []() { sendPage(MON_HTML); });
+  server.on("/watch",       []() { sendPage(WATCH_HTML); });
+  server.on("/watch/list",  handleWatchList);
+  server.on("/watch/set",   handleWatchSet);
   server.on("/scan/start",  handleScanStart);
   server.on("/scan/stop",   handleScanStop);
   server.on("/scan/status", handleScanStatus);
   server.begin();
 
   scanHitsBegin();
+  watchLoad();          // before tripBegin: the watch set decides the CSV columns
   tripBegin();
   scanBegin();          // resumes an interrupted sweep, needs the filesystem up
   histBegin();
@@ -1428,6 +1573,7 @@ static const int HTTP_DRAIN = 4;
 void loop() {
   for (int i = 0; i < HTTP_DRAIN; i++) serveHttp();
   samplerStep();          // the bus waits inside here serve HTTP too - bus_yield.h
+  watchStep();            // one watched identifier per period, paused during a scan
   monStep();              // only does anything while the monitors page is open
   heartbeat(millis() - lastEcuOkMs < 3000, scan.running);
 
