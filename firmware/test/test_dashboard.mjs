@@ -1,17 +1,19 @@
-// Tests for the dashboard's hold-last-value logic and its warning flags.
+// Host-side checks on the firmware, everything that can be asserted without a board.
 //
-// Two bugs these were written for, both visible on the car at once:
+// This file used to be two things at once: a browser-behaviour suite for the five
+// dashboard pages the board carried in flash, and a set of source assertions about
+// the sketch. The frontend has moved out to web/ - a Vite/Preact bundle served off
+// LittleFS - and with it went the pages and the browser half of this file. The
+// hold-last-value merge, the warning-flag gating, the status hysteresis, the
+// sparkline seeding, the mileage readouts and the scanner controls are now covered
+// by Vitest in web/src/lib and web/src/pages, against the modules that implement
+// them rather than against JavaScript scraped out of a C++ raw string literal.
 //
-//  1. /data flags a sample ok as soon as any one of the batched mode-01 requests
-//     answers, so a partial poll arrives with nulls in it. render() wrote every
-//     field unconditionally and null became an em-dash, so gauges that had been
-//     reading fine went blank.
-//  2. Every threshold compared a raw value, and JS coerces null to 0 - so a
-//     *missing* lambda satisfied `v.lambda <= 0.85` and lit "running rich"
-//     underneath a blank reading.
-//
-// Both dashboards carry the same logic (TOOLS.md: kept in sync by hand), so the
-// same suite runs against both and fails if they drift apart.
+// What is left here is the part Vitest structurally cannot see: the firmware source.
+// Three pages stay in flash, and they stay precisely because they must work when the
+// bundle does not - boot_html.h (/), ota_html.h (/update) and ui_html.h (/ui). Those
+// are checked here, along with the /data contract the bundle reads, the routing and
+// HTTP-fairness work, the DID watch wiring, the trip totals and the history ring.
 
 import { pageSource, scriptsOf, fwVersion, uiCss } from './pagesrc.mjs';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -20,13 +22,16 @@ import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-// Every page the board serves, in one list, because these checks had already
-// drifted apart: the trips page was added in 1.7.0 and three of the four loops
-// below never picked it up. A page missing from here is caught by the first test
-// in the tab-switching suite, which compares this against what is on disk.
-const FW_PAGES = ['../NexonOBD/dashboard_html.h', '../NexonOBD/scan_html.h',
-                  '../NexonOBD/ota_html.h', '../NexonOBD/mon_html.h',
-                  '../NexonOBD/trip_html.h', '../NexonOBD/watch_html.h',
+// Every page still built into flash, in one list, because these checks had already
+// drifted apart once: the trips page was added in 1.7.0 and three of the four loops
+// below never picked it up. A page missing from here is caught by the first test in
+// the tab-switching suite, which compares this against what is on disk.
+//
+// These three are the ones that must not depend on the bundle: / is the fallback
+// when no bundle is installed, /update is the recovery path of last resort, and /ui
+// is how a bundle gets installed in the first place. /monitors, /trips, /watch and
+// /scan are 302s into the bundle's hash routes and have no page of their own.
+const FW_PAGES = ['../NexonOBD/boot_html.h', '../NexonOBD/ota_html.h',
                   '../NexonOBD/ui_html.h'];
 
 let ran = 0, failed = 0;
@@ -38,399 +43,6 @@ function ok(cond, what) {
 function eq(got, want, what) {
   ok(Object.is(got, want), `${what}${Object.is(got, want) ? '' : ` (got ${got}, want ${want})`}`);
 }
-
-// ---------------------------------------------------------------- fake DOM
-//
-// Enough of a document for render() to run headless: it only ever looks elements
-// up by id, sets text/class/attributes, and reads one width for the sparklines.
-function fakeDom() {
-  const els = new Map();
-  const make = (id) => ({
-    id, textContent: '', className: '', innerHTML: '', clientWidth: 220,
-    attrs: {}, style: {},
-    setAttribute(k, v) { this.attrs[k] = v; },
-    classList: {
-      set: new Set(),
-      toggle(c, on) { on ? this.set.add(c) : this.set.delete(c); },
-      contains(c) { return this.set.has(c); },
-    },
-  });
-  const get = (id) => {
-    if (!els.has(id)) els.set(id, make(id));
-    return els.get(id);
-  };
-  const listeners = {};
-  return {
-    document: {
-      getElementById: get,
-      documentElement: make('html'),
-      hidden: false,
-      addEventListener(ev, fn) { (listeners[ev] ||= []).push(fn); },
-    },
-    getComputedStyle: () => ({ getPropertyValue: () => '#3987e5' }),
-    el: get,
-    listeners,
-  };
-}
-
-// Load a page's script wholesale, so the tests drive the shipped render() and
-// tick() rather than a reimplementation of them.
-//
-// fetch and setTimeout are supplied by the harness: /data answers come from a queue
-// the test fills, and the self-rescheduling tick is captured instead of run, so a
-// poll loop can be stepped one iteration at a time.
-const flush = () => new Promise(r => setImmediate(r));
-
-function load(file, opts = {}) {
-  const js = scriptsOf(pageSource(file))[0];
-  const dom = fakeDom();
-  const queue = [];
-  let pending = null;
-
-  const fetchImpl = (url) => {
-    if (String(url).startsWith('/history')) {
-      return Promise.resolve({ json: () => Promise.resolve(opts.history || {}) });
-    }
-    if (!queue.length) return new Promise(() => {});      // park: no more scripted polls
-    const r = queue.shift();
-    if (r === 'offline') return Promise.reject(new Error('offline'));
-    return Promise.resolve({ json: () => Promise.resolve(r) });
-  };
-  const setTimeoutImpl = (fn) => { pending = fn; return 0; };
-  // The scan page schedules with setInterval; capture the period so a test can see
-  // that the page goes live on its own rather than only after Start is pressed.
-  let interval = null;
-  const setIntervalImpl = (fn, ms) => { interval = { fn, ms }; return 1; };
-  const clearIntervalImpl = () => { interval = null; };
-
-  const api = new Function(
-    'document', 'getComputedStyle', 'fetch', 'setTimeout', 'setInterval', 'clearInterval',
-    js + '\n;return ' + (opts.exports || '{ merge, render, hz, holdMs, rate }') + ';'
-  )(dom.document, dom.getComputedStyle, fetchImpl, setTimeoutImpl,
-    setIntervalImpl, clearIntervalImpl);
-
-  return {
-    ...api, el: dom.el, queue, doc: dom.document,
-    fire(ev) { for (const fn of dom.listeners[ev] || []) fn(); },
-    scheduled: () => pending !== null,
-    interval: () => interval,
-    // Exactly one poll per call: run whatever tick() last rescheduled, then let the
-    // promises settle. The first call has nothing scheduled yet and simply lets
-    // seed().then(tick) get going. Firing at the end instead would run an extra
-    // tick that parks on the empty queue and kills the loop.
-    async step() {
-      const fn = pending; pending = null;
-      if (fn) fn();
-      for (let i = 0; i < 8; i++) await flush();
-    },
-  };
-}
-
-// ---------------------------------------------------------------- suites
-
-function suiteMerge(label, m) {
-  console.log(`\n${label} — hold-last-value`);
-
-  {
-    const [v, q, held] = m.merge({ rpm: 820, coolant: 88 });
-    eq(v.rpm, 820, 'fresh value passes through');
-    ok(!q.rpm, 'fresh value is not marked held');
-    eq(held, 0, 'nothing held on a complete sample');
-  }
-  {
-    const [v, q, held] = m.merge({ rpm: null, coolant: null });
-    eq(v.rpm, 820, 'held value re-shown instead of null');
-    ok(q.rpm, 'held value is marked so it renders dimmed');
-    eq(held, 2, 'header reports how many are being held');
-  }
-  {
-    const [v, q] = m.merge({ rpm: 1500, coolant: null });
-    eq(v.rpm, 1500, 'fresh value supersedes the held one');
-    ok(!q.rpm, 'mark cleared');
-    ok(q.coolant, 'the still-missing field stays marked');
-  }
-  {
-    // Walk the clock past the hold window by ageing what merge() remembered.
-    for (let i = 0; i < 6000; i += 100) m.merge({});      // no-op samples
-    const before = Date.now();
-    while (Date.now() - before < 0) { /* nothing */ }
-    const [v, q] = m.merge({ neverSeen: null });
-    eq(v.neverSeen, null, 'a field never seen has nothing to hold');
-    ok(q.neverSeen, 'and is marked');
-  }
-  {
-    m.merge({ oil: 95 });
-    const [v, q] = m.merge({ oil: NaN });
-    eq(v.oil, 95, 'NaN falls back to the held value');
-    ok(q.oil, 'and is marked');
-  }
-  {
-    m.merge({ speed: 42 });
-    const [v, q] = m.merge({ speed: 0 });
-    eq(v.speed, 0, 'zero passes through as a fresh reading');
-    ok(!q.speed, 'zero is not treated as absent');
-  }
-}
-
-function suiteFlags(label, m, ids) {
-  console.log(`\n${label} — warnings never fire on data that is not there`);
-
-  const lit = (id) => m.el(id).className.includes('on');
-
-  // The screenshot case: lambda missing entirely.
-  {
-    const [v, q] = m.merge({ lambda: null, coolant: null, volt: null, oil: null,
-                             stft: null, ltft: null, cat: null, rpm: null });
-    m.render(v, q);
-    ok(!lit(ids.lambda), 'blank lambda does not light "running rich"');
-    ok(!lit(ids.coolant), 'blank coolant does not light an overheat warning');
-    ok(!lit(ids.volt), 'blank voltage does not light "not charging"');
-    ok(!lit(ids.oil), 'blank oil temperature does not light a warning');
-    ok(!lit(ids.trim), 'blank fuel trims do not light a leak warning');
-  }
-
-  // A real lean reading still warns.
-  {
-    const [v, q] = m.merge({ lambda: 1.25, coolant: 90, volt: 14.0 });
-    m.render(v, q);
-    ok(lit(ids.lambda), 'a genuinely lean lambda still warns');
-    eq(m.el('lambda').textContent, '1.250', 'and the value is shown');
-  }
-
-  // A real overheat still warns.
-  {
-    const [v, q] = m.merge({ coolant: 115, lambda: 1.0 });
-    m.render(v, q);
-    ok(lit(ids.coolant), 'a genuine overheat still warns');
-    ok(!lit(ids.lambda), 'a healthy lambda does not warn');
-  }
-
-  // A held reading must not sustain a warning it raised while fresh.
-  {
-    m.merge({ coolant: 115 });                       // fresh, warning on
-    const [v, q] = m.merge({ coolant: null });       // now held
-    m.render(v, q);
-    ok(q.coolant, 'the value is being held');
-    eq(m.el('coolant').textContent, 115, 'the last reading is still shown');
-    ok(!lit(ids.coolant), 'but the overheat warning is not sustained on stale data');
-    ok(m.el('coolant').classList.contains('stale'), 'and it renders dimmed');
-  }
-
-  // A fresh reading clears the dim.
-  {
-    const [v, q] = m.merge({ coolant: 88 });
-    m.render(v, q);
-    ok(!m.el('coolant').classList.contains('stale'), 'a fresh reading is not dimmed');
-  }
-}
-
-function suiteRate(label, m) {
-  console.log(`\n${label} — rate readout`);
-  // Trailing window, not a lifetime average: a slow patch has to wash out of the
-  // reading once polling recovers, which the old cumulative average never did.
-  const s = m.hz();
-  ok(typeof s === 'string', 'hz() returns a string');
-}
-
-function suiteHold(label, m) {
-  console.log(`\n${label} — hold window follows the sample rate`);
-  if (!m.holdMs) { ok(false, 'holdMs is exported'); return; }
-
-  m.rate.length = 0;
-  eq(m.holdMs(), 2500, 'falls back to the floor before a rate is known');
-
-  // Fast link: samples 100 ms apart. The floor still applies.
-  m.rate.length = 0;
-  for (let i = 0; i < 10; i++) m.rate.push(1000 + i * 100);
-  eq(m.holdMs(), 2500, 'a fast link keeps the floor');
-
-  // Slow BLE link: samples 2 s apart. A fixed 2.5 s window is barely one sample,
-  // so a field that simply has not come round yet blinks to an em-dash - which is
-  // exactly what made the All values table flicker.
-  m.rate.length = 0;
-  for (let i = 0; i < 10; i++) m.rate.push(1000 + i * 2000);
-  eq(m.holdMs(), 8000, 'a slow link holds for several samples');
-
-  // ...but never so long that a genuinely dead field looks alive.
-  m.rate.length = 0;
-  for (let i = 0; i < 10; i++) m.rate.push(1000 + i * 60000);
-  eq(m.holdMs(), 15000, 'and is capped');
-  m.rate.length = 0;
-}
-
-async function suiteStatus(label, file) {
-  console.log(`\n${label} — status hysteresis`);
-  const m = load(file);
-  const good = { ok: true, tr: 'can', v: { rpm: 800, speed: 0, coolant: 88, map: 100, baro: 100 } };
-  const bad = { ok: false, error: 'no response from ECU (ignition off?)' };
-  const text = () => m.el('st').textContent;
-
-  m.queue.push(good);
-  await m.step();
-  eq(text(), 'live', 'a good sample reads live');
-
-  // Four dropped polls in a row is a rough patch, not a dead ECU. This is the
-  // flicker: the values are held through it, so the status must be too.
-  m.queue.push(bad, bad, bad, bad);
-  for (let i = 0; i < 4; i++) { await m.step(); }
-  eq(text(), 'live', 'four consecutive failures do not change the status');
-
-  m.queue.push(bad);
-  await m.step();
-  eq(text(), 'no response from ECU (ignition off?)', 'the fifth does');
-
-  m.queue.push(good);
-  await m.step();
-  eq(text(), 'live', 'recovering clears it');
-
-  // ...and the counter reset means it takes a fresh run of five to trip again.
-  m.queue.push(bad, bad, bad, bad);
-  for (let i = 0; i < 4; i++) { await m.step(); }
-  eq(text(), 'live', 'the miss counter reset on success');
-
-  // A transport failure is the same story.
-  const n = load(file);
-  n.queue.push(good, 'offline', 'offline');
-  await n.step(); await n.step(); await n.step();
-  eq(n.el('st').textContent, 'live', 'two fetch failures do not report the board unreachable');
-}
-
-async function suiteVisibility(label, file) {
-  console.log(`\n${label} — polling pauses off screen`);
-  const m = load(file);
-  const good = { ok: true, seq: 1, tr: 'ble', v: { rpm: 800, coolant: 88 } };
-
-  m.queue.push(good);
-  await m.step();
-  ok(m.scheduled(), 'a visible page keeps polling');
-
-  // The board samples on its own now, so a backgrounded tab hammering /data buys
-  // nothing and costs battery and bus time.
-  m.doc.hidden = true;
-  m.fire('visibilitychange');
-  m.queue.push(good);
-  await m.step();
-  ok(!m.scheduled(), 'a hidden page stops rescheduling');
-
-  m.doc.hidden = false;
-  m.queue.push(good);
-  m.fire('visibilitychange');
-  for (let i = 0; i < 8; i++) await new Promise(r => setImmediate(r));
-  ok(m.scheduled(), 'coming back on screen resumes it');
-}
-
-async function suiteScanBanner(label, file) {
-  console.log(`\n${label} — scan visibility`);
-  const m = load(file);
-
-  m.queue.push({ ok: true, seq: 1, tr: 'ble', scan: false, v: { rpm: 800 } });
-  await m.step();
-  eq(m.el('scanBar').style.display, 'none', 'no banner when nothing is scanning');
-  eq(m.el('tr').textContent, 'ble', 'the transport is shown');
-
-  // The bug this suite exists for: progress was only emitted on the ok:true branch,
-  // which is exactly the branch that cannot be taken while the scanner holds the
-  // bus. The bar sat at 0 % for an entire sweep and the transport read as a dash.
-  m.queue.push({ ok: false, scan: true, tr: 'ble', error: 'waiting - scanner has the bus',
-                 scanPct: 12.5, scanTried: 8192, scanTotal: 65536, scanEcu: 'ECM' });
-  await m.step();
-  eq(m.el('scanBar').style.display, 'block', 'the banner appears on the Live page');
-  eq(m.el('scanProg').style.width, '12.5%', 'progress is shown even with no live sample');
-  eq(m.el('tr').textContent, 'ble', 'and the transport survives a stale sample');
-  ok(m.el('scanNum').textContent.includes('8,192'),
-     `counts are shown, not just a percentage (${m.el('scanNum').textContent})`);
-  eq(m.el('st').textContent, 'waiting · scanning', 'status says scanning, not no-response');
-
-  // ...and scanning must not trip the no-response hysteresis however long it runs.
-  for (let i = 0; i < 8; i++) {
-    m.queue.push({ ok: false, scan: true, error: 'waiting - scanner has the bus',
-                   scanPct: 20, scanTried: 13107, scanTotal: 65536 });
-    await m.step();
-  }
-  eq(m.el('st').textContent, 'waiting · scanning', 'and stays that way while it runs');
-
-  // The board shares the bus, so live samples still arrive during a scan.
-  m.queue.push({ ok: true, seq: 2, tr: 'ble', scan: true, scanPct: 21,
-                 scanTried: 13800, scanTotal: 65536, v: { rpm: 900 } });
-  await m.step();
-  eq(m.el('st').textContent, 'live · scanning', 'a sample arriving mid-scan reads as live');
-  eq(m.el('scanBar').style.display, 'block', 'and the banner stays up');
-}
-
-async function suiteSeed(label, file) {
-  console.log(`\n${label} — history seeding`);
-  const hist = { period: 6, n: 300, rpm: [], speed: [], boost: [], coolant: [] };
-  for (let i = 0; i < 300; i++) {
-    hist.rpm.push(1000 + i); hist.speed.push(i % 90);
-    hist.boost.push(-0.2 + i / 1000); hist.coolant.push(70 + i / 20);
-  }
-  // One null in the middle, as the board emits for a slot it never filled.
-  hist.speed[100] = null;
-
-  const m = load(file, { history: hist });
-  await m.step();
-  const pts = (m.el('spSpeed').innerHTML.match(/points="([^"]*)"/) || [, ''])[1];
-  const n = pts ? pts.trim().split(/\s+/).length : 0;
-  ok(n > 200, `sparkline is seeded from the board's history (${n} points, not flat)`);
-  ok(!/NaN/.test(m.el('spSpeed').innerHTML), 'nulls in the stored history do not produce NaN geometry');
-  ok(/^0[,.]/.test(pts) || pts.startsWith('0,'), 'the trace starts at the left edge');
-}
-
-async function suiteScanControls() {
-  console.log('\nDID scanner (scan_html.h) — controls follow the scan');
-  const idle = { running: false, cur: '0000', tried: 0, total: 65536, negatives: 0,
-                 elapsed: 0, hits: [], stalled: false };
-  const busy = { running: true, cur: 'F1A4', tried: 420, total: 65536, negatives: 415,
-                 elapsed: 37, stalled: false,
-                 hits: [{ did: 'F18A', ecu: 'ECM', len: 13,
-                          hex: '424F534348', ascii: 'BOSCH' }] };
-  const stalled = { ...busy, stalled: true };
-
-  const m = load('../NexonOBD/scan_html.h', { exports: '{ poll }' });
-
-  m.queue.push(idle);
-  await m.poll();
-  eq(m.el('go').disabled, false, 'idle: Start is available');
-  eq(m.el('go').textContent, 'Start scan', 'idle: Start reads "Start scan"');
-  eq(m.el('stop').disabled, true, 'idle: Stop is not');
-  eq(m.el('csv').disabled, true, 'idle: nothing to export yet');
-
-  // Start resets position and clears the hit list on the board, and none of that is
-  // persisted - so a live Start button during a sweep is one stray tap from losing
-  // the whole run.
-  m.queue.push(busy);
-  await m.poll();
-  eq(m.el('go').disabled, true, 'scanning: Start is disabled');
-  ok(m.el('go').textContent.startsWith('Scanning'), 'scanning: it says so');
-  eq(m.el('stop').disabled, false, 'scanning: Stop is available');
-  eq(m.el('ecu').disabled, true, 'scanning: the range inputs are locked');
-  eq(m.el('from').disabled, true, 'scanning: from is locked');
-  eq(m.el('csv').disabled, false, 'scanning: there are hits to export');
-
-  // The board owns the scan, so this page has to go live on its own - it may have
-  // been opened mid-sweep, or the scan started from another phone.
-  ok(m.interval(), 'the page schedules its own polling');
-  eq(m.interval().ms, 1000, 'and polls quickly while a scan runs');
-
-  // A stalled sweep is neither scanning nor idle - it is alive and deliberately not
-  // progressing, because the ECU went quiet. Reporting "scanning" would imply it is
-  // still sweeping, and "idle" would suggest it had given up.
-  m.queue.push(stalled);
-  await m.poll();
-  eq(m.el('state').textContent, 'waiting for ECU', 'stalled reads as waiting');
-  eq(m.el('stall').style.display, 'block', 'and explains itself');
-  eq(m.el('go').disabled, true, 'Start stays disabled - the sweep has not ended');
-  eq(m.el('stop').disabled, false, 'and Stop is still how you end it');
-
-  m.queue.push(idle);
-  await m.poll();
-  eq(m.el('stall').style.display, 'none', 'the notice clears when it is not stalled');
-  eq(m.el('go').disabled, false, 'finishing re-enables Start');
-  eq(m.el('ecu').disabled, false, 'and unlocks the inputs');
-  eq(m.interval().ms, 4000, 'and backs the polling off when idle');
-}
-
-await suiteScanControls();
 
 // ---------------------------------------------------------------- version
 //
@@ -583,71 +195,6 @@ console.log('\ntab switching');
      `both ECUs, request and retry, stay under five seconds (${tmos.reduce((a, b) => a + b, 0) * 2} ms)`);
 }
 
-// ---------------------------------------------------------------- mileage
-//
-// The board integrates the totals (covered in the C++ suite); this is the display
-// side, where the risk is showing a number that is arithmetically correct and
-// completely misleading - an average over the first four hundred metres swings by
-// tens of km/L between polls and reads as a broken gauge.
-function suiteMileage(label, file) {
-  console.log(`\n${label} — mileage`);
-  const m = load(file);
-  const txt = (id) => m.el(id).textContent;
-
-  const base = { rpm: 2000, speed: 60, fuelRate: 6, coolant: 88 };
-  {
-    const [v, q] = m.merge({ ...base, tripKm: 0.2, tripL: 0.02 });
-    m.render(v, q);
-    eq(txt('kmpl'), '—', 'no average until there is a drive to average over');
-    ok(txt('tripNote').includes('too early'), 'and it says why rather than sitting blank');
-  }
-  {
-    const [v, q] = m.merge({ ...base, tripKm: 23.6, tripL: 1.66 });
-    m.render(v, q);
-    eq(txt('kmpl'), '14.2', 'average is distance over fuel');
-    ok(txt('tripNote').includes('23.6 km') && txt('tripNote').includes('1.66 L'),
-       'with the totals it came from, so the figure can be checked');
-  }
-  {
-    // 60 km/h on 6 L/h is 10 km/L, and that is the number the pedal moves.
-    const [v, q] = m.merge({ ...base, speed: 60, fuelRate: 6, tripKm: 23.6, tripL: 1.66 });
-    m.render(v, q);
-    eq(txt('kmplNow'), '10.0', 'instantaneous is speed over fuel rate');
-    ok(txt('rateNote').includes('6.00 L/h'), 'with the raw rate beside it');
-  }
-  {
-    // Stopped but burning: the division is meaningless, so it is not shown, and the
-    // useful thing to say is that fuel is going nowhere.
-    const [v, q] = m.merge({ ...base, speed: 0, fuelRate: 0.8, tripKm: 23.6, tripL: 1.66 });
-    m.render(v, q);
-    eq(txt('kmplNow'), '—', 'standing still has no instantaneous mileage');
-    ok(txt('rateNote').includes('idling'), 'and says it is idling instead');
-    eq(txt('kmpl'), '14.2', 'while the drive average is unaffected by the stop');
-  }
-  {
-    // The blanking bug this whole dashboard was rebuilt around: a missing value
-    // must not be coerced to zero and rendered as a reading.
-    const [v, q] = m.merge({ ...base, speed: null, fuelRate: null,
-                             tripKm: 23.6, tripL: 1.66 });
-    m.render(v, q);
-    ok(m.el('kmplNow').classList.contains('stale') || txt('kmplNow') === '—',
-       'a held speed or rate does not present as a fresh instantaneous figure');
-    eq(txt('kmpl'), '14.2', 'the average still stands - it is accumulated, not sampled');
-  }
-  {
-    // A page that has only just loaded, against a board that has sent nothing.
-    // Needs its own instance: merge() holds the last value it saw, and holding a
-    // running total is right - the totals are monotonic and board-side, so a null
-    // in one sample means "not in this reply", never "back to zero".
-    const fresh = load(file);
-    const [v, q] = fresh.merge({ rpm: null, speed: null, fuelRate: null,
-                                 tripKm: null, tripL: null });
-    fresh.render(v, q);
-    eq(fresh.el('kmpl').textContent, '—', 'nothing received yet shows no average');
-    eq(fresh.el('tripNote').textContent, 'this drive', 'and the note stays neutral');
-  }
-}
-
 // ---------------------------------------------------------------- DID watch
 //
 // The sweep finds identifiers that answer; it cannot say what they hold. The watch
@@ -655,14 +202,21 @@ function suiteMileage(label, file) {
 // be identified by correlation. The decoding and the CSV column pairing are covered
 // properly in the C++ suite, which compiles didwatch.h directly; what is left here
 // is the wiring - the parts that only exist as source and would fail silently.
+//
+// The page itself is now the bundle's #/watch route, and its behaviour is covered by
+// Vitest in web/src/pages/watch. Everything below is firmware-side.
 console.log('\nDID watch');
 {
   const ino = readFileSync(join(here, '../NexonOBD/NexonOBD.ino'), 'utf8');
   const trip = readFileSync(join(here, '../NexonOBD/triplog.h'), 'utf8');
-  const html = pageSource('../NexonOBD/watch_html.h');
 
-  ok(/server\.on\("\/watch",/.test(ino) && /server\.on\("\/watch\/list",/.test(ino)
-     && /server\.on\("\/watch\/set",/.test(ino), 'the watch page and its endpoints are routed');
+  ok(/server\.on\("\/watch\/list",/.test(ino) && /server\.on\("\/watch\/set",/.test(ino),
+     'the watch endpoints are routed');
+  // /watch no longer serves a page, but it is a bookmark and it is what the nav on
+  // the flash pages points at, so it has to land somewhere rather than 404.
+  ok(/\{"\/monitors",\s*"\/trips",\s*"\/watch",\s*"\/scan"\}/.test(ino)
+     && /server\.send\(302,/.test(ino),
+     '/watch redirects into the bundle rather than 404ing');
   ok(/watchStep\(\);/.test(ino), 'the poller runs in loop()');
 
   // A sweep is already hours long and shares the bus with the sampler; a third
@@ -693,44 +247,12 @@ console.log('\nDID watch');
   ok(ino.indexOf('watchLoad();') < ino.indexOf('tripBegin();'),
      'the watch set is loaded before the first trip file is opened');
 
-  // Page wiring.
-  ok(/fetch\('\/watch\/list'/.test(html), 'the page reads the current values');
-  ok(/fetch\('\/watch\/set\?period='/.test(html), 'and can change the set');
-  ok(/fetch\('\/scan\/status'/.test(html),
-     'identifiers are offered from the scan results, not typed from another page');
-  ok(/Reference/.test(html) && /rrpm/.test(html) && /rcool/.test(html),
-     'live reference values sit next to the watched ones, which is the whole point');
-
-  // Hits found before 1.7.0 were never written to flash, so a board updated from an
-  // older build comes up with an empty picker even though the sweep happened. The
-  // exported CSV is the only copy, and it has to be usable without re-driving.
-  ok(/FileReader/.test(html) && /parseCsv/.test(html),
-     'a did_hits.csv exported by an older build can be loaded back');
-  ok(/localStorage/.test(html), 'and survives a page reload');
-  ok(/nothing is uploaded/.test(html),
-     'the page says the file stays local, because it does - there is no upload route');
+  // The browser can load a did_hits.csv exported by an older build back into the
+  // picker, and that file never leaves the phone - which is only true while the
+  // firmware has no route that would accept one. The parsing is checked in
+  // web/src/pages/watch; the absence of an upload endpoint can only be checked here.
   ok(!/\/scan\/hits\/(set|import|upload)/.test(ino),
-     'and no endpoint was added that would make the browser a second source of hits');
-
-  // Run the page's own parser against the exact shape the scanner page exports, so
-  // a change to either format is caught here rather than on the car.
-  const parse = new Function(
-    scriptsOf(html)[0].match(/function parseCsv[\s\S]*?\n}/)[0] + '\n;return parseCsv;')();
-  const exported = ['ecu,did,len,hex,ascii',
-                    'ECM,1002,2,154F,".O"',
-                    'ECM,F18A,13,424F534348204C494D49544544,"BOSCH LIMITED"',
-                    'TCM,0140,2,1068,".h"',
-                    ''].join('\n');
-  const got = parse(exported);
-  eq(got.length, 3, 'parses the exported rows');
-  ok(got[0].ecu === 'ECM' && got[0].did === '1002' && got[0].hex === '154F',
-     'and keeps the fields the picker needs');
-  eq(parse('ecu,did,len,hex,ascii\nECM,zzzz,2,0000,""').length, 0,
-     'a malformed identifier is dropped rather than watched');
-  // The ascii column is quoted because it can contain a comma - splitting naively
-  // would misalign every field after it if those columns were read.
-  ok(parse('ECM,1006,2,618F,"a,b"')[0].hex === '618F',
-     'a comma inside the quoted ascii column does not shift the hex column');
+     'no endpoint was added that would make the browser a second source of hits');
 }
 
 // ---------------------------------------------------------------- trip columns
@@ -812,29 +334,6 @@ for (const f of [...FW_PAGES, '../../tools/dashboard.html']) {
     catch (e) { ok(false, `${f}: script parses (${e.message})`); }
   }
 }
-
-const PAGES = [
-  ['firmware dashboard (dashboard_html.h)', '../NexonOBD/dashboard_html.h',
-   { lambda: 'lambdaF', coolant: 'coolantF', volt: 'voltF', oil: 'oilF', trim: 'trimF' }],
-  ['laptop dashboard (tools/dashboard.html)', '../../tools/dashboard.html',
-   { lambda: 'lambdaFlag', coolant: 'coolantFlag', volt: 'voltFlag', oil: 'oilFlag',
-     trim: 'trimFlag' }],
-];
-
-for (const [label, file, ids] of PAGES) {
-  suiteMerge(label, load(file));
-  suiteFlags(label, load(file), ids);
-  suiteRate(label, load(file));
-  suiteHold(label, load(file));
-}
-
-// Hysteresis and seeding are firmware-page behaviour; the laptop dashboard is
-// served by a different tool and has its own polling loop.
-await suiteStatus('firmware dashboard (dashboard_html.h)', '../NexonOBD/dashboard_html.h');
-await suiteVisibility('firmware dashboard (dashboard_html.h)', '../NexonOBD/dashboard_html.h');
-await suiteScanBanner('firmware dashboard (dashboard_html.h)', '../NexonOBD/dashboard_html.h');
-await suiteSeed('firmware dashboard (dashboard_html.h)', '../NexonOBD/dashboard_html.h');
-suiteMileage('firmware dashboard (dashboard_html.h)', '../NexonOBD/dashboard_html.h');
 
 console.log(`\n${ran} checks, ${failed} failed`);
 process.exit(failed ? 1 : 0);
