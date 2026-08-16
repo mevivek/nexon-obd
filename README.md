@@ -427,8 +427,9 @@ arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32S3 --output-dir build firmware/
 arduino-cli upload -p COM3 --fqbn esp32:esp32:XIAO_ESP32S3 firmware/NexonOBD
 ```
 
-Current size: **1.22 MB flash (36 %)**, 48 KB RAM (14 %), plus 4.8 KB of RTC
-slow memory for the trend buffer.
+Current size: **1.29 MB flash (39 % of `app0`)**, 49 KB RAM (15 %), plus 4.8 KB of
+RTC slow memory for the trend buffer. Of that flash, the entire web frontend — six
+pages plus the shared stylesheet — is 60 KB, or 4.6 %.
 
 The default `default_8MB` partition already provides `ota_0` + `ota_1` at 3.19 MB each,
 so OTA works without changing the partition scheme.

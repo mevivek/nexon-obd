@@ -26,7 +26,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 // in the tab-switching suite, which compares this against what is on disk.
 const FW_PAGES = ['../NexonOBD/dashboard_html.h', '../NexonOBD/scan_html.h',
                   '../NexonOBD/ota_html.h', '../NexonOBD/mon_html.h',
-                  '../NexonOBD/trip_html.h', '../NexonOBD/watch_html.h'];
+                  '../NexonOBD/trip_html.h', '../NexonOBD/watch_html.h',
+                  '../NexonOBD/ui_html.h'];
 
 let ran = 0, failed = 0;
 function ok(cond, what) {

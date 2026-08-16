@@ -25,6 +25,8 @@
 #include "history.h"
 #include "clock.h"
 #include "didwatch.h"
+#include "ui_paths.h"
+#include "ui_fs.h"
 #include "triplog.h"
 #include <Update.h>
 #include "dashboard_html.h"
@@ -32,6 +34,7 @@
 #include "mon_html.h"
 #include "trip_html.h"
 #include "watch_html.h"
+#include "ui_html.h"
 #include "ota_html.h"
 
 // Two ways to reach the car, picked at runtime:
@@ -1301,7 +1304,7 @@ static void handleTripList() {
     File dir = LittleFS.open("/");
     bool first = true;
     for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
-      if (!f.name() || !strstr(f.name(), ".csv")) continue;
+      if (!tripIsLogNameLoose(f.name())) continue;   // not the sweep's hits, not the UI
       if (!first) s += ",";
       first = false;
       s += "{\"name\":\"";
@@ -1322,7 +1325,10 @@ static void handleTripList() {
 static bool tripNameOk(const String &n) {
   if (n.length() < 6 || n.length() > 20) return false;
   if (n[0] != '/' || n.indexOf("..") >= 0 || n.lastIndexOf('/') != 0) return false;
-  return n.endsWith(".csv");
+  // Only actual trip logs. This is reached from a query string, so it decides both
+  // what can be downloaded and what can be deleted - and /scanhits.csv used to
+  // satisfy it, which made the sweep's results removable from the trips page.
+  return tripIsLogName(n.c_str());
 }
 
 static void handleTripGet() {
@@ -1510,6 +1516,163 @@ static void handleUiCss() {
   server.send_P(200, "text/css", UI_CSS_BODY);
 }
 
+// ---------------------------------------------------------------- frontend bundle
+//
+// Files built by an ordinary frontend toolchain and uploaded to /w, served here.
+// See ui_paths.h for why this exists at all; the short version is that a UI
+// compiled into flash costs a 1.3 MB reflash to change a line of CSS.
+
+static File   uiUp;
+static bool   uiUpOpen  = false;
+static size_t uiUpWrote = 0;
+static size_t uiUpBase  = 0;         // bundle size excluding the file being written
+static const char *uiUpErr = nullptr;
+
+// Gzipped copy first: the build emits both, and over this link the compressed one
+// is always the right answer.
+static bool uiTrySend(const char *path) {
+  char fp[80];
+  for (int gz = 1; gz >= 0; gz--) {
+    if (!uiFsPath(fp, sizeof(fp), path, gz)) return false;
+    if (!LittleFS.exists(fp)) continue;
+    File f = LittleFS.open(fp, FILE_READ);
+    if (!f) continue;
+    if (gz) server.sendHeader("Content-Encoding", "gzip");
+    // Asset names carry a content hash, so they can be cached forever. index.html
+    // names the others, so it must not be - a deploy would never be picked up.
+    server.sendHeader("Cache-Control", uiImmutable(path)
+                      ? "public, max-age=31536000, immutable" : "no-cache");
+    server.streamFile(f, uiContentType(path));
+    f.close();
+    return true;
+  }
+  return false;
+}
+
+static void handleUiManifest() {
+  size_t total = LittleFS.totalBytes(), used = LittleFS.usedBytes();
+  String s = "{\"installed\":";
+  s += uiInstalled() ? "true" : "false";
+  s += ",\"bytes\":";  s += (uint32_t)uiBytesUsed();
+  s += ",\"max\":";    s += (uint32_t)UI_MAX_BYTES;
+  s += ",\"free\":";   s += (uint32_t)(total > used ? total - used : 0);
+  s += ",\"files\":[";
+  File dir = LittleFS.open(UI_DIR);
+  if (dir && dir.isDirectory()) {
+    bool first = true;
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+      if (f.isDirectory()) continue;
+      if (!first) s += ",";
+      first = false;
+      s += "{\"name\":\"";
+      s += f.name();
+      s += "\",\"size\":";
+      s += (uint32_t)f.size();
+      s += "}";
+    }
+    dir.close();
+  }
+  s += "]}";
+  server.send(200, "application/json", s);
+}
+
+static void handleUiClear() {
+  uiClear();
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+// Multipart streaming, one file per request - same shape as the OTA upload. The
+// target name is the multipart filename, checked rather than trusted.
+static void handleUiUpload() {
+  HTTPUpload &up = server.upload();
+
+  if (up.status == UPLOAD_FILE_START) {
+    uiUpOpen = false; uiUpWrote = 0; uiUpErr = nullptr;
+    String name = up.filename;
+    if (!name.startsWith("/")) name = "/" + name;
+
+    char fp[80];
+    if (!uiFsPath(fp, sizeof(fp), name.c_str(), false)) {
+      uiUpErr = "bad filename";
+      Serial.printf("[ui] rejected upload name %s\n", name.c_str());
+      return;
+    }
+    LittleFS.mkdir(UI_DIR);
+
+    // Budget check up front. Replacing an existing file does not count its old
+    // size against the budget, or re-uploading the same bundle would fail once it
+    // was more than half the cap.
+    size_t existing = 0;
+    if (LittleFS.exists(fp)) { File o = LittleFS.open(fp, FILE_READ); if (o) { existing = o.size(); o.close(); } }
+    size_t usedNow = uiBytesUsed();
+    uiUpBase = usedNow > existing ? usedNow - existing : 0;
+
+    uiUp = LittleFS.open(fp, FILE_WRITE);
+    uiUpOpen = (bool)uiUp;
+    if (!uiUpOpen) { uiUpErr = "could not open file"; return; }
+    Serial.printf("[ui] receiving %s\n", fp);
+    return;
+  }
+
+  if (up.status == UPLOAD_FILE_WRITE && uiUpOpen) {
+    // The filesystem is shared with trip logs. Refuse rather than let a bundle
+    // squeeze out the recording space, and refuse before the write, not after.
+    if (uiUpBase + uiUpWrote + up.currentSize > UI_MAX_BYTES) {
+      uiUpErr = "bundle over budget";
+    } else if (LittleFS.totalBytes() - LittleFS.usedBytes() < TRIP_FREE_MIN) {
+      uiUpErr = "filesystem full";
+    }
+    if (uiUpErr) { uiUp.close(); uiUpOpen = false; return; }
+
+    if (uiUp.write(up.buf, up.currentSize) != up.currentSize) {
+      uiUpErr = "write failed";
+      uiUp.close();
+      uiUpOpen = false;
+      return;
+    }
+    uiUpWrote += up.currentSize;
+    return;
+  }
+
+  if (up.status == UPLOAD_FILE_END && uiUpOpen) {
+    uiUp.close();
+    uiUpOpen = false;
+    Serial.printf("[ui] wrote %u bytes\n", (unsigned)uiUpWrote);
+    return;
+  }
+
+  if (up.status == UPLOAD_FILE_ABORTED) {
+    if (uiUpOpen) uiUp.close();
+    uiUpOpen = false;
+    uiUpErr = "aborted";
+  }
+}
+
+static void handleUiUploadDone() {
+  String s = "{\"ok\":";
+  s += uiUpErr ? "false" : "true";
+  if (uiUpErr) { s += ",\"error\":\""; s += uiUpErr; s += "\""; }
+  s += ",\"bytes\":";
+  s += (uint32_t)uiUpWrote;
+  s += "}";
+  server.send(200, "application/json", s);
+}
+
+// Anything not matched by a registered route. An API path that got here is a
+// genuine 404 and must say so in JSON - falling through to the bundle would hand
+// back an HTML document with status 200 for a request that expected JSON. Anything
+// else is either a bundle asset or a client-side route.
+static void handleNotFound() {
+  String uri = server.uri();
+  if (uiIsApiPath(uri.c_str())) {
+    server.send(404, "application/json", "{\"ok\":false,\"error\":\"no such endpoint\"}");
+    return;
+  }
+  if (uiTrySend(uri.c_str())) return;
+  if (uiInstalled() && uiTrySend("/index.html")) return;
+  server.send(404, "text/plain", "not found");
+}
+
 // ---------------------------------------------------------------- transport pick
 
 static const char *transportName() {
@@ -1588,6 +1751,11 @@ void setup() {
   server.on("/watch",       []() { sendPage(WATCH_HTML); });
   server.on("/watch/list",  handleWatchList);
   server.on("/watch/set",   handleWatchSet);
+  server.on("/ui",          []() { sendPage(UI_ADMIN_HTML); });
+  server.on("/ui/manifest", handleUiManifest);
+  server.on("/ui/clear",    handleUiClear);
+  server.on("/ui/upload", HTTP_POST, handleUiUploadDone, handleUiUpload);
+  server.onNotFound(handleNotFound);
   server.on("/scan/start",  handleScanStart);
   server.on("/scan/stop",   handleScanStop);
   server.on("/scan/status", handleScanStatus);
