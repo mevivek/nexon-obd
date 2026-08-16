@@ -11,6 +11,7 @@
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 
+import { useShellStatus } from '../shell.jsx';
 import { createHold } from '../lib/hold.js';
 import { hz, pushSample } from '../lib/rate.js';
 import { computeFlags } from '../lib/flags.js';
@@ -23,27 +24,6 @@ import { dialPaths, rpmFraction } from './live/dial.js';
 import { rowCells } from './live/rows.js';
 import { emptyHistory, seedHistory, pushHist, isFreshSlot } from './live/hist.js';
 import { nextStatus, scanInfo, POLL_MS, DATA_URL, HISTORY_URL } from './live/status.js';
-
-// Page-local layout, carried over from the <style> block in dashboard_html.h. It
-// stays with the page rather than moving into the shared stylesheet because it is
-// this page's geometry — the hero/dial split and the dial itself exist nowhere else.
-const LIVE_CSS = `
-.glance{display:grid;grid-template-columns:1fr 140px;gap:8px}
-@media(max-width:338px){.glance{grid-template-columns:1fr}}
-.hero .value{font-size:46px;letter-spacing:-.035em}
-/* The hero tile grows with the viewport while the dial beside it stays fixed, so
-   the numeral has to scale or it floats in a widening void. */
-@media(min-width:600px){.hero .value{font-size:68px}}
-.dial{position:relative;width:116px;height:116px;margin:1px auto 0}
-.dial svg{display:block}
-.dial .gv{position:absolute;inset:0;display:flex;flex-direction:column;
-align-items:center;justify-content:center;font-size:23px;font-weight:650;
-letter-spacing:-.02em;font-variant-numeric:tabular-nums}
-.dial .gv .unit{margin-top:1px;font-size:10px;font-weight:400;color:var(--ink2)}
-.vital{grid-template-columns:repeat(auto-fit,minmax(158px,1fr));margin-top:8px}
-.value.sm{font-size:19px}
-.sep{color:var(--muted);margin:0 3px;font-weight:400}
-`;
 
 /** A held reading is dimmed wherever it appears. */
 const dim = (held) => (held ? 'stale' : undefined);
@@ -215,22 +195,18 @@ export function Live() {
   const rows = rowCells(v, q);
   const h = hist.current;
 
+  // The dot, the status text, the Hz readout and the transport all belong to the
+  // sticky header, exactly as they do on the firmware page — the shell owns that
+  // header, so they are reported to it rather than drawn here.
+  useShellStatus({
+    dot: 'dot ' + s.status.cls,
+    text: s.status.text,
+    extra: s.hzText,
+    sub: s.tr,
+  });
+
   return (
     <>
-      <style>{LIVE_CSS}</style>
-
-      {/* The firmware page puts the dot, the status text, the Hz readout and the
-          transport in the sticky header. The shell owns that header here, so they
-          ride at the top of the page instead — same classes, same wording. */}
-      <div class="bar" style="margin:0 0 10px">
-        <span class="sub">{s.tr}</span>
-        <div class="status">
-          <span class={'dot ' + s.status.cls} />
-          <span>{s.status.text}</span>
-          <span style="color:var(--muted)">{s.hzText}</span>
-        </div>
-      </div>
-
       {s.scan.on && (
         <div class="card" style="border-color:var(--blue)">
           <div class="label" style="margin:0 0 3px">DID scan running — <span>{s.scan.ecu}</span></div>

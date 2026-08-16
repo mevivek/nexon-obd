@@ -4,47 +4,32 @@
 // answering. This lists what it has, downloads it, and deletes what you are done
 // with — the partition is 1.5 MB, which is a few hours of driving.
 //
-// Styling note, as on Monitors: trip_html.h's page-local .row2/.nm/.sz/.act/.live
-// rules are not in the shared stylesheet, so they are reproduced inline. The class
-// names are kept where a shared rule exists to hang them on.
+// Styling note, as on Monitors: trip_html.h's page-local .row2/.grow/.nm/.sz/.act/
+// .live rules now live in the page section of styles.css, so the markup below uses
+// the firmware's own class names.
 
 import { useState, useEffect, useCallback } from 'preact/hooks';
 import { useClockSync } from './useClockSync.js';
+import { useShellStatus } from '../shell.jsx';
 import {
   TRIP_POLL_MS, confirmText, kb, sortTrips, storageText,
   tripDelHref, tripHref, tripLabel, tripStatus, usedPct,
 } from './trips/trips.js';
 
-// .row2 — the shared .row bottom-aligns and wraps, which would drop the buttons
-// under the filename on a phone. This row must stay one line.
-const ROW = 'align-items:center;flex-wrap:nowrap;gap:10px';
-const GROW = 'flex:1;min-width:0';
-// .nm — td.mono in the shared sheet only applies inside a table.
-const NM = 'font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px';
-// .sz
-const SZ = 'font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums';
-// .act and its two children.
-const ACT = 'display:flex;gap:6px;flex:none';
-const ACT_BTN = 'font-size:12px;padding:6px 10px;border-radius:7px';
-const ACT_A = ACT_BTN + ';text-decoration:none;background:var(--blue);color:#04121f;font-weight:650';
-// .live — the shared .live only exists as .dot.live.
-const REC = 'font-size:10px;font-weight:650;text-transform:uppercase;'
-  + 'letter-spacing:.07em;color:var(--good)';
-
 function Trip({ f, live, onDelete }) {
   return (
     <div class="card">
-      <div class="row" style={ROW}>
-        <div style={GROW}>
-          <div class="mono" style={NM}>
+      <div class="row2">
+        <div class="grow">
+          <div class="nm">
             {tripLabel(f.name)}
-            {f.name === live && <span class="live" style={REC}> &middot; recording</span>}
+            {f.name === live && <span class="live"> &middot; recording</span>}
           </div>
-          <div style={SZ}>{kb(f.size)}</div>
+          <div class="sz">{kb(f.size)}</div>
         </div>
-        <div class="act" style={ACT}>
-          <a style={ACT_A} href={tripHref(f.name)}>Download</a>
-          <button class="ghost" style={ACT_BTN} onClick={() => onDelete(f.name)}>Delete</button>
+        <div class="act">
+          <a href={tripHref(f.name)}>Download</a>
+          <button class="ghost" onClick={() => onDelete(f.name)}>Delete</button>
         </div>
       </div>
     </div>
@@ -93,20 +78,13 @@ export function Trips() {
   // No client-side filtering: /trips/list now returns only real trip logs.
   const trips = sortTrips(data && data.trips);
 
-  const status = tripStatus(data, err);
+  useShellStatus(tripStatus(data, err));
 
   return (
     <>
-      <h2 class="sec">Trips &middot; CSV logs</h2>
-
-      <div class="row" style="align-items:center;gap:6px;margin-bottom:10px;font-size:12px;color:var(--ink2)">
-        <span class={status.dot} />
-        <span>{status.text}</span>
-      </div>
-
       <div class="card">
-        <div class="row" style={ROW}>
-          <div style={GROW}>
+        <div class="row2">
+          <div class="grow">
             <div class="label" style="margin:0 0 4px">Storage</div>
             <div class="bar2" style="margin:0"><i style={'width:' + usedPct(data)} /></div>
           </div>

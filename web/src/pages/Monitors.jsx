@@ -5,59 +5,35 @@
 // how close a system is to failing rather than only whether a fault has already
 // been stored.
 //
-// A note on styling: mon_html.h carried a page-local <style> block for .mon, .badge,
-// .win and .lim, none of which is in the shared stylesheet. Rather than add rules to
-// styles.css — which is ported verbatim from ui_css.h and is not this port's to
-// change — those four are reproduced as inline style attributes, byte for byte from
-// the firmware's declarations.
+// mon_html.h's page-local .mon/.badge/.win/.lim rules now live in the page section
+// of styles.css, so this page uses those class names directly. Only the two
+// declarations the firmware itself writes inline — the window's extent and the
+// marker's position — are still style attributes here.
 
 import { useState, useEffect } from 'preact/hooks';
 import { useClockSync } from './useClockSync.js';
+import { useShellStatus } from '../shell.jsx';
 import { MON_POLL_MS, monFmt, monName, monNote, monStatus, monWindow } from './monitors/monitors.js';
-
-// .mon — wider than the shared .tiles minimum, because each tile carries a window
-// bar and two limit figures rather than one number.
-const GRID = 'grid-template-columns:repeat(auto-fit,minmax(250px,1fr))';
-
-// .badge, plus the .ok/.bad pair.
-const BADGE = 'float:right;font-size:10px;font-weight:650;text-transform:uppercase;'
-  + 'letter-spacing:.07em;padding:2px 7px;border-radius:999px;';
-const BADGE_OK = BADGE + 'background:rgba(47,191,95,.16);color:var(--good)';
-const BADGE_BAD = BADGE + 'background:rgba(239,75,75,.16);color:var(--critical)';
-
-// .win and its two children.
-const WIN = 'position:relative;height:8px;margin:11px 0 6px;background:var(--base);'
-  + 'border-radius:4px';
-const WIN_U = 'position:absolute;left:0;top:0;width:100%;height:8px;border-radius:4px;'
-  + 'background:rgba(75,155,255,.30)';
-const WIN_I = 'position:absolute;top:-3px;width:3px;height:14px;border-radius:2px;'
-  + 'background:var(--ink);';
-
-// .lim
-const LIM = 'display:flex;justify-content:space-between;font-size:11px;'
-  + 'color:var(--muted);font-variant-numeric:tabular-nums';
-
-const SEP = 'color:var(--base)';
 
 function MonitorTile({ r }) {
   const { pass, pos } = monWindow(r);
   return (
     <div class="tile">
       <div class="label">
-        {monName(r.mid)} <span style={SEP}>&middot;</span> test {r.tid}
-        <span style={pass ? BADGE_OK : BADGE_BAD}>{pass ? 'pass' : 'fail'}</span>
+        {monName(r.mid)} <span style="color:var(--base)">&middot;</span> test {r.tid}
+        <span class={'badge ' + (pass ? 'ok' : 'bad')}>{pass ? 'pass' : 'fail'}</span>
       </div>
       <div class="value">{monFmt(r.v, r.uas)}</div>
-      <div style={WIN}>
-        <u style={WIN_U} />
-        <i style={WIN_I + 'left:calc(' + pos.toFixed(1) + '% - 1px)'} />
+      <div class="win">
+        <u style="left:0;width:100%" />
+        <i style={'left:calc(' + pos.toFixed(1) + '% - 1px)'} />
       </div>
-      <div style={LIM}>
+      <div class="lim">
         <span>min {monFmt(r.lo, r.uas)}</span>
         <span>max {monFmt(r.hi, r.uas)}</span>
       </div>
       <div class="note">
-        {monNote(r)} <span style={SEP}>&middot;</span> uas {r.uas}
+        {monNote(r)} <span style="color:var(--base)">&middot;</span> uas {r.uas}
       </div>
     </div>
   );
@@ -94,19 +70,10 @@ export function Monitors() {
   }, []);
 
   const recs = (data && data.recs) || [];
-  const status = monStatus(data, err);
+  useShellStatus(monStatus(data, err));
 
   return (
     <>
-      <h2 class="sec">Monitors &middot; mode 06</h2>
-
-      {/* The shell's own status pill is scaffolding, so the page states its
-          connection here, in the firmware page's wording. */}
-      <div class="row" style="align-items:center;gap:6px;margin-bottom:10px;font-size:12px;color:var(--ink2)">
-        <span class={status.dot} />
-        <span>{status.text}</span>
-      </div>
-
       <div class="card">
         <div class="hint" style="margin-top:0">
           The ECU's own test results, each with the limits it is judged against
@@ -132,7 +99,7 @@ export function Monitors() {
         </div>
       </details>
 
-      <div class="tiles" style={GRID}>
+      <div class="mon">
         {recs.map((r) => <MonitorTile key={r.mid + r.tid} r={r} />)}
       </div>
 

@@ -5,31 +5,20 @@
 // /scan/status; the sweep itself is driven by the board, which is why the page can
 // be opened, closed and reopened mid-run without touching it.
 //
-// A note on styling, following Monitors.jsx: scan_html.h carried a page-local
-// <style> block for .row>div, .btns and #res, none of which is in the shared
-// stylesheet. Rather than add rules to styles.css — ported verbatim from ui_css.h
-// and not this port's to change — they are reproduced as inline style attributes,
-// byte for byte from the firmware's declarations.
+// A note on styling, following Monitors.jsx: scan_html.h's page-local .row>div,
+// .btns and #res rules now live in the page section of styles.css. The two .row
+// rules are scoped there to `.scan`, which is why the controls card below carries
+// that class — the Watch page shares the .row class and has no such rules of its
+// own, so an unscoped copy would re-flow it.
 
 import { useState, useEffect, useRef } from 'preact/hooks';
 import { useClockSync } from './useClockSync.js';
+import { useShellStatus } from '../shell.jsx';
 import { DASH } from '../lib/format.js';
 import {
   ratePerSec, rateText, etaText, percent, progressText, scanStatus, spacedHex,
   hitsCsv, CSV_NAME,
 } from './scanner/scan.js';
-
-// .row>div, and .row>div:first-child — the ECU select takes its own line so the
-// two four-character ranges can sit side by side under it at phone width.
-const COL = 'flex:1 1 120px;min-width:0';
-const COL_1 = 'flex:1 1 100%;min-width:0';
-// .row select,.row input
-const FILL = 'width:100%';
-// .btns and .btns button
-const BTNS = 'display:flex;gap:8px;margin-top:10px';
-const BTN = 'flex:1;padding:10px 8px';
-// #res — results scroll sideways rather than wrapping hex into an unreadable block.
-const RES = 'min-width:470px';
 
 // A running sweep is watched; an idle board is left alone. The interval used to be
 // created only inside the firmware's Start handler, so opening the page mid-sweep
@@ -85,7 +74,7 @@ export function Scanner() {
   // that waits a round trip to look pressed gets pressed twice — and Start resets
   // cur, tried, negatives and clears the hit list on the board.
   const running = busy || !!(data && data.running);
-  const status = scanStatus(data, err);
+  useShellStatus(scanStatus(data, err));
   const rps = data ? ratePerSec(data.tried, data.elapsed) : 0;
 
   async function start() {
@@ -112,33 +101,24 @@ export function Scanner() {
 
   return (
     <>
-      <h2 class="sec">DID scanner &middot; service 0x22</h2>
-
-      {/* The shell's own status pill is scaffolding, so the page states its
-          connection here, in the firmware page's wording. */}
-      <div class="row" style="align-items:center;gap:6px;margin-bottom:10px;font-size:12px;color:var(--ink2)">
-        <span class={status.dot} />
-        <span>{status.text}</span>
-      </div>
-
-      <div class="card">
+      <div class="card scan">
         <div class="row">
-          <div style={COL_1}>
+          <div>
             <label for="ecu">ECU</label>
-            <select id="ecu" style={FILL} value={ecu} disabled={running}
+            <select id="ecu" value={ecu} disabled={running}
                     onChange={(e) => setEcu(e.currentTarget.value)}>
               <option value="0">ECM &mdash; engine (7E0/7E8)</option>
               <option value="1">TCM &mdash; transmission (7E1/7E9)</option>
             </select>
           </div>
-          <div style={COL}>
+          <div>
             <label for="from">From</label>
-            <input type="text" id="from" style={FILL} value={from} disabled={running}
+            <input type="text" id="from" value={from} disabled={running}
                    onInput={(e) => setFrom(e.currentTarget.value)} />
           </div>
-          <div style={COL}>
+          <div>
             <label for="to">To</label>
-            <input type="text" id="to" style={FILL} value={to} disabled={running}
+            <input type="text" id="to" value={to} disabled={running}
                    onInput={(e) => setTo(e.currentTarget.value)} />
           </div>
         </div>
@@ -146,12 +126,12 @@ export function Scanner() {
         {/* Start resets cur, tried, negatives and clears the hit list on the board,
             and none of that is persisted anywhere — so leaving the button live
             during a sweep put a stray tap between you and losing the whole thing. */}
-        <div style={BTNS}>
-          <button style={BTN} disabled={running} onClick={start}>
+        <div class="btns">
+          <button disabled={running} onClick={start}>
             {running ? 'Scanning…' : 'Start scan'}
           </button>
-          <button class="ghost" style={BTN} disabled={!running} onClick={stop}>Stop</button>
-          <button class="ghost" style={BTN} disabled={!hits.length} onClick={csv}>CSV</button>
+          <button class="ghost" disabled={!running} onClick={stop}>Stop</button>
+          <button class="ghost" disabled={!hits.length} onClick={csv}>CSV</button>
         </div>
 
         <div class="bar2">
@@ -196,7 +176,7 @@ export function Scanner() {
       </div>
 
       <div class="card tw">
-        <table style={RES}>
+        <table id="res">
           <caption>Responding identifiers</caption>
           <thead>
             <tr>

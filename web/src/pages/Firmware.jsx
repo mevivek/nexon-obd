@@ -10,14 +10,8 @@
 
 import { useState, useRef, useEffect } from 'preact/hooks';
 import { useClockSync } from './useClockSync.js';
+import { useShellStatus } from '../shell.jsx';
 import { OTA_MSG, otaFailText, otaOk, progressPct, uploadingText } from './firmware/ota.js';
-
-// .drop
-const DROP = 'border:1px dashed var(--base);border-radius:10px;padding:14px;'
-  + 'text-align:center;color:var(--ink2);font-size:14px';
-const DROP_B = 'display:block;color:var(--ink);font-weight:650;margin-bottom:3px';
-// #go
-const GO = 'width:100%;margin-top:4px';
 
 export function Firmware() {
   useClockSync();
@@ -30,12 +24,12 @@ export function Firmware() {
   const [pct, setPct] = useState('0');
   const [msg, setMsg] = useState({ cls: '', text: '' });
 
-  // ota_html.h put the running FW_VERSION in its own header, and the hint below
+  // ota_html.h put the running FW_VERSION in its own subtitle, and the hint below
   // leans on it: "the version above updates when the new image boots, so it doubles
   // as confirmation that the flash took". The shell's header carries the *web*
   // bundle's version, which is a different number on a different release cadence —
-  // so the firmware's is read once from /data and shown here, or that sentence would
-  // point at something that never changes when you flash.
+  // so the firmware's is read once from /data and reported into the subtitle beside
+  // it, or that sentence would point at something that never changes when you flash.
   const [fw, setFw] = useState(null);
   useEffect(() => {
     let live = true;
@@ -99,17 +93,19 @@ export function Firmware() {
     x.send(fd);
   }
 
+  // No pill: ota_html.h is the one page with nothing to say about the connection.
+  // Only the subtitle detail, which is the running firmware version.
+  useShellStatus({ sub: fw ? 'running v' + fw : undefined });
+
   return (
     <>
-      <h2 class="sec">Firmware Update{fw ? ' · running v' + fw : ''}</h2>
-
       <div class="card">
-        <div style={DROP}>
-          <b style={DROP_B}>Upload a compiled .bin</b>
+        <div class="drop">
+          <b>Upload a compiled .bin</b>
           The board reboots automatically once the write verifies.
         </div>
         <input type="file" accept=".bin" onChange={pick} />
-        <button style={GO} disabled={!file || phase !== 'idle'} onClick={upload}>
+        <button id="go" disabled={!file || phase !== 'idle'} onClick={upload}>
           Upload &amp; flash
         </button>
         <div class="bar2"><i style={'width:' + pct} /></div>

@@ -1,10 +1,18 @@
-/* Ported verbatim from firmware/NexonOBD/ui_css.h. Do not redesign: the firmware
+/* ==========================================================================
+   SECTION 1 — the shared stylesheet.
+
+   Ported verbatim from firmware/NexonOBD/ui_css.h. Do not redesign: the firmware
    pages and this bundle have to look like one product on the same phone, and the
-   comments below record why each rule is the way it is.
+   comments below record why each rule is the way it is. This section must not
+   drift from ui_css.h — a change here is a change the firmware pages need too.
+
+   The page-level rules that used to live in each firmware page's own <style>
+   block are in SECTION 2 at the bottom of this file.
 
    Dark-committed on purpose: this is an in-car display that is never viewed on a
    light background. Status colour is always paired with an icon or text, so nothing
-   depends on colour alone. */
+   depends on colour alone.
+   ========================================================================== */
 :root{
 --plane:#0b0b0c;--surface:#151517;--raised:#1d1d21;
 --ink:#f6f6f5;--ink2:#bab9b4;--muted:#86857f;
@@ -131,3 +139,114 @@ color:var(--ink2);font-variant-numeric:tabular-nums}
 .msg.ok{color:var(--good)}.msg.err{color:var(--critical)}.msg.warn{color:var(--warning)}
 .hint{margin-top:10px;font-size:12px;line-height:1.6;color:var(--muted)}
 code{background:var(--raised);border-radius:5px;padding:1px 5px;font-size:12px}
+
+/* ==========================================================================
+   SECTION 2 — the page rules.
+
+   One block per firmware page, copied from the <style> block in its header:
+   dashboard_html.h, mon_html.h, trip_html.h, ota_html.h, scan_html.h and
+   watch_html.h. Those blocks were page-local because each firmware page is its
+   own document; the SPA serves all six from this one stylesheet, so they live
+   here instead of as inline style attributes on the components.
+
+   Unlike SECTION 1, this half is *not* shared with the firmware's /ui.css. It
+   may grow as the pages do. Anything that belongs to every page belongs above,
+   in ui_css.h first.
+   ========================================================================== */
+
+/* dashboard_html.h — Live ------------------------------------------------- */
+.glance{display:grid;grid-template-columns:1fr 140px;gap:8px}
+@media(max-width:338px){.glance{grid-template-columns:1fr}}
+.hero .value{font-size:46px;letter-spacing:-.035em}
+/* The hero tile grows with the viewport while the dial beside it stays fixed, so
+   the numeral has to scale or it floats in a widening void. */
+@media(min-width:600px){.hero .value{font-size:68px}}
+.dial{position:relative;width:116px;height:116px;margin:1px auto 0}
+.dial svg{display:block}
+.dial .gv{position:absolute;inset:0;display:flex;flex-direction:column;
+align-items:center;justify-content:center;font-size:23px;font-weight:650;
+letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.dial .gv .unit{margin-top:1px;font-size:10px;font-weight:400;color:var(--ink2)}
+.vital{grid-template-columns:repeat(auto-fit,minmax(158px,1fr));margin-top:8px}
+.value.sm{font-size:19px}
+.sep{color:var(--muted);margin:0 3px;font-weight:400}
+
+/* mon_html.h — Monitors --------------------------------------------------- */
+/* Wider than the shared .tiles minimum, because each tile carries a window bar and
+   two limit figures rather than one number. */
+.mon{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:8px}
+.badge{float:right;font-size:10px;font-weight:650;text-transform:uppercase;
+letter-spacing:.07em;padding:2px 7px;border-radius:999px}
+.badge.ok{background:rgba(47,191,95,.16);color:var(--good)}
+.badge.bad{background:rgba(239,75,75,.16);color:var(--critical)}
+.win{position:relative;height:8px;margin:11px 0 6px;background:var(--base);
+border-radius:4px}
+.win>i{position:absolute;top:-3px;width:3px;height:14px;border-radius:2px;
+background:var(--ink)}
+.win>u{position:absolute;top:0;height:8px;border-radius:4px;
+background:rgba(75,155,255,.30)}
+.lim{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);
+font-variant-numeric:tabular-nums}
+
+/* trip_html.h — Trips ----------------------------------------------------- */
+/* The shared .row bottom-aligns and wraps, which would drop the buttons under the
+   filename on a phone. This row stays one line. */
+.row2{display:flex;align-items:center;gap:10px}
+.row2 .grow{flex:1;min-width:0}
+.nm{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px}
+.sz{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.act{display:flex;gap:6px;flex:none}
+.act a,.act button{font-size:12px;padding:6px 10px;text-decoration:none;
+border-radius:7px}
+.act a{background:var(--blue);color:#04121f;font-weight:650}
+.live{font-size:10px;font-weight:650;text-transform:uppercase;letter-spacing:.07em;
+color:var(--good)}
+
+/* ota_html.h — Firmware --------------------------------------------------- */
+#go{width:100%;margin-top:4px}
+.drop{border:1px dashed var(--base);border-radius:10px;padding:14px;text-align:center;
+color:var(--ink2);font-size:14px}
+.drop b{display:block;color:var(--ink);font-weight:650;margin-bottom:3px}
+
+/* scan_html.h — Scanner --------------------------------------------------- */
+/* The ECU select takes its own line so the two four-character ranges can sit side
+   by side under it at phone width.
+
+   The three .row rules are the firmware's declarations, but scoped to the scanner's
+   own card: on the firmware they were page-local, and unscoped here they would also
+   re-flow the Watch page's period/identifier row, which shares the .row class and
+   has no such rules of its own. */
+.scan .row>div{flex:1 1 120px;min-width:0}
+.scan .row>div:first-child{flex:1 1 100%}
+.scan .row select,.scan .row input{width:100%}
+.btns{display:flex;gap:8px;margin-top:10px}
+.btns button{flex:1;padding:10px 8px}
+/* Results scroll sideways rather than wrapping hex into an unreadable block. */
+#res{min-width:470px}
+
+/* watch_html.h — Watch ---------------------------------------------------- */
+/* Narrower than the shared .tiles minimum, because six reference gauges have to fit
+   across a phone beside the values being hunted. */
+.ref{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:8px}
+.ref div{min-width:0}
+.ref .value{font-size:19px}
+/* One watched identifier. */
+.w{background:var(--surface);border:1px solid var(--ring);border-radius:12px;
+padding:10px 12px;margin-bottom:8px;overflow:hidden}
+.wh{display:flex;align-items:baseline;gap:8px}
+.wn{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;
+font-weight:650}
+.wv{margin-left:auto;font-size:22px;font-weight:650;letter-spacing:-.02em;
+font-variant-numeric:tabular-nums}
+.wx{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;
+color:var(--muted)}
+/* A scrolling tray, because a sweep can turn up hundreds. */
+.pick{display:flex;flex-wrap:wrap;gap:6px;max-height:210px;overflow-y:auto;
+margin-top:9px;padding:2px}
+.pick label{display:flex;align-items:center;gap:5px;margin:0;padding:5px 8px;
+background:var(--raised);border:1px solid var(--base);border-radius:8px;
+font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;
+font-weight:400;text-transform:none;letter-spacing:0;color:var(--ink2);cursor:pointer}
+.pick label.on{border-color:var(--blue);color:var(--ink)}
+.pick input{margin:0;width:auto;padding:0}
+.full{width:100%!important;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}

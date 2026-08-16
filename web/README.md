@@ -1,9 +1,14 @@
 # `web/` — the dashboard frontend
 
 A Vite + Preact build of the pages the board currently serves from C++ raw string
-literals. This directory is **scaffolding and the shared library only**: the shell,
-the routing, the build and the ported logic are here and tested; the six pages
-themselves are still the firmware's and get moved over one at a time.
+literals. All six are here now — Live, Monitors, Trips, Watch, Scanner and
+Firmware — behind the shell's hash router, with the shared library under `src/lib/`
+carrying the arithmetic and the tests.
+
+The shell owns the header: the `<h1>` and the static half of the subtitle come from
+`routes.js`, and the single status pill is reported by whichever page is on screen
+through `shell.jsx`. Pages do not draw their own header — that is what made the dot
+and the wording appear twice during the port.
 
 ```bash
 npm install
@@ -80,9 +85,11 @@ also opens straight off disk.
 ### Size budget
 
 **300 KB gzipped for the whole bundle.** `npm run build` prints the per-file gzip
-size and fails the build if the total goes over. Current usage is a few percent, but
-uPlot is declared and not yet imported — expect the real number once the Live page
-lands.
+size and fails the build if the total goes over. With all six pages routed the whole
+bundle is ~22 KB gzipped, about 7 % of the budget. uPlot is still declared and never
+imported — the sparklines are hand-rolled SVG (`live/spark.js`, `watch/series.js`) —
+so it costs nothing in the bundle and is a dependency to drop or use, not a number
+to wait for.
 
 ## Deploying
 
@@ -142,9 +149,11 @@ The firmware suite covers more than the five suites named above. These stay in
 `firmware/test/test_dashboard.mjs` against the firmware pages and are **not**
 duplicated here:
 
-- `suiteStatus`, `suiteVisibility`, `suiteScanBanner`, `suiteSeed` — poll-loop
-  behaviour (`tick()`, the five-failure hysteresis, the scan banner, history
-  seeding). The poll loop is not ported yet; these come with the Live page.
+- `suiteVisibility` — the poll loop stopping while the tab is hidden. It is
+  behaviour of the effect in `Live.jsx` rather than of a pure function, and there is
+  no DOM environment in this test setup to drive it. (`suiteStatus`,
+  `suiteScanBanner` and `suiteSeed` *are* covered here, against the pure step
+  functions they were extracted into: `live/status.js` and `live/hist.js`.)
 - The version-stamp, tab-switching, DID-watch and trip-column suites — they assert
   against firmware source (`NexonOBD.ino`, `triplog.h`, `version.h`) and are about the
   board, not the browser.

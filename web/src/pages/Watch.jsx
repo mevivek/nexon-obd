@@ -5,49 +5,18 @@
 // so a value that moves with one of them gives itself away. The same readings go
 // into the trip CSV as extra columns for anything too subtle to see by eye.
 //
-// A note on styling, following Monitors.jsx: watch_html.h carried a page-local
-// <style> block for .ref, .w, .wh, .wn, .wv, .wx, .pick and .full, none of which is
-// in the shared stylesheet. Rather than add rules to styles.css — ported verbatim
-// from ui_css.h and not this port's to change — they are reproduced as inline style
-// attributes, byte for byte from the firmware's declarations.
+// A note on styling, following Monitors.jsx: watch_html.h's page-local .ref, .w,
+// .wh, .wn, .wv, .wx, .pick and .full rules now live in the page section of
+// styles.css, so the markup below uses the firmware's own class names.
 
 import { useState, useEffect, useRef } from 'preact/hooks';
 import { useClockSync } from './useClockSync.js';
+import { useShellStatus } from '../shell.jsx';
 import { n, DASH } from '../lib/format.js';
 import { parseCsv, mergeHits, watchName, loadStoredHits, saveStoredHits } from './watch/hits.js';
 import { pushReadings, sparkPoints } from './watch/series.js';
 import { addTyped, costText, WATCH_MAX } from './watch/picker.js';
 import { watchStatus } from './watch/status.js';
-
-const MONO = 'ui-monospace,SFMono-Regular,Consolas,monospace';
-
-// .ref, .ref div and .ref .value — narrower than the shared .tiles minimum, because
-// six reference gauges have to fit across a phone beside the values being hunted.
-const REF = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:8px';
-const REF_CELL = 'min-width:0';
-const REF_VALUE = 'font-size:19px';
-
-// .w — one watched identifier.
-const W = 'background:var(--surface);border:1px solid var(--ring);border-radius:12px;'
-  + 'padding:10px 12px;margin-bottom:8px;overflow:hidden';
-const WH = 'display:flex;align-items:baseline;gap:8px';
-const WN = `font-family:${MONO};font-size:13px;font-weight:650`;
-const WV = 'margin-left:auto;font-size:22px;font-weight:650;letter-spacing:-.02em;'
-  + 'font-variant-numeric:tabular-nums';
-const WX = `font-family:${MONO};font-size:11px;color:var(--muted)`;
-
-// .pick and its labels — a scrolling tray, because a sweep can turn up hundreds.
-const PICK = 'display:flex;flex-wrap:wrap;gap:6px;max-height:210px;overflow-y:auto;'
-  + 'margin-top:9px;padding:2px';
-const PICK_LABEL = 'display:flex;align-items:center;gap:5px;margin:0;padding:5px 8px;'
-  + 'background:var(--raised);border:1px solid var(--base);border-radius:8px;'
-  + `font-family:${MONO};font-size:12px;`
-  + 'font-weight:400;text-transform:none;letter-spacing:0;cursor:pointer;';
-const PICK_OFF = PICK_LABEL + 'color:var(--ink2)';
-const PICK_ON = PICK_LABEL + 'border-color:var(--blue);color:var(--ink)';
-const PICK_INPUT = 'margin:0;width:auto;padding:0';
-// .full
-const FULL = `width:100%;font-family:${MONO}`;
 
 /** Faster than any identifier is read, so a new reply is never sat on. */
 const POLL_MS = 700;
@@ -59,9 +28,9 @@ const PICK_MAX = 400;
 function Ref({ label, v, d, unit }) {
   const t = n(v, d);
   return (
-    <div style={REF_CELL}>
+    <div>
       <div class="label">{label}</div>
-      <div class="value" style={REF_VALUE}>
+      <div class="value">
         {t}{t !== DASH && unit ? <span class="unit">{unit}</span> : null}
       </div>
     </div>
@@ -141,7 +110,7 @@ export function Watch() {
   const dids = (data && data.dids) || [];
   const max = (data && data.max) || WATCH_MAX;
   const v = (data && data.v) || {};
-  const status = watchStatus(data, err);
+  useShellStatus(watchStatus(data, err));
   const cost = costText(+period, sel.size);
 
   async function apply(list) {
@@ -217,15 +186,6 @@ export function Watch() {
 
   return (
     <>
-      <h2 class="sec">DID watch &middot; service 0x22</h2>
-
-      {/* The shell's own status pill is scaffolding, so the page states its
-          connection here, in the firmware page's wording. */}
-      <div class="row" style="align-items:center;gap:6px;margin-bottom:10px;font-size:12px;color:var(--ink2)">
-        <span class={status.dot} />
-        <span>{status.text}</span>
-      </div>
-
       {data && data.scanning && (
         <div class="card">
           <div class="msg warn">A sweep has the bus &mdash; watching is paused until it stops.</div>
@@ -234,7 +194,7 @@ export function Watch() {
 
       <h2 class="sec">Reference</h2>
       <div class="card">
-        <div style={REF}>
+        <div class="ref">
           <Ref label="RPM" v={v.rpm} d={0} />
           <Ref label="Speed" v={v.speed} d={0} unit="km/h" />
           <Ref label="Coolant" v={v.coolant} d={0} unit="°C" />
@@ -248,15 +208,15 @@ export function Watch() {
       {dids.map((d) => {
         const pts = sparkPoints(histRef.current[d.name] || []);
         return (
-          <div style={W} key={d.name}>
-            <div style={WH}>
-              <span style={WN}>{d.name}</span>
-              <span style={WX}>{d.ecu}</span>
-              <span class={d.fresh ? '' : 'stale'} style={WV}>
+          <div class="w" key={d.name}>
+            <div class="wh">
+              <span class="wn">{d.name}</span>
+              <span class="wx">{d.ecu}</span>
+              <span class={d.fresh ? 'wv' : 'wv stale'}>
                 {d.len ? String(d.val) : DASH}
               </span>
             </div>
-            <div style={WX}>
+            <div class="wx">
               {d.len
                 ? `${d.hex} · ${d.len} byte${d.len > 1 ? 's' : ''}${d.fresh ? '' : ' · stale'}`
                 : 'no reply yet'}
@@ -296,18 +256,18 @@ export function Watch() {
           </div>
           <div style="flex:1;min-width:140px">
             <label for="man">Or type them</label>
-            <input type="text" id="man" style={FULL} placeholder="1002, 1003, T0140"
+            <input type="text" id="man" class="full" placeholder="1002, 1003, T0140"
                    value={typed} onInput={(e) => setTyped(e.currentTarget.value)} />
           </div>
         </div>
 
-        <div style={PICK}>
+        <div class="pick">
           {hits.length ? hits.map((h) => {
             const k = watchName(h);
             const on = sel.has(k);
             return (
-              <label key={k} style={on ? PICK_ON : PICK_OFF}>
-                <input type="checkbox" style={PICK_INPUT} checked={on}
+              <label key={k} class={on ? 'on' : ''}>
+                <input type="checkbox" checked={on}
                        onChange={(e) => toggle(k, e.currentTarget.checked)} />
                 {k} <span style="color:var(--muted)">{String(h.hex || '').slice(0, 8)}</span>
               </label>
