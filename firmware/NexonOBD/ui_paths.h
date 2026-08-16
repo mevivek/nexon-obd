@@ -76,6 +76,36 @@ static bool uiImmutable(const char *p) {
   return !(n >= 5 && strncmp(p + n - 5, ".html", 5) == 0);
 }
 
+// The name an uploaded file should be stored under.
+//
+// The upload arrives with whatever the browser called it, and that is not something
+// to trust or even to rely on. Phones rename downloads - a version suffix, a "(1)"
+// for a duplicate, a Content-Disposition the sender chose - and the entry point has
+// to be findable by name afterwards or the bundle is invisible to uiInstalled().
+// A name with a space or a bracket in it would not even survive uiPathOk().
+//
+// The build emits exactly one HTML file, so any HTML file IS the entry point.
+// Normalising it removes the whole class of problem: whatever the phone called it,
+// it lands as /index.html. Other assets keep their own basename, which is what a
+// multi-file bundle would need.
+static bool uiStoreName(const char *in, char *out, size_t cap) {
+  if (!in || !*in) return false;
+
+  const char *base = in;                     // drop any directory the client sent
+  for (const char *p = in; *p; p++)
+    if (*p == '/' || *p == '\\') base = p + 1;
+  if (!*base) return false;
+
+  size_t n = strlen(base);
+  bool gz = (n > 3 && strcmp(base + n - 3, ".gz") == 0);
+  size_t stem = gz ? n - 3 : n;
+  bool html = (stem >= 5 && strncmp(base + stem - 5, ".html", 5) == 0);
+
+  int w = html ? snprintf(out, cap, "/index.html%s", gz ? ".gz" : "")
+               : snprintf(out, cap, "/%s", base);
+  return w > 0 && (size_t)w < cap && uiPathOk(out);
+}
+
 // Paths the firmware answers itself. A request for one of these must never fall
 // through to the bundle's single-page fallback, or a mistyped API call would come
 // back as an HTML document with status 200 and be parsed as JSON.

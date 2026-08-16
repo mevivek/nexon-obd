@@ -1584,15 +1584,24 @@ static void handleUiUpload() {
 
   if (up.status == UPLOAD_FILE_START) {
     uiUpOpen = false; uiUpWrote = 0; uiUpErr = nullptr;
-    String name = up.filename;
-    if (!name.startsWith("/")) name = "/" + name;
 
-    char fp[80];
-    if (!uiFsPath(fp, sizeof(fp), name.c_str(), false)) {
+    // Not the name the client sent: see uiStoreName. A phone that renamed the
+    // download to index-1.11.1.html.gz would otherwise install a bundle the
+    // firmware cannot find, and report "no frontend installed" over the top of it.
+    char stored[64];
+    if (!uiStoreName(up.filename.c_str(), stored, sizeof(stored))) {
       uiUpErr = "bad filename";
-      Serial.printf("[ui] rejected upload name %s\n", name.c_str());
+      Serial.printf("[ui] rejected upload name %s\n", up.filename.c_str());
       return;
     }
+
+    char fp[80];
+    if (!uiFsPath(fp, sizeof(fp), stored, false)) {
+      uiUpErr = "bad filename";
+      return;
+    }
+    if (strcmp(stored, up.filename.c_str()) != 0)
+      Serial.printf("[ui] %s stored as %s\n", up.filename.c_str(), stored);
     LittleFS.mkdir(UI_DIR);
 
     // Budget check up front. Replacing an existing file does not count its old
