@@ -1,0 +1,43 @@
+{
+  "_comment": [
+    "The /data contract, declared once so both sides can be checked against it.",
+    "",
+    "The firmware emits these field names in handleData(); the frontend reads them by",
+    "name. Nothing used to check the two agreed - they simply lived in one repo and one",
+    "build, so a rename broke loudly. Once the frontend versions and deploys",
+    "independently that stops being true: a renamed field becomes a blank gauge in the",
+    "car and a green test suite on the bench, which is the failure mode this project",
+    "has hit more than once.",
+    "",
+    "So this file is the contract. firmware/test checks it against handleData() in both",
+    "directions, and web/ checks that every field the frontend reads is declared here.",
+    "Adding a PID means adding it here too, deliberately, in one place.",
+    "",
+    "Field semantics are documented in README.md; units are SAE J1979's."
+  ],
+
+  "top": {
+    "ok": "a sample is fresh enough to render",
+    "fw": "firmware version string",
+    "tr": "active transport: can | ble | none",
+    "seq": "published-sample counter - the page counts these, not fetches",
+    "age": "milliseconds since the sample was published",
+    "error": "why ok is false; absent when it is true"
+  },
+
+  "scan": {
+    "scan": "a DID sweep has the bus",
+    "scanPct": "percent complete",
+    "scanTried": "identifiers attempted",
+    "scanTotal": "identifiers in the requested range",
+    "scanEcu": "ECM | TCM"
+  },
+
+  "v": [
+    "rpm", "speed", "map", "baro", "throttle", "load", "absLoad",
+    "coolant", "oil", "iat", "ambient", "volt",
+    "stft", "ltft", "lambda", "cat", "timing", "fuelRate", "fuel", "runtime",
+    "pedalD", "pedalE", "cmdThrottle", "torqDem", "torqAct", "torqRef",
+    "tripKm", "tripL"
+  ]
+}

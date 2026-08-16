@@ -753,6 +753,51 @@ console.log('\ntrip totals');
      'integration runs on the published sample, after staleness has been applied');
 }
 
+// ---------------------------------------------------------------- /data contract
+//
+// The firmware emits these names; the frontend reads them. While both lived in one
+// build a rename broke loudly, so nothing checked them. The frontend is moving to
+// its own build and its own deploy, which makes a rename silent: a blank gauge in
+// the car and a green suite on the bench.
+//
+// contract/data.json is the declaration both sides are checked against. This end
+// checks it against handleData() in BOTH directions - a field the firmware stopped
+// sending is as much a break as one the contract never knew about.
+console.log('\n/data contract');
+{
+  const contract = JSON.parse(readFileSync(join(here, '../../contract/data.json'), 'utf8'));
+  const ino = readFileSync(join(here, '../NexonOBD/NexonOBD.ino'), 'utf8');
+
+  const body = ino.slice(ino.indexOf('static void handleData()'));
+  const fn = body.slice(0, body.indexOf('\n}\n'));
+  // jsonNum(s, "name", ...) is how every value field is emitted.
+  const emitted = [...fn.matchAll(/jsonNum\(s,\s*"([a-zA-Z_]+)"/g)].map(m => m[1]);
+
+  const declared = contract.v;
+  const missingFromContract = emitted.filter(f => !declared.includes(f));
+  const missingFromFirmware = declared.filter(f => !emitted.includes(f));
+
+  ok(missingFromContract.length === 0,
+     `every field handleData sends is declared${missingFromContract.length
+        ? ` — undeclared: ${missingFromContract.join(', ')}` : ` (${emitted.length} fields)`}`);
+  ok(missingFromFirmware.length === 0,
+     `every declared field is still sent${missingFromFirmware.length
+        ? ` — no longer emitted: ${missingFromFirmware.join(', ')}` : ''}`);
+
+  // Duplicates would mean the same key twice in one JSON object, where the last
+  // one silently wins.
+  eq(new Set(emitted).size, emitted.length, 'no field is emitted twice');
+  eq(new Set(declared).size, declared.length, 'no field is declared twice');
+
+  // The scan block is emitted from jsonScan(), on both the fresh and stale paths.
+  const scanFn = ino.slice(ino.indexOf('static void jsonScan'));
+  const scanKeys = [...scanFn.slice(0, scanFn.indexOf('\n}\n'))
+    .matchAll(/\\"([a-zA-Z]+)\\":/g)].map(m => m[1]);
+  for (const k of Object.keys(contract.scan)) {
+    ok(scanKeys.includes(k), `scan field ${k} is emitted`);
+  }
+}
+
 // ---------------------------------------------------------------- syntax
 //
 // The firmware pages are JavaScript inside C++ raw string literals, so nothing in

@@ -1733,7 +1733,13 @@ void setup() {
   static const char *collect[] = {"If-None-Match"};
   server.collectHeaders(collect, 1);
 
-  server.on("/",            []() { sendPage(DASHBOARD_HTML); });
+  // The bundle when one is installed, the built-in page when not. That fallback is
+  // the whole safety property: an interrupted deploy, a corrupt filesystem or a
+  // first boot all leave the board with a working dashboard rather than nothing.
+  server.on("/",            []() {
+    if (uiInstalled() && uiTrySend("/index.html")) return;
+    sendPage(DASHBOARD_HTML);
+  });
   server.on("/scan",        []() { sendPage(SCAN_HTML); });
   server.on("/ui.css",      handleUiCss);
   server.on("/update", HTTP_GET, []() { sendPage(OTA_HTML); });
