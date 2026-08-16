@@ -8,13 +8,25 @@
 //
 //   NODE_PATH=/opt/node22/lib/node_modules node firmware/test/shots.mjs [outdir]
 
+import { createRequire } from 'node:module';
 import http from 'node:http';
 import { mkdirSync } from 'node:fs';
 import { pageSource, uiCss } from './pagesrc.mjs';
-import { loadPlaywright } from './browser.mjs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
+// ESM resolution ignores NODE_PATH, and playwright is usually installed globally
+// rather than into this repo. createRequire does honour it, so fall back to the
+// well-known global location when a bare specifier does not resolve.
+const require = createRequire(import.meta.url);
+function loadPlaywright() {
+  for (const spec of ['playwright', '/opt/node22/lib/node_modules/playwright',
+                      '/usr/lib/node_modules/playwright']) {
+    try { return require(spec); } catch { /* try the next one */ }
+  }
+  console.error('playwright not found - npm i -g playwright, or set NODE_PATH');
+  process.exit(1);
+}
 const { chromium } = loadPlaywright();
 
 const here = dirname(fileURLToPath(import.meta.url));
