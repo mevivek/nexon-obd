@@ -7,7 +7,7 @@
   "license": "MIT",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && node scripts/gzip.mjs",
+    "build": "vite build && node scripts/inline.mjs && node scripts/gzip.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },

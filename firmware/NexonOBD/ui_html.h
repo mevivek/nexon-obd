@@ -59,9 +59,9 @@ firmware is serving its own pages.</div>
 </div>
 <div class="bar2"><i id="prog"></i></div>
 <div class="msg" id="msg"></div>
-<div class="hint">Select every file the build emitted, including the
-<code>.gz</code> copies. Removing the bundle reverts to the pages built into the
-firmware &mdash; it never leaves the board without a dashboard.</div>
+<div class="hint">The build emits one file, <code>index.html.gz</code>. Pick it and
+upload &mdash; that is the whole frontend. Removing the bundle reverts to the page
+built into the firmware, so this never leaves the board without a dashboard.</div>
 </div>
 
 </div>

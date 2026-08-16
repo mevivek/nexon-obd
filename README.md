@@ -378,13 +378,19 @@ board's work and run regardless of what the browser can see.
 
 | | |
 |---|---|
-| Bundle | 22 KB gzipped, three files |
+| Bundle | 22 KB gzipped, **one file** |
 | Budget | 300 KB, capped in the build and enforced by the firmware on upload |
 | Shares with | trip logs — 300 KB is about 35 minutes of recording capacity |
 
-The firmware serves gzipped assets with `Content-Encoding`, caches content-hashed
-names forever and `index.html` never, and answers `/monitors`, `/trips`, `/watch` and
-`/scan` as redirects into the app's routes so old bookmarks keep working.
+The build inlines the script and stylesheet into `index.html`, so a deploy is a
+single `index.html.gz`. That is not for the bytes — one gzip stream over the lot is
+barely smaller than three — but for how it gets installed: the board is updated from
+a phone standing next to a car, and a firmware update is one `.bin`, so the frontend
+should cost no more than that.
+
+The firmware serves it with `Content-Encoding: gzip` and `no-cache`, so a new deploy
+is always picked up, and answers `/monitors`, `/trips`, `/watch` and `/scan` as
+redirects into the app's routes so old bookmarks keep working.
 
 **The `/data` contract** is declared in `contract/data.json` and checked from both
 ends — the firmware test asserts it against `handleData()` in both directions, so a

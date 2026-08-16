@@ -14,7 +14,7 @@ and the wording appear twice during the port.
 npm install
 npm run dev      # vite dev server, hot reload
 npm run test     # vitest — the ported logic against the firmware's own assertions
-npm run build    # dist/ + .gz copies, with a size report against the budget
+npm run build    # one dist/index.html.gz, with a size report against the budget
 ```
 
 ## What is in `src/lib/`
