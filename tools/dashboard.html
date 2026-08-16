@@ -344,11 +344,23 @@ const ROWS = [
   ['2F','Fuel tank level','fuel','%',1], ['1F','Engine run time','runtime','s',0]
 ];
 
+let tbInit = false;
 function renderTable(v, q) {
-  document.getElementById('tbody').innerHTML = ROWS.map(([pid, name, key, unit, dp]) =>
-    `<tr><td>${pid}</td><td>${name}</td>` +
-    `<td class="num${q[key] ? ' stale' : ''}">${n1(v[key], dp)}</td><td>${unit}</td></tr>`
-  ).join('');
+  if (!tbInit) {
+    document.getElementById('tbody').innerHTML = ROWS.map(([pid, name, key, unit, dp], i) =>
+      `<tr><td>${pid}</td><td>${name}</td>` +
+      `<td id="tr_${i}" class="num"></td><td>${unit}</td></tr>`
+    ).join('');
+    tbInit = true;
+  }
+  for (let i = 0; i < ROWS.length; i++) {
+    const r = ROWS[i];
+    const key = r[2];
+    const dp = r[4];
+    const td = document.getElementById('tr_' + i);
+    td.className = 'num' + (q[key] ? ' stale' : '');
+    td.textContent = n1(v[key], dp);
+  }
 }
 
 function hhmmss(s) {

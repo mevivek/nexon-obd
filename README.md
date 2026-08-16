@@ -450,6 +450,15 @@ hold-last-value logic is pulled out of the served pages and run under node, whic
 also parse-checks every page script; they are JavaScript inside C++ raw string
 literals, so nothing else in the build ever compiles them.
 
+The "All values" table is checked in a real browser instead, because the node
+harness structurally cannot check it: its fake DOM creates any element asked for by
+id, so a table whose cells are built once and then addressed by id passes whether or
+not those ids line up with the rows — the whole suite goes green with every value
+shown against the wrong PID. `test_table.mjs` renders both dashboards, drives them
+through a full sample, a partial poll and a recovery, and asserts that row *i* shows
+the value of the PID row *i* names. It skips itself, without failing, where
+Playwright is not installed.
+
 To look at the pages without flashing anything:
 
 ```bash
