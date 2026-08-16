@@ -1533,7 +1533,11 @@ static bool uiTrySend(const char *path) {
     if (!LittleFS.exists(fp)) continue;
     File f = LittleFS.open(fp, FILE_READ);
     if (!f) continue;
-    if (gz) server.sendHeader("Content-Encoding", "gzip");
+    // Do NOT set Content-Encoding here. streamFile() -> _streamFileCore() already
+    // adds it for a name ending in .gz, and WebServer::sendHeader appends without
+    // deduplicating - so setting it too sends the header twice, the browser reads
+    // "gzip, gzip", decompresses once, fails on the second pass and renders the
+    // compressed bytes as text. That is what shipped in 1.11.0.
     // Asset names carry a content hash, so they can be cached forever. index.html
     // names the others, so it must not be - a deploy would never be picked up.
     server.sendHeader("Cache-Control", uiImmutable(path)
