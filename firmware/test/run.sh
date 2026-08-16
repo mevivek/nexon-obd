@@ -16,3 +16,10 @@ g++ -std=c++17 -I. -Wall -Wextra -Wno-unused-parameter -o isotp_test test_isotp.
 echo
 echo "== dashboard =="
 node test_dashboard.mjs
+
+echo
+echo "== all-values table =="
+# Needs a real browser: the node harness above fakes a DOM that creates any element
+# asked for by id, so it cannot tell a correctly wired table from a broken one.
+# Skips itself, without failing, where playwright is not installed.
+node test_table.mjs
