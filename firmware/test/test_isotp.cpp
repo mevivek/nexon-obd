@@ -613,6 +613,53 @@ static void test_ui_cache_policy() {
   ok(!uiImmutable("/index.html.gz"), "nor its compressed copy");
 }
 
+static void test_ui_store_name() {
+  printf("ui paths: an uploaded file is stored under a name the board chooses\n");
+  char out[64];
+
+  // The one that actually happened: a phone renamed the download, the bundle
+  // installed fine, and the board reported "no frontend installed" over the top of
+  // it because uiInstalled() looks for the entry point by name.
+  ok(uiStoreName("index-1.11.1.html.gz", out, sizeof(out)) &&
+     strcmp(out, "/index.html.gz") == 0, "a version suffix is normalised away");
+  ok(uiStoreName("index.html.gz", out, sizeof(out)) &&
+     strcmp(out, "/index.html.gz") == 0, "the expected name is unchanged");
+  ok(uiStoreName("index.html", out, sizeof(out)) &&
+     strcmp(out, "/index.html") == 0, "uncompressed too");
+
+  // A duplicate download. This one could not even be stored before: uiPathOk
+  // refuses spaces and brackets, so the upload failed outright.
+  ok(uiStoreName("index (1).html.gz", out, sizeof(out)) &&
+     strcmp(out, "/index.html.gz") == 0, "a duplicate-download name is survivable");
+  ok(uiStoreName("Download/index.html.gz", out, sizeof(out)) &&
+     strcmp(out, "/index.html.gz") == 0, "a directory the client sent is dropped");
+  ok(uiStoreName("C:\\Users\\x\\index.html.gz", out, sizeof(out)) &&
+     strcmp(out, "/index.html.gz") == 0, "including a Windows one");
+
+  // Anything that is not the entry point keeps its own name, which is what a
+  // multi-file bundle would need.
+  ok(uiStoreName("app.js.gz", out, sizeof(out)) &&
+     strcmp(out, "/app.js.gz") == 0, "a script keeps its name");
+  ok(uiStoreName("app.css", out, sizeof(out)) &&
+     strcmp(out, "/app.css") == 0, "so does a stylesheet");
+
+  // Traversal cannot be expressed, rather than being detected and refused: the
+  // directory is stripped first, so what is left is always a bare name inside the
+  // bundle directory. "../../etc/passwd" becomes /passwd - junk in /w, not a file
+  // anywhere else - and the budget cap deals with junk.
+  ok(uiStoreName("../../etc/passwd", out, sizeof(out)) &&
+     strcmp(out, "/passwd") == 0, "traversal collapses to a name inside the bundle");
+  ok(uiStoreName("../../index.html", out, sizeof(out)) &&
+     strcmp(out, "/index.html") == 0, "and cannot smuggle the entry point elsewhere");
+
+  // ...but a leftover name still has to be servable at all.
+  ok(!uiStoreName("app (1).js", out, sizeof(out)),
+     "a non-HTML name that cannot be served is refused rather than mangled");
+  ok(!uiStoreName("", out, sizeof(out)), "empty");
+  ok(!uiStoreName(nullptr, out, sizeof(out)), "null");
+  ok(!uiStoreName("index.html.gz", out, 4), "and a buffer too small is a refusal");
+}
+
 static void test_ui_budget() {
   printf("ui paths: the bundle's share of a shared filesystem\n");
   ok(strcmp(UI_DIR, "/w") == 0, "the bundle lives in its own directory");
@@ -1040,6 +1087,7 @@ int main() {
   test_ui_path_rejects_everything_else();
   test_ui_content_types();
   test_ui_cache_policy();
+  test_ui_store_name();
   test_ui_budget();
   test_ui_api_paths_never_fall_through();
 

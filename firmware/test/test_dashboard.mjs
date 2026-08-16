@@ -275,6 +275,37 @@ console.log('\ntrip totals');
      'integration runs on the published sample, after staleness has been applied');
 }
 
+// ---------------------------------------------------------------- bundle serving
+//
+// The firmware's own serving path has no runtime coverage: the browser suites serve
+// web/dist through their own static handler that imitates the board, so nothing
+// exercises uiTrySend() short of flashing. That is how a double Content-Encoding
+// header reached the car in 1.11.0 - streamFile() adds it for any name ending .gz,
+// WebServer::sendHeader appends without deduplicating, and the browser rendered the
+// compressed bytes as text.
+//
+// These are source assertions, which is weak, but they pin the specific mistakes so
+// they cannot come back silently.
+console.log('\nbundle serving');
+{
+  const ino = readFileSync(join(here, '../NexonOBD/NexonOBD.ino'), 'utf8');
+  const send = ino.slice(ino.indexOf('static bool uiTrySend'));
+  const body = send.slice(0, send.indexOf('\n}\n'));
+
+  ok(/streamFile\(/.test(body), 'the bundle is streamed rather than read into a String');
+  ok(!/sendHeader\("Content-Encoding"/.test(body),
+     'and Content-Encoding is left to streamFile, which already sets it for .gz');
+
+  // The entry point must never be cached forever: it is the whole bundle now, so a
+  // deploy that is not picked up is a deploy that did nothing.
+  ok(/uiImmutable\(path\)/.test(body), 'cache policy is decided per asset');
+  ok(/"no-cache"/.test(body), 'and the entry point revalidates');
+
+  // Names come off the wire; the board decides what it stores.
+  ok(/uiStoreName\(up\.filename\.c_str\(\)/.test(ino),
+     'uploads are stored under a name the firmware chooses');
+}
+
 // ---------------------------------------------------------------- /data contract
 //
 // The firmware emits these names; the frontend reads them. While both lived in one
