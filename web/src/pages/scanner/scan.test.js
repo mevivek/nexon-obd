@@ -7,7 +7,8 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-  hms, ratePerSec, rateText, etaText, percent, progressText, spacedHex, hitsCsv, CSV_NAME,
+  hms, ratePerSec, rateText, etaText, percent, progressText, scanStatus, spacedHex,
+  hitsCsv, CSV_NAME,
 } from './scan.js';
 import { parseCsv } from '../watch/hits.js';
 import { DASH } from '../../lib/format.js';
@@ -71,6 +72,35 @@ describe('progress', () => {
   it('survives a status that has not arrived yet', () => {
     expect(progressText(0, 0)).toBe('0 / 0 · 0.0%');
     expect(progressText(undefined, undefined)).toBe('0 / 0 · 0.0%');
+  });
+});
+
+describe('what the header says', () => {
+  it('separates a stalled sweep from a running one', () => {
+    // The distinction the state exists for: a stalled sweep is alive and holding
+    // its place because the ECU stopped answering — ignition off, most likely. It
+    // must not say "scanning", because the honest response to it is to switch the
+    // ignition on, while the response to a genuinely stuck one is to press Stop.
+    expect(scanStatus({ running: true, stalled: true }, false))
+      .toEqual({ dot: 'dot stale', text: 'waiting for ECU' });
+    expect(scanStatus({ running: true, stalled: false }, false))
+      .toEqual({ dot: 'dot live', text: 'scanning' });
+    expect(scanStatus({ running: false, stalled: false }, false))
+      .toEqual({ dot: 'dot', text: 'idle' });
+  });
+
+  it('a stalled sweep that is somehow not running still reads as waiting', () => {
+    // Stalled outranks running either way — it is the state that explains itself.
+    expect(scanStatus({ running: false, stalled: true }, false).text).toBe('waiting for ECU');
+  });
+
+  it('reports an unreachable board over anything it last knew', () => {
+    expect(scanStatus({ running: true }, true))
+      .toEqual({ dot: 'dot dead', text: 'ESP32 unreachable' });
+  });
+
+  it('is idle before the first status arrives', () => {
+    expect(scanStatus(null, false)).toEqual({ dot: 'dot', text: 'idle' });
   });
 });
 

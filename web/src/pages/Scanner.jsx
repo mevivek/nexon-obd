@@ -4,92 +4,89 @@
 // the wording throughout says so on purpose. Everything it shows comes from
 // /scan/status; the sweep itself is driven by the board, which is why the page can
 // be opened, closed and reopened mid-run without touching it.
+//
+// A note on styling, following Monitors.jsx: scan_html.h carried a page-local
+// <style> block for .row>div, .btns and #res, none of which is in the shared
+// stylesheet. Rather than add rules to styles.css — ported verbatim from ui_css.h
+// and not this port's to change — they are reproduced as inline style attributes,
+// byte for byte from the firmware's declarations.
 
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useState, useEffect, useRef } from 'preact/hooks';
+import { useClockSync } from './useClockSync.js';
 import { DASH } from '../lib/format.js';
 import {
-  ratePerSec, rateText, etaText, percent, progressText, spacedHex, hitsCsv, CSV_NAME,
+  ratePerSec, rateText, etaText, percent, progressText, scanStatus, spacedHex,
+  hitsCsv, CSV_NAME,
 } from './scanner/scan.js';
 
-// The page's own rules, as they were in the firmware's <style> block. They live
-// with the page rather than in styles.css because they are this layout's, and the
-// element is unmounted with the page. `#res` became a class so the markup carries
-// no ids into a single-page app.
-const PAGE_CSS = `
-.scan .row>div{flex:1 1 120px;min-width:0}
-.scan .row>div:first-child{flex:1 1 100%}
-.scan .row select,.scan .row input{width:100%}
-.scan .btns{display:flex;gap:8px;margin-top:10px}
-.scan .btns button{flex:1;padding:10px 8px}
-/* Results scroll sideways rather than wrapping hex into an unreadable block. */
-.scan-res{min-width:470px}
-`;
+// .row>div, and .row>div:first-child — the ECU select takes its own line so the
+// two four-character ranges can sit side by side under it at phone width.
+const COL = 'flex:1 1 120px;min-width:0';
+const COL_1 = 'flex:1 1 100%;min-width:0';
+// .row select,.row input
+const FILL = 'width:100%';
+// .btns and .btns button
+const BTNS = 'display:flex;gap:8px;margin-top:10px';
+const BTN = 'flex:1;padding:10px 8px';
+// #res — results scroll sideways rather than wrapping hex into an unreadable block.
+const RES = 'min-width:470px';
 
-/** Poll fast enough to watch a sweep move, slow enough to leave the bus alone. */
-const POLL_RUNNING = 1000;
-const POLL_IDLE = 4000;
+// A running sweep is watched; an idle board is left alone. The interval used to be
+// created only inside the firmware's Start handler, so opening the page mid-sweep
+// showed one frozen snapshot and the only way to get moving numbers was to press
+// Start — which wipes the run.
+const POLL_RUNNING_MS = 1000;
+const POLL_IDLE_MS = 4000;
 
 export function Scanner() {
+  useClockSync();
+
   const [ecu, setEcu] = useState('0');
   const [from, setFrom] = useState('0000');
   const [to, setTo] = useState('FFFF');
-  const [st, setSt] = useState(null);
-  const [dead, setDead] = useState(false);
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(false);
   // Start is reflected the moment it is pressed, not a round trip later.
   const [busy, setBusy] = useState(false);
   const pollRef = useRef(null);
 
   // The page must be live however the scan was started — it may have been kicked
   // off from another phone, or before this tab was opened, since the board runs it.
-  // The firmware's interval used to be created only inside the Start handler, so
-  // opening this page mid-sweep showed one frozen snapshot and the only way to get
-  // moving numbers was to press Start, which wipes the run.
   useEffect(() => {
-    let alive = true, timer = null, seq = 0;
+    let live = true, timer = null, seq = 0;
 
-    async function tick() {
+    async function poll() {
       const my = ++seq;                  // a manual poll supersedes one in flight
       clearTimeout(timer);
-      let next = POLL_IDLE;
+      let next = POLL_IDLE_MS;
       try {
         const j = await (await fetch('/scan/status', { cache: 'no-store' })).json();
-        if (!alive || my !== seq) return;
-        setSt(j);
-        setDead(false);
+        if (!live || my !== seq) return;
+        setData(j);
+        setErr(false);
         setBusy(false);
-        next = j.running ? POLL_RUNNING : POLL_IDLE;
+        next = j.running ? POLL_RUNNING_MS : POLL_IDLE_MS;
       } catch (e) {
-        if (!alive || my !== seq) return;
-        setDead(true);
+        // The hits already on screen stay there; only the header changes. A dropped
+        // poll does not mean the identifiers it already found stopped answering.
+        if (!live || my !== seq) return;
+        setErr(true);
       }
-      timer = setTimeout(tick, next);
+      timer = setTimeout(poll, next);
     }
 
-    pollRef.current = tick;
-    tick();
-
-    // The board has no clock of its own. Whichever page you open hands over the
-    // time, so anything it records carries a real timestamp.
-    fetch('/time?ms=' + Date.now(), { cache: 'no-store' }).catch(() => {});
-
-    return () => { alive = false; clearTimeout(timer); };
+    pollRef.current = poll;
+    poll();
+    return () => { live = false; clearTimeout(timer); };
   }, []);
 
-  const hits = (st && st.hits) || [];
+  const hits = (data && data.hits) || [];
   // Optimistic while Start is in flight: the board is the authority, but a button
-  // that waits a round trip to look pressed gets pressed twice.
-  const running = busy || !!(st && st.running);
-  const stalled = !!(st && st.stalled);
-
-  const rps = st ? ratePerSec(st.tried, st.elapsed) : 0;
-
-  // Stalled is not idle and not scanning: the sweep is alive and holding position
-  // because the ECU stopped answering. Saying "scanning" would imply progress that
-  // is deliberately not happening.
-  const state = dead ? 'ESP32 unreachable'
-    : stalled ? 'waiting for ECU'
-      : running ? 'scanning' : 'idle';
-  const dot = dead ? 'dead' : stalled ? 'stale' : running ? 'live' : '';
+  // that waits a round trip to look pressed gets pressed twice — and Start resets
+  // cur, tried, negatives and clears the hit list on the board.
+  const running = busy || !!(data && data.running);
+  const status = scanStatus(data, err);
+  const rps = data ? ratePerSec(data.tried, data.elapsed) : 0;
 
   async function start() {
     setBusy(true);
@@ -103,6 +100,8 @@ export function Scanner() {
     if (pollRef.current) pollRef.current();
   }
 
+  // Built and downloaded in the browser. The board is never asked for a file — it
+  // has better things to do with its one thread — and nothing leaves the phone.
   function csv() {
     if (!hits.length) return;
     const a = document.createElement('a');
@@ -112,32 +111,34 @@ export function Scanner() {
   }
 
   return (
-    <div class="scan">
-      <style>{PAGE_CSS}</style>
+    <>
+      <h2 class="sec">DID scanner &middot; service 0x22</h2>
 
-      <div style="display:flex;align-items:center;gap:9px;margin-bottom:10px">
-        <span class="sub">service 0x22</span>
-        <div class="status"><span class={'dot ' + dot} /><span>{state}</span></div>
+      {/* The shell's own status pill is scaffolding, so the page states its
+          connection here, in the firmware page's wording. */}
+      <div class="row" style="align-items:center;gap:6px;margin-bottom:10px;font-size:12px;color:var(--ink2)">
+        <span class={status.dot} />
+        <span>{status.text}</span>
       </div>
 
       <div class="card">
         <div class="row">
-          <div>
+          <div style={COL_1}>
             <label for="ecu">ECU</label>
-            <select id="ecu" value={ecu} disabled={running}
+            <select id="ecu" style={FILL} value={ecu} disabled={running}
                     onChange={(e) => setEcu(e.currentTarget.value)}>
-              <option value="0">ECM — engine (7E0/7E8)</option>
-              <option value="1">TCM — transmission (7E1/7E9)</option>
+              <option value="0">ECM &mdash; engine (7E0/7E8)</option>
+              <option value="1">TCM &mdash; transmission (7E1/7E9)</option>
             </select>
           </div>
-          <div>
+          <div style={COL}>
             <label for="from">From</label>
-            <input type="text" id="from" value={from} disabled={running}
+            <input type="text" id="from" style={FILL} value={from} disabled={running}
                    onInput={(e) => setFrom(e.currentTarget.value)} />
           </div>
-          <div>
+          <div style={COL}>
             <label for="to">To</label>
-            <input type="text" id="to" value={to} disabled={running}
+            <input type="text" id="to" style={FILL} value={to} disabled={running}
                    onInput={(e) => setTo(e.currentTarget.value)} />
           </div>
         </div>
@@ -145,55 +146,57 @@ export function Scanner() {
         {/* Start resets cur, tried, negatives and clears the hit list on the board,
             and none of that is persisted anywhere — so leaving the button live
             during a sweep put a stray tap between you and losing the whole thing. */}
-        <div class="btns">
-          <button id="go" disabled={running} onClick={start}>
+        <div style={BTNS}>
+          <button style={BTN} disabled={running} onClick={start}>
             {running ? 'Scanning…' : 'Start scan'}
           </button>
-          <button id="stop" class="ghost" disabled={!running} onClick={stop}>Stop</button>
-          <button id="csv" class="ghost" disabled={!hits.length} onClick={csv}>CSV</button>
+          <button class="ghost" style={BTN} disabled={!running} onClick={stop}>Stop</button>
+          <button class="ghost" style={BTN} disabled={!hits.length} onClick={csv}>CSV</button>
         </div>
 
         <div class="bar2">
-          <i style={{ width: percent(st && st.tried, st && st.total) + '%' }} />
+          <i style={'width:' + percent(data && data.tried, data && data.total) + '%'} />
         </div>
-        {/* Counts first: over a 65,536-identifier sweep the percentage sits on the
-            same figure for ten minutes at a time and the page reads as stuck. */}
-        <div class="note">{progressText(st && st.tried, st && st.total)}</div>
+        {/* Counts, then the percentage. Over a 65,536-identifier sweep the figure
+            sits on "0.5%" for ten minutes at a time, so a percentage on its own
+            reads as stuck — and the instinctive response to a stuck sweep is to
+            press Start, which discards it. The counts move on every request. */}
+        <div class="note">{progressText(data && data.tried, data && data.total)}</div>
 
-        {stalled && (
+        {data && data.stalled && (
           <div class="hint" style="color:var(--warning)">
-            The ECU has stopped answering — ignition off, most likely. The sweep is holding
+            The ECU has stopped answering &mdash; ignition off, most likely. The sweep is holding
             its place rather than recording identifiers it never really asked, and picks up again
             on its own when the car answers. Progress is saved, so switching off is safe.
           </div>
         )}
 
         <div class="meta">
-          <span>at <b>{st ? st.cur : DASH}</b></span>
-          <span>tried <b>{st ? st.tried : 0}</b></span>
+          <span>at <b>{data ? data.cur : DASH}</b></span>
+          <span>tried <b>{data ? data.tried : 0}</b></span>
           <span>hits <b>{hits.length}</b></span>
-          <span>negatives <b>{st ? st.negatives : 0}</b></span>
-          <span>elapsed <b>{st ? st.elapsed : 0}</b>s</span>
-          <span>rate <b>{st ? rateText(rps) : DASH}</b>/s</span>
-          <span>left <b>{st ? etaText(rps, st.tried, st.total) : DASH}</b></span>
+          <span>negatives <b>{data ? data.negatives : 0}</b></span>
+          <span>elapsed <b>{data ? data.elapsed : 0}</b>s</span>
+          <span>rate <b>{data ? rateText(rps) : DASH}</b>/s</span>
+          <span>left <b>{data ? etaText(rps, data.tried, data.total) : DASH}</b></span>
         </div>
 
         <div class="hint">
-          A scan keeps running if you leave this page or close the browser —
+          A scan keeps running if you leave this page or close the browser &mdash;
           it is driven by the board, not by this tab. The scanner takes most of the bus, so
-          live dashboard values keep updating but slowly. Use Stop to end it — starting a
+          live dashboard values keep updating but slowly. Use Stop to end it &mdash; starting a
           new scan discards the identifiers found so far.<br /><br />
           Progress and hits are saved as the sweep runs, so it resumes where it left off after
-          the car is switched off or the board is reflashed — a full pass no longer has to
+          the car is switched off or the board is reflashed &mdash; a full pass no longer has to
           happen in one sitting.<br /><br />
           Service 0x22 is a read. This page never sends 0x2E (write), 0x31 (routine),
-          0x11 (reset) or 0x10 (session change). A full 0000–FFFF pass is 65,536 requests.
+          0x11 (reset) or 0x10 (session change). A full 0000&ndash;FFFF pass is 65,536 requests.
           Run it parked.
         </div>
       </div>
 
       <div class="card tw">
-        <table class="scan-res">
+        <table style={RES}>
           <caption>Responding identifiers</caption>
           <thead>
             <tr>
@@ -212,13 +215,13 @@ export function Scanner() {
             )) : (
               <tr>
                 <td colspan="5" style="color:var(--muted)">
-                  {st || dead ? 'Nothing yet.' : 'No scan run yet.'}
+                  {data || err ? 'Nothing yet.' : 'No scan run yet.'}
                 </td>
               </tr>
             )}
           </tbody>
         </table>
       </div>
-    </div>
+    </>
   );
 }

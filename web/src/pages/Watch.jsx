@@ -4,53 +4,64 @@
 // reads a chosen handful continuously and puts them next to rpm, coolant and load,
 // so a value that moves with one of them gives itself away. The same readings go
 // into the trip CSV as extra columns for anything too subtle to see by eye.
+//
+// A note on styling, following Monitors.jsx: watch_html.h carried a page-local
+// <style> block for .ref, .w, .wh, .wn, .wv, .wx, .pick and .full, none of which is
+// in the shared stylesheet. Rather than add rules to styles.css — ported verbatim
+// from ui_css.h and not this port's to change — they are reproduced as inline style
+// attributes, byte for byte from the firmware's declarations.
 
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useState, useEffect, useRef } from 'preact/hooks';
+import { useClockSync } from './useClockSync.js';
 import { n, DASH } from '../lib/format.js';
-import {
-  parseCsv, mergeHits, watchName, loadStoredHits, saveStoredHits,
-} from './watch/hits.js';
+import { parseCsv, mergeHits, watchName, loadStoredHits, saveStoredHits } from './watch/hits.js';
 import { pushReadings, sparkPoints } from './watch/series.js';
 import { addTyped, costText, WATCH_MAX } from './watch/picker.js';
+import { watchStatus } from './watch/status.js';
 
-// The page's own rules, as they were in the firmware's <style> block.
-const PAGE_CSS = `
-.watch .ref{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:8px}
-.watch .ref div{min-width:0}
-.watch .ref .value{font-size:19px}
-.watch .w{background:var(--surface);border:1px solid var(--ring);border-radius:12px;
-padding:10px 12px;margin-bottom:8px;overflow:hidden}
-.watch .wh{display:flex;align-items:baseline;gap:8px}
-.watch .wn{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;
-font-weight:650}
-.watch .wv{margin-left:auto;font-size:22px;font-weight:650;letter-spacing:-.02em;
-font-variant-numeric:tabular-nums}
-.watch .wx{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;
-color:var(--muted)}
-.watch .pick{display:flex;flex-wrap:wrap;gap:6px;max-height:210px;overflow-y:auto;
-margin-top:9px;padding:2px}
-.watch .pick label{display:flex;align-items:center;gap:5px;margin:0;padding:5px 8px;
-background:var(--raised);border:1px solid var(--base);border-radius:8px;
-font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;
-font-weight:400;text-transform:none;letter-spacing:0;color:var(--ink2);cursor:pointer}
-.watch .pick label.on{border-color:var(--blue);color:var(--ink)}
-.watch .pick input{margin:0;width:auto;padding:0}
-.watch .full{width:100%!important;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
-`;
+const MONO = 'ui-monospace,SFMono-Regular,Consolas,monospace';
+
+// .ref, .ref div and .ref .value — narrower than the shared .tiles minimum, because
+// six reference gauges have to fit across a phone beside the values being hunted.
+const REF = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:8px';
+const REF_CELL = 'min-width:0';
+const REF_VALUE = 'font-size:19px';
+
+// .w — one watched identifier.
+const W = 'background:var(--surface);border:1px solid var(--ring);border-radius:12px;'
+  + 'padding:10px 12px;margin-bottom:8px;overflow:hidden';
+const WH = 'display:flex;align-items:baseline;gap:8px';
+const WN = `font-family:${MONO};font-size:13px;font-weight:650`;
+const WV = 'margin-left:auto;font-size:22px;font-weight:650;letter-spacing:-.02em;'
+  + 'font-variant-numeric:tabular-nums';
+const WX = `font-family:${MONO};font-size:11px;color:var(--muted)`;
+
+// .pick and its labels — a scrolling tray, because a sweep can turn up hundreds.
+const PICK = 'display:flex;flex-wrap:wrap;gap:6px;max-height:210px;overflow-y:auto;'
+  + 'margin-top:9px;padding:2px';
+const PICK_LABEL = 'display:flex;align-items:center;gap:5px;margin:0;padding:5px 8px;'
+  + 'background:var(--raised);border:1px solid var(--base);border-radius:8px;'
+  + `font-family:${MONO};font-size:12px;`
+  + 'font-weight:400;text-transform:none;letter-spacing:0;cursor:pointer;';
+const PICK_OFF = PICK_LABEL + 'color:var(--ink2)';
+const PICK_ON = PICK_LABEL + 'border-color:var(--blue);color:var(--ink)';
+const PICK_INPUT = 'margin:0;width:auto;padding:0';
+// .full
+const FULL = `width:100%;font-family:${MONO}`;
 
 /** Faster than any identifier is read, so a new reply is never sat on. */
 const POLL_MS = 700;
 
-/** The hits offered as checkboxes. A full sweep would otherwise be 65,536 of them. */
+/** How many sweep hits are offered as checkboxes. A full pass would be 65,536. */
 const PICK_MAX = 400;
 
 /** One reference gauge. The unit rides with the value, and only when there is one. */
 function Ref({ label, v, d, unit }) {
   const t = n(v, d);
   return (
-    <div>
+    <div style={REF_CELL}>
       <div class="label">{label}</div>
-      <div class="value">
+      <div class="value" style={REF_VALUE}>
         {t}{t !== DASH && unit ? <span class="unit">{unit}</span> : null}
       </div>
     </div>
@@ -58,37 +69,42 @@ function Ref({ label, v, d, unit }) {
 }
 
 export function Watch() {
-  const [st, setSt] = useState(null);
-  const [dead, setDead] = useState(false);
+  useClockSync();
+
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(false);
   const [sel, setSel] = useState(() => new Set());
   const [hits, setHits] = useState([]);
-  const [per, setPer] = useState('1000');
-  const [man, setMan] = useState('');
+  const [period, setPeriod] = useState('1000');
+  const [typed, setTyped] = useState('');
   const [msg, setMsg] = useState(null);
 
-  // Traces live across polls, so they are refs: re-rendering must not restart a
-  // history that took a minute of driving to collect.
+  // Traces live across polls, so they are refs rather than state: a re-render must
+  // not restart a history that took a minute of driving to collect.
   const histRef = useRef({});
   const ageRef = useRef({});
   const keyRef = useRef('');
-  const appliedRef = useRef(false);
+  const adoptedRef = useRef(false);
   const pollRef = useRef(null);
 
   useEffect(() => {
-    let alive = true;
+    let live = true;
 
     async function poll() {
       try {
         const j = await (await fetch('/watch/list', { cache: 'no-store' })).json();
-        if (!alive) return;
-        if (!appliedRef.current) {       // adopt what the board is already watching, once
-          appliedRef.current = true;
+        if (!live) return;
+        // Adopt what the board is already watching, once. The set survives a reboot
+        // and may have been chosen from another phone, so the page has to arrive at
+        // whatever is already running rather than assert an empty selection over it.
+        if (!adoptedRef.current) {
+          adoptedRef.current = true;
           setSel(new Set((j.dids || []).map((d) => d.name)));
-          setPer(String(j.period));
+          setPeriod(String(j.period));
         }
-        // Reset the traces only when the *set* changes. The firmware rebuilt the
-        // markup on every poll otherwise, which replaced the svg elements and left
-        // every sparkline permanently empty.
+        // Traces are discarded only when the *set* changes. The firmware rebuilt the
+        // markup on every poll to begin with, which replaced the svg elements and
+        // left every sparkline permanently empty.
         const key = (j.dids || []).map((d) => d.name).join(',');
         if (key !== keyRef.current) {
           keyRef.current = key;
@@ -96,18 +112,19 @@ export function Watch() {
           ageRef.current = {};
         }
         pushReadings(histRef.current, ageRef.current, j.dids);
-        setSt(j);
-        setDead(false);
+        setData(j);
+        setErr(false);
       } catch (e) {
-        if (alive) setDead(true);
+        // The values already on screen stay; only the header changes.
+        if (live) setErr(true);
       }
     }
 
     pollRef.current = poll;
     poll();
-    const id = setInterval(poll, POLL_MS);
+    const t = setInterval(poll, POLL_MS);
 
-    // A file loaded earlier, before the board is asked anything.
+    // A file loaded on an earlier visit, before the board is asked anything.
     const stored = loadStoredHits();
     if (stored.length) setHits((h) => mergeHits(h, stored));
 
@@ -115,39 +132,34 @@ export function Watch() {
     // are offered as checkboxes rather than leaving you to copy hex off another page.
     fetch('/scan/status', { cache: 'no-store' })
       .then((r) => r.json())
-      .then((j) => { if (alive) setHits((h) => mergeHits(h, (j.hits || []).slice(0, PICK_MAX))); })
-      .catch(() => {});
+      .then((j) => { if (live) setHits((h) => mergeHits(h, (j.hits || []).slice(0, PICK_MAX))); })
+      .catch(() => { /* no board, no board hits — a loaded file still works */ });
 
-    // The board has no clock of its own. Whichever page you open hands over the
-    // time, so anything it records carries a real timestamp.
-    fetch('/time?ms=' + Date.now(), { cache: 'no-store' }).catch(() => {});
-
-    return () => { alive = false; clearInterval(id); };
+    return () => { live = false; clearInterval(t); };
   }, []);
 
-  const dids = (st && st.dids) || [];
-  const max = (st && st.max) || WATCH_MAX;
-  const v = (st && st.v) || {};
-  const scanning = !!(st && st.scanning);
-
-  const state = dead ? 'ESP32 unreachable'
-    : scanning ? 'paused — scanning'
-      : dids.length ? `${dids.length} watched` : 'idle';
-  const dot = dead ? 'dead' : dids.length ? (scanning ? 'stale' : 'live') : '';
+  const dids = (data && data.dids) || [];
+  const max = (data && data.max) || WATCH_MAX;
+  const v = (data && data.v) || {};
+  const status = watchStatus(data, err);
+  const cost = costText(+period, sel.size);
 
   async function apply(list) {
     setMsg({ cls: 'msg', text: 'applying…' });
     try {
       const r = await (await fetch(
-        '/watch/set?period=' + per + '&d=' + encodeURIComponent(list),
+        '/watch/set?period=' + period + '&d=' + encodeURIComponent(list),
         { cache: 'no-store' },
       )).json();
+      // Changing the set starts a new trip CSV, because the columns are fixed when
+      // the file is opened. Saying so is the difference between that being a
+      // documented consequence and it being a surprise in the log.
       setMsg({
         cls: 'msg ok',
         text: r.changed ? `Watching ${r.n}. A new trip CSV was started.`
           : `Watching ${r.n}. Nothing changed.`,
       });
-      setMan('');
+      setTyped('');
       histRef.current = {};
       ageRef.current = {};
       keyRef.current = '';
@@ -158,7 +170,7 @@ export function Watch() {
   }
 
   function onApply() {
-    const next = addTyped(sel, man, max);
+    const next = addTyped(sel, typed, max);
     setSel(next);
     apply([...next].join(','));
   }
@@ -168,17 +180,18 @@ export function Watch() {
     apply('');
   }
 
-  function toggle(k, checked) {
-    if (checked) {
-      if (sel.size >= max) { setMsg({ cls: 'msg err', text: `At most ${max} at a time.` }); return; }
-      const s = new Set(sel); s.add(k); setSel(s);
-    } else {
-      const s = new Set(sel); s.delete(k); setSel(s);
+  function toggle(k, on) {
+    if (on && sel.size >= max) {
+      setMsg({ cls: 'msg err', text: `At most ${max} at a time.` });
+      return;                            // the box un-ticks itself on the re-render
     }
+    const s = new Set(sel);
+    if (on) s.add(k); else s.delete(k);
+    setSel(s);
   }
 
-  // Read by the browser's own FileReader and kept in the browser. Nothing is
-  // uploaded, and the board is never told a file was opened.
+  // Read by the browser's own FileReader. Nothing is uploaded, and the board is
+  // never told a file was opened.
   function onFile(e) {
     const f = e.currentTarget.files && e.currentTarget.files[0];
     if (!f) return;
@@ -187,8 +200,8 @@ export function Watch() {
       const found = parseCsv(String(r.result));
       setHits((prev) => {
         const merged = mergeHits(prev, found);
-        // Kept so a reload does not send you back to the file picker. This is a
-        // convenience list, not a source of truth — the board owns the hits it
+        // Kept in the browser so a reload does not send you back to the file picker.
+        // A convenience list, not a source of truth — the board owns the hits it
         // found itself, and this never writes to it.
         saveStoredHits(merged);
         return merged;
@@ -202,26 +215,26 @@ export function Watch() {
     r.readAsText(f);
   }
 
-  const cost = costText(+per, sel.size);
-
   return (
-    <div class="watch">
-      <style>{PAGE_CSS}</style>
+    <>
+      <h2 class="sec">DID watch &middot; service 0x22</h2>
 
-      <div style="display:flex;align-items:center;gap:9px;margin-bottom:10px">
-        <span class="sub">service 0x22</span>
-        <div class="status"><span class={'dot ' + dot} /><span>{state}</span></div>
+      {/* The shell's own status pill is scaffolding, so the page states its
+          connection here, in the firmware page's wording. */}
+      <div class="row" style="align-items:center;gap:6px;margin-bottom:10px;font-size:12px;color:var(--ink2)">
+        <span class={status.dot} />
+        <span>{status.text}</span>
       </div>
 
-      {scanning && (
+      {data && data.scanning && (
         <div class="card">
-          <div class="msg warn">A sweep has the bus — watching is paused until it stops.</div>
+          <div class="msg warn">A sweep has the bus &mdash; watching is paused until it stops.</div>
         </div>
       )}
 
       <h2 class="sec">Reference</h2>
       <div class="card">
-        <div class="ref">
+        <div style={REF}>
           <Ref label="RPM" v={v.rpm} d={0} />
           <Ref label="Speed" v={v.speed} d={0} unit="km/h" />
           <Ref label="Coolant" v={v.coolant} d={0} unit="°C" />
@@ -232,39 +245,38 @@ export function Watch() {
       </div>
 
       <h2 class="sec">Watching</h2>
-      <div>
-        {dids.map((d) => {
-          const pts = sparkPoints(histRef.current[d.name] || []);
-          return (
-            <div class="w" key={d.name}>
-              <div class="wh">
-                <span class="wn">{d.name}</span>
-                <span class="wx">{d.ecu}</span>
-                <span class={'wv' + (d.fresh ? '' : ' stale')}>
-                  {d.len ? String(d.val) : DASH}
-                </span>
-              </div>
-              <div class="wx">
-                {d.len
-                  ? `${d.hex} · ${d.len} byte${d.len > 1 ? 's' : ''}${d.fresh ? '' : ' · stale'}`
-                  : 'no reply yet'}
-              </div>
-              <svg class="spark" preserveAspectRatio="none" viewBox="0 0 220 26">
-                {pts && (
-                  <polyline points={pts} fill="none" style="stroke:var(--aqua)"
-                            stroke-width="2" stroke-linejoin="round" stroke-linecap="round"
-                            vector-effect="non-scaling-stroke" />
-                )}
-              </svg>
+      {dids.map((d) => {
+        const pts = sparkPoints(histRef.current[d.name] || []);
+        return (
+          <div style={W} key={d.name}>
+            <div style={WH}>
+              <span style={WN}>{d.name}</span>
+              <span style={WX}>{d.ecu}</span>
+              <span class={d.fresh ? '' : 'stale'} style={WV}>
+                {d.len ? String(d.val) : DASH}
+              </span>
             </div>
-          );
-        })}
-      </div>
+            <div style={WX}>
+              {d.len
+                ? `${d.hex} · ${d.len} byte${d.len > 1 ? 's' : ''}${d.fresh ? '' : ' · stale'}`
+                : 'no reply yet'}
+            </div>
+            {/* One trace per identifier, one point per reading — see series.js. */}
+            <svg class="spark" preserveAspectRatio="none" viewBox="0 0 220 26">
+              {pts ? (
+                <polyline points={pts} fill="none" style="stroke:var(--aqua)"
+                          stroke-width="2" stroke-linejoin="round" stroke-linecap="round"
+                          vector-effect="non-scaling-stroke" />
+              ) : null}
+            </svg>
+          </div>
+        );
+      })}
       {!dids.length && (
         <div class="card">
           <div style="color:var(--muted);font-size:14px">
-            Nothing being watched. Pick identifiers below — the ones the scanner found
-            are listed for you.
+            Nothing being watched. Pick identifiers
+            below &mdash; the ones the scanner found are listed for you.
           </div>
         </div>
       )}
@@ -274,7 +286,7 @@ export function Watch() {
         <div class="row">
           <div>
             <label for="per">Read one every</label>
-            <select id="per" value={per} onChange={(e) => setPer(e.currentTarget.value)}>
+            <select id="per" value={period} onChange={(e) => setPeriod(e.currentTarget.value)}>
               <option value="250">250 ms</option>
               <option value="500">500 ms</option>
               <option value="1000">1 s</option>
@@ -284,25 +296,25 @@ export function Watch() {
           </div>
           <div style="flex:1;min-width:140px">
             <label for="man">Or type them</label>
-            <input type="text" id="man" class="full" placeholder="1002, 1003, T0140"
-                   value={man} onInput={(e) => setMan(e.currentTarget.value)} />
+            <input type="text" id="man" style={FULL} placeholder="1002, 1003, T0140"
+                   value={typed} onInput={(e) => setTyped(e.currentTarget.value)} />
           </div>
         </div>
 
-        <div class="pick">
+        <div style={PICK}>
           {hits.length ? hits.map((h) => {
             const k = watchName(h);
             const on = sel.has(k);
             return (
-              <label key={k} class={on ? 'on' : ''}>
-                <input type="checkbox" checked={on}
+              <label key={k} style={on ? PICK_ON : PICK_OFF}>
+                <input type="checkbox" style={PICK_INPUT} checked={on}
                        onChange={(e) => toggle(k, e.currentTarget.checked)} />
                 {k} <span style="color:var(--muted)">{String(h.hex || '').slice(0, 8)}</span>
               </label>
             );
           }) : (
             <span style="color:var(--muted);font-size:13px">
-              No scan results yet — run a sweep, or type identifiers above.
+              No scan results yet &mdash; run a sweep, or type identifiers above.
             </span>
           )}
         </div>
@@ -310,7 +322,7 @@ export function Watch() {
         <div class="hint">
           Identifiers found by a sweep on <em>this</em> board are listed
           above. A <code>did_hits.csv</code> exported from an earlier firmware can be loaded here
-          instead — it stays in this browser, nothing is uploaded.
+          instead &mdash; it stays in this browser, nothing is uploaded.
           <input type="file" accept=".csv,text/csv" onChange={onFile} />
         </div>
 
@@ -324,7 +336,7 @@ export function Watch() {
 
         <div class="hint">
           Each identifier is one more request on the bus, so watching costs
-          live refresh rate — the estimate above is for the transport in use. Readings
+          live refresh rate &mdash; the estimate above is for the transport in use. Readings
           are appended to the trip CSV as two columns each: the bytes decoded big-endian, and
           the raw bytes beside them, because two bytes might equally be one 16-bit value or
           two 8-bit ones and nothing in the reply says which.
@@ -333,6 +345,6 @@ export function Watch() {
           shifting them halfway down a file would be worse than having two of them.
         </div>
       </div>
-    </div>
+    </>
   );
 }
