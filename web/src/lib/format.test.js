@@ -30,9 +30,11 @@ describe('number formatting', () => {
   it('rounds whole-number gauges', () => {
     expect(round(115)).toBe('115');
     expect(round(114.6)).toBe('115');
-    expect(round(-0.4)).toBe('-0');         // as Math.round gives it; rpm never
-                                            // goes negative, so this is only here
-                                            // so a change to it is deliberate.
+    // Math.round(-0.4) is negative zero, and both String(-0) and the DOM's own
+    // stringification of it are "0" — so this reads the same here as it did when
+    // the firmware wrote the raw number into textContent. Pinned because a gauge
+    // that showed "-0" would look broken.
+    expect(round(-0.4)).toBe('0');
   });
 
   it('carries the sign on fuel trims', () => {

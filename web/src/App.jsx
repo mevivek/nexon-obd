@@ -4,18 +4,7 @@
 // themselves are still the firmware's, and get ported one at a time.
 
 import { useRoute, currentPath } from './router.js';
-
-// Same six tabs, same order, same labels as the firmware pages' <nav>, because the
-// two are reachable from each other on the same board and a tab that moves between
-// them is a tab you tap wrong at 60 km/h.
-export const ROUTES = [
-  { path: '/', label: 'Live' },
-  { path: '/monitors', label: 'Monitors' },
-  { path: '/trips', label: 'Trips' },
-  { path: '/watch', label: 'Watch' },
-  { path: '/scan', label: 'Scanner' },
-  { path: '/update', label: 'Firmware' },
-];
+import { ROUTES } from './routes.js';
 
 // The web bundle carries its own version, independent of the firmware's FW_VERSION.
 // Vite inlines this at build time from package.json.

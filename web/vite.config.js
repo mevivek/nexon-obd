@@ -42,6 +42,10 @@ export default defineConfig({
     target: 'es2020',
     // One stylesheet, never per-route chunks.
     cssCodeSplit: false,
+    // There is exactly one chunk, so no <link rel="modulepreload"> is ever emitted
+    // and Vite's polyfill for it is ~700 bytes of MutationObserver that would run on
+    // every page load for nothing.
+    modulePreload: false,
     // Inline every asset (fonts, icons, small images) into the JS/CSS rather than
     // emitting a file: an inlined 4 KB data URI is cheaper for the board than a
     // second HTTP round trip.
