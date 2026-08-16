@@ -92,6 +92,11 @@ export function Live() {
     // way, and a backgrounded tab hammering /data just costs battery and bus time.
     let alive = !document.hidden;
     let timer = 0, miss = 0, lastSeq = -1, hb = 0;
+    // Which polling loop is the current one. Switching away and back while a fetch
+    // is in flight would otherwise leave the old loop's `finally` scheduling
+    // alongside the new one, and the page would quietly poll the board twice as
+    // often for the rest of the drive.
+    let gen = 0;
 
     const apply = (st, patch) => {
       if (st.clearRate) rate.length = 0;
@@ -100,7 +105,7 @@ export function Live() {
       setSnap((prev) => ({ ...prev, ...patch }));
     };
 
-    async function tick() {
+    async function tick(myGen) {
       try {
         const r = await fetch(DATA_URL, { cache: 'no-store' });
         const j = await r.json();
@@ -158,7 +163,7 @@ export function Live() {
         miss = st.miss;
         apply(st, {});
       } finally {
-        if (mounted && alive) timer = setTimeout(tick, POLL_MS);
+        if (mounted && alive && myGen === gen) timer = setTimeout(() => tick(myGen), POLL_MS);
       }
     }
 
@@ -183,7 +188,7 @@ export function Live() {
         clearTimeout(timer);
       } else if (!alive) {
         alive = true;
-        tick();
+        tick(++gen);
       }
     };
     document.addEventListener('visibilitychange', onVis);
@@ -192,7 +197,9 @@ export function Live() {
     // time, so anything it records carries a real timestamp.
     fetch('/time?ms=' + Date.now(), { cache: 'no-store' }).catch(() => {});
 
-    seed().then(tick);
+    seed().then(() => {
+      if (mounted && alive) tick(++gen);
+    });
 
     return () => {
       mounted = false;
