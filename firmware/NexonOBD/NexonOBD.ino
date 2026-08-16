@@ -29,11 +29,7 @@
 #include "ui_fs.h"
 #include "triplog.h"
 #include <Update.h>
-#include "dashboard_html.h"
-#include "scan_html.h"
-#include "mon_html.h"
-#include "trip_html.h"
-#include "watch_html.h"
+#include "boot_html.h"
 #include "ui_html.h"
 #include "ota_html.h"
 
@@ -1733,14 +1729,13 @@ void setup() {
   static const char *collect[] = {"If-None-Match"};
   server.collectHeaders(collect, 1);
 
-  // The bundle when one is installed, the built-in page when not. That fallback is
-  // the whole safety property: an interrupted deploy, a corrupt filesystem or a
-  // first boot all leave the board with a working dashboard rather than nothing.
+  // The bundle when one is installed, the fallback when not. That fallback is the
+  // safety property: an interrupted deploy, a corrupt filesystem or a first flash
+  // all leave the board showing a reading and a way forward, not nothing.
   server.on("/",            []() {
     if (uiInstalled() && uiTrySend("/index.html")) return;
-    sendPage(DASHBOARD_HTML);
+    sendPage(BOOT_HTML);
   });
-  server.on("/scan",        []() { sendPage(SCAN_HTML); });
   server.on("/ui.css",      handleUiCss);
   server.on("/update", HTTP_GET, []() { sendPage(OTA_HTML); });
   server.on("/update", HTTP_POST, handleOtaDone, handleOtaUpload);
@@ -1752,11 +1747,18 @@ void setup() {
   server.on("/trips/list",  handleTripList);
   server.on("/trips/get",   handleTripGet);
   server.on("/trips/del",   handleTripDelete);
-  server.on("/trips",       []() { sendPage(TRIP_HTML); });
-  server.on("/monitors",    []() { sendPage(MON_HTML); });
-  server.on("/watch",       []() { sendPage(WATCH_HTML); });
   server.on("/watch/list",  handleWatchList);
   server.on("/watch/set",   handleWatchSet);
+  // The pages these served now live in the bundle, behind hash routes. Redirect
+  // rather than 404: these are bookmarks, and the nav on the two pages still built
+  // into flash points at them.
+  for (const char *p : {"/monitors", "/trips", "/watch", "/scan"})
+    server.on(p, [p]() {
+      String to = uiInstalled() ? String("/#") + p : String("/");
+      server.sendHeader("Location", to);
+      server.send(302, "text/plain", "");
+    });
+
   server.on("/ui",          []() { sendPage(UI_ADMIN_HTML); });
   server.on("/ui/manifest", handleUiManifest);
   server.on("/ui/clear",    handleUiClear);
