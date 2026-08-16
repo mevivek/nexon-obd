@@ -37,9 +37,17 @@ Polls in 3 batched requests of 6 PIDs (~2 Hz). Reconnects on its own and re-init
 ELM protocol every 4th failure, so switching the ignition off and on recovers without a
 restart. Ctrl+C to stop.
 
-Renders `dashboard.html`. It shares the firmware dashboard's polling and
-hold-last-value logic — `firmware/test/run.sh` drives both and fails if they drift —
-but not its layout: the firmware pages were rebuilt around a phone viewport, while
+Renders `dashboard.html`. Its polling and hold-last-value logic began as a copy of the
+firmware dashboard's, but that page no longer exists: the frontend moved out to the
+Vite/Preact bundle in `web/`, where the same logic lives as modules in `web/src/lib`
+with its own Vitest suite (`npm --prefix web test`). `dashboard.html` keeps its own
+standalone copy — nothing keeps the two in step automatically, so treat a change to
+one as needing the same change here by hand.
+
+What still checks this page: `firmware/test/test_table.mjs` renders it in a real
+browser and asserts its all-values table against the row definitions the page itself
+declares, and `firmware/test/test_dashboard.mjs` parses its script block. Its layout
+was never shared — the firmware pages were rebuilt around a phone viewport, while
 this one is still the original single-column desktop design.
 
 ## `obd_enum2.ps1`

@@ -5,6 +5,7 @@
 #include "obd_types.h"
 #include "clock.h"
 #include "didwatch.h"
+#include "trip_names.h"
 
 // Per-drive CSV logs on the 1.5 MB filesystem partition.
 //
@@ -84,7 +85,9 @@ static bool tripDeleteOldest() {
     if (!nm || nm[0] == 0) continue;
     char full[24];
     snprintf(full, sizeof(full), "%s%s", nm[0] == '/' ? "" : "/", nm);
-    if (strstr(full, ".csv") == nullptr) continue;
+    // Trip logs only. Anything else on the filesystem - the sweep's hits, a served
+    // UI bundle - is not ours to reclaim, and /scanhits.csv sorts first.
+    if (!tripIsLogName(full)) continue;
     if (tripName[0] && strcmp(full, tripName) == 0) continue;   // never the live one
     if (!oldest[0] || strcmp(full, oldest) < 0) strncpy(oldest, full, sizeof(oldest) - 1);
   }
@@ -165,7 +168,7 @@ static uint8_t tripCount() {
   File dir = LittleFS.open("/");
   if (!dir) return 0;
   for (File f = dir.openNextFile(); f; f = dir.openNextFile())
-    if (f.name() && strstr(f.name(), ".csv")) n++;
+    if (tripIsLogNameLoose(f.name())) n++;
   dir.close();
   return n;
 }

@@ -1,0 +1,22 @@
+{
+  "name": "nexon-obd-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Frontend bundle for the ESP32-hosted Nexon OBD dashboard. Versioned independently of firmware FW_VERSION.",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node scripts/gzip.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "preact": "^10.27.2",
+    "uplot": "^1.6.32"
+  },
+  "devDependencies": {
+    "vite": "^6.4.3",
+    "vitest": "^3.2.7"
+  }
+}

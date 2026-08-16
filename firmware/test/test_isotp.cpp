@@ -9,6 +9,8 @@
 #include "shims.h"
 #include "isotp_extract.h"
 #include "../NexonOBD/didwatch.h"
+#include "../NexonOBD/trip_names.h"
+#include "../NexonOBD/ui_paths.h"
 
 #include <cstdio>
 
@@ -545,6 +547,149 @@ static void test_pollbatch_keeps_bytes() {
   eq((int)again.rpm, 700, "and decode to the same values");
 }
 
+// ------------------------------------------------------------------ UI bundle
+//
+// A frontend built with an ordinary toolchain and uploaded to the board's
+// filesystem, served from /w. Two of these paths take a name straight off the
+// wire - the request URI and the multipart upload filename - so the checking is
+// the interesting part, along with the rules that decide what may be cached
+// forever and what must never be answered with an HTML document.
+
+static void test_ui_path_accepts_bundle_assets() {
+  printf("ui paths: what a build emits is servable\n");
+  ok(uiPathOk("/index.html"), "the entry point");
+  ok(uiPathOk("/app-a1b2c3d4.js"), "a content-hashed script");
+  ok(uiPathOk("/style-9f8e.css"), "a content-hashed stylesheet");
+  ok(uiPathOk("/assets/logo.svg"), "something in a subdirectory of the bundle");
+  ok(uiPathOk("/app.js.gz"), "a compressed copy");
+}
+
+static void test_ui_path_rejects_everything_else() {
+  printf("ui paths: a name off the wire is checked, not trusted\n");
+  // Traversal is the one that matters: /w is a directory on a filesystem that also
+  // holds trip logs, the sweep's hits and the NVS-backed config.
+  ok(!uiPathOk("/../scanhits.csv"), "traversal out of the bundle directory");
+  ok(!uiPathOk("/a/../../t0001.csv"), "traversal buried mid-path");
+  ok(!uiPathOk("/..%2fx"), "an escaped traversal attempt");
+  ok(!uiPathOk("index.html"), "a path that is not rooted");
+  ok(!uiPathOk("//evil"), "a doubled separator");
+  ok(!uiPathOk("/a b.js"), "a space");
+  ok(!uiPathOk("/a?b.js"), "a query character");
+  ok(!uiPathOk("/a\\b.js"), "a backslash");
+  ok(!uiPathOk("/"), "the bare root");
+  ok(!uiPathOk(""), "empty");
+  ok(!uiPathOk(nullptr), "null");
+  char longName[80];
+  memset(longName, 'a', sizeof(longName));
+  longName[0] = '/';
+  longName[sizeof(longName) - 1] = 0;
+  ok(!uiPathOk(longName), "a name too long for the buffers it is copied into");
+}
+
+static void test_ui_content_types() {
+  printf("ui paths: content type follows the extension, not the compression\n");
+  ok(strcmp(uiContentType("/index.html"), "text/html") == 0, "html");
+  ok(strcmp(uiContentType("/app.js"), "text/javascript") == 0, "javascript");
+  ok(strcmp(uiContentType("/s.css"), "text/css") == 0, "css");
+  // The one worth pinning: a gzipped script is still a script. Reporting it as
+  // application/gzip makes the browser download the file instead of running it.
+  ok(strcmp(uiContentType("/app.js.gz"), "text/javascript") == 0,
+     "a gzipped script is still a script");
+  ok(strcmp(uiContentType("/index.html.gz"), "text/html") == 0,
+     "and a gzipped page is still a page");
+  ok(strcmp(uiContentType("/f.woff2"), "font/woff2") == 0, "a font");
+  ok(strcmp(uiContentType("/unknown.bin"), "application/octet-stream") == 0,
+     "and anything unrecognised is served as bytes");
+}
+
+static void test_ui_cache_policy() {
+  printf("ui paths: only content-hashed assets may be cached forever\n");
+  ok(uiImmutable("/app-a1b2c3.js"), "a hashed script is immutable");
+  ok(uiImmutable("/style-9f8e.css.gz"), "so is a hashed, compressed stylesheet");
+  // index.html names every other file, so caching it forever would mean a deployed
+  // bundle could never be picked up - the board would serve the old one until the
+  // browser's cache expired, which is to say never.
+  ok(!uiImmutable("/index.html"), "the entry point is not");
+  ok(!uiImmutable("/index.html.gz"), "nor its compressed copy");
+}
+
+static void test_ui_budget() {
+  printf("ui paths: the bundle's share of a shared filesystem\n");
+  ok(strcmp(UI_DIR, "/w") == 0, "the bundle lives in its own directory");
+  // The partition is shared with trip logs at roughly half a megabyte an hour, so
+  // the cap is denominated in recording time: 300 KB is about 35 minutes of it.
+  ok(UI_MAX_BYTES <= 512UL * 1024UL, "a bundle cannot take more than half a megabyte");
+  ok(UI_MAX_BYTES >= 128UL * 1024UL, "but there is room for a real framework build");
+  // The two subsystems have to agree, or log rotation would delete the frontend to
+  // make room for another minute of logging.
+  ok(!tripIsLogName("/w/index.html"), "and log rotation will never reclaim it");
+  ok(!tripIsLogName("/w/app-a1b2.js.gz"), "nor any asset in it");
+}
+
+static void test_ui_api_paths_never_fall_through() {
+  printf("ui paths: an API request is never answered with the app shell\n");
+  // The single-page fallback returns index.html for unknown paths. If that applied
+  // to API routes, a mistyped or removed endpoint would come back as an HTML
+  // document with status 200 and be parsed as JSON - a failure that looks like
+  // corrupt data rather than a missing endpoint.
+  ok(uiIsApiPath("/data"), "the live sample");
+  ok(uiIsApiPath("/history"), "the trend buffer");
+  ok(uiIsApiPath("/trips/list"), "a nested endpoint");
+  ok(uiIsApiPath("/scan/status"), "another");
+  ok(uiIsApiPath("/watch/set"), "and another");
+  ok(uiIsApiPath("/ui/manifest"), "including the bundle's own endpoints");
+  ok(uiIsApiPath("/data?x=1"), "with a query string attached");
+  ok(!uiIsApiPath("/"), "the root is not an API path");
+  ok(!uiIsApiPath("/index.html"), "nor an asset");
+  ok(!uiIsApiPath("/monitors"), "nor a client-side route that shares a prefix idea");
+  // Prefix matching must not be sloppy: /database is not /data.
+  ok(!uiIsApiPath("/database"), "and a longer name that merely starts the same is not");
+  ok(!uiIsApiPath("/scanner"), "nor this one");
+}
+
+// ------------------------------------------------------------------ trip names
+//
+// The filesystem holds trip logs, the DID sweep's hits, and soon a served UI
+// bundle. Everything that walked the root used to accept any name containing
+// ".csv", and rotation deletes the lexicographically smallest match when space runs
+// short - so "/scanhits.csv", which sorts before "/t0001.csv", was first in line.
+// A long drive would delete hours of sweep results, and its resume position, to
+// make room for another minute of logging. The trips page listed it as a trip and
+// would download or delete it on request, too.
+
+static void test_trip_name_accepts_real_logs() {
+  printf("trip names: what tripPath() writes is a trip log\n");
+  ok(tripIsLogName("/t0001.csv"), "the first trip");
+  ok(tripIsLogName("/t0000.csv"), "sequence zero");
+  ok(tripIsLogName("/t9999.csv"), "four digits");
+  ok(tripIsLogName("/t123456.csv"), "and a sequence that has outgrown the padding");
+  ok(tripIsLogNameLoose("t0007.csv"), "a name arriving without its leading slash");
+  ok(tripIsLogNameLoose("/t0007.csv"), "or with one");
+}
+
+static void test_trip_name_protects_everything_else() {
+  printf("trip names: nothing else on the filesystem is a trip log\n");
+  // The one that mattered: it sorts first, so it was deleted first.
+  ok(!tripIsLogName("/scanhits.csv"), "the sweep's hits are not a trip");
+  ok(!tripIsLogNameLoose("scanhits.csv"), "nor without the slash");
+  ok(strcmp("/scanhits.csv", "/t0001.csv") < 0,
+     "and it really does sort ahead of the trips, which is why this mattered");
+
+  // A UI bundle will live here too.
+  ok(!tripIsLogName("/w/index.html"), "a served asset is not a trip");
+  ok(!tripIsLogName("/w/app.js.gz"), "nor a compressed one");
+
+  ok(!tripIsLogName("/t.csv"), "no sequence number at all");
+  ok(!tripIsLogName("/t001.csv"), "too few digits to sort chronologically");
+  ok(!tripIsLogName("/trip0001.csv"), "a near miss on the prefix");
+  ok(!tripIsLogName("/t0001.txt"), "right name, wrong extension");
+  ok(!tripIsLogName("/t0001.csv.bak"), "and nothing may follow the extension");
+  ok(!tripIsLogName("t0001.csv"), "the strict form requires the leading slash");
+  ok(!tripIsLogName("/sub/t0001.csv"), "only the root, never a subdirectory");
+  ok(!tripIsLogName(""), "empty");
+  ok(!tripIsLogName(nullptr), "null");
+}
+
 // ------------------------------------------------------------------ trip totals
 //
 // Fuel economy has to be integrated - there is no PID for it. The failure modes are
@@ -890,6 +1035,16 @@ int main() {
   test_sample_merge_drops_stale();
   test_sample_merge_nothing_fresh();
   test_pollbatch_keeps_bytes();
+
+  test_ui_path_accepts_bundle_assets();
+  test_ui_path_rejects_everything_else();
+  test_ui_content_types();
+  test_ui_cache_policy();
+  test_ui_budget();
+  test_ui_api_paths_never_fall_through();
+
+  test_trip_name_accepts_real_logs();
+  test_trip_name_protects_everything_else();
 
   test_trip_integrates_distance_and_fuel();
   test_trip_skips_intervals_it_knows_nothing_about();

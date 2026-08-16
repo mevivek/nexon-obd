@@ -22,7 +22,13 @@ it says so.
 1. Flash the firmware (see [Building](#building)).
 2. Power the board — USB, or from the OBD port via a 12 V→5 V buck.
 3. Join Wi-Fi **`NexonOBD`** / **`nexon1234`**.
-4. Open **`http://192.168.4.1`**.
+4. Install the frontend: **`web/deploy.sh`** (see [Frontend](#frontend)). Once only —
+   it lives on the board's filesystem and survives reflashing.
+5. Open **`http://192.168.4.1`**.
+
+Without step 4 the board still works: `/` falls back to a built-in page with speed,
+rpm, coolant and battery, and everything the board does on its own — trip logging,
+the DID sweep, the history buffer — keeps running regardless.
 
 | Page | What it does |
 |---|---|
@@ -338,6 +344,54 @@ The onboard LED encodes state, which matters when the board is hidden under the 
 
 ---
 
+## Frontend
+
+The dashboard is a Preact app under `web/`, built with Vite and served off the
+board's filesystem. It is not compiled into the firmware.
+
+```bash
+npm --prefix web install
+npm --prefix web test          # 206 checks
+web/deploy.sh                  # build, then upload to 192.168.4.1
+```
+
+It was compiled in until v1.11.0, as JavaScript inside C++ raw string literals. That
+cost a 1.3 MB reflash to change a line of CSS and ruled out every ordinary frontend
+tool — no bundler, no packages, no source maps, and nothing in the build that ever
+parsed the JavaScript, so a typo shipped and surfaced as a dead dashboard in the car.
+Splitting it out fixed all of that and returned 47 KB of flash. It was never about
+space: the whole UI was 4.6 % of the sketch, and the board had 2 MB of `app0` free.
+
+**Why the board and not a web host.** The access point has no internet, so a phone
+joined to it cannot load a page from anywhere else. Chrome 142 relaxed mixed-content
+checks for literal private IPs behind a permission prompt, so an HTTPS page *can*
+now reach `192.168.4.1` — but only on Chrome, only if the permission was granted
+before you got in the car, and Android 17 adds a second prompt on top. Serving from
+the board has none of those conditions: no mixed content, no CORS, no permissions, no
+internet, any browser.
+
+**Deploying cannot brick it.** `/ui` is compiled into flash, so the page that fixes a
+bad deploy never depends on the deploy having worked. If no bundle is installed, or
+the upload was interrupted, `/` falls back to a built-in page showing speed, rpm,
+coolant and battery. Trip logging, the DID sweep and the history buffer are the
+board's work and run regardless of what the browser can see.
+
+| | |
+|---|---|
+| Bundle | 22 KB gzipped, three files |
+| Budget | 300 KB, capped in the build and enforced by the firmware on upload |
+| Shares with | trip logs — 300 KB is about 35 minutes of recording capacity |
+
+The firmware serves gzipped assets with `Content-Encoding`, caches content-hashed
+names forever and `index.html` never, and answers `/monitors`, `/trips`, `/watch` and
+`/scan` as redirects into the app's routes so old bookmarks keep working.
+
+**The `/data` contract** is declared in `contract/data.json` and checked from both
+ends — the firmware test asserts it against `handleData()` in both directions, so a
+field renamed on one side fails the build instead of blanking a gauge on the road.
+
+---
+
 ## Hardware
 
 ### Option A — no extra parts
@@ -427,8 +481,9 @@ arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32S3 --output-dir build firmware/
 arduino-cli upload -p COM3 --fqbn esp32:esp32:XIAO_ESP32S3 firmware/NexonOBD
 ```
 
-Current size: **1.22 MB flash (36 %)**, 48 KB RAM (14 %), plus 4.8 KB of RTC
-slow memory for the trend buffer.
+Current size: **1.26 MB flash (37 % of `app0`)**, 49 KB RAM (15 %), plus 4.8 KB of
+RTC slow memory for the trend buffer. The frontend is no longer part of that: it is
+a 22 KB gzipped bundle on the filesystem, and moving it out returned 47 KB of flash.
 
 The default `default_8MB` partition already provides `ota_0` + `ota_1` at 3.19 MB each,
 so OTA works without changing the partition scheme.
@@ -445,18 +500,25 @@ that are impractical to stage against a real car — a dropped consecutive frame
 reordered sequence number, a reply that stops halfway — are covered. The same shims
 stand in for the web server, so the deadline give-back described above is tested for
 the two properties that make it safe: a silent ECU is still reported silent, and the
-extension is bounded. The dashboard's
-hold-last-value logic is pulled out of the served pages and run under node, which
-also parse-checks every page script; they are JavaScript inside C++ raw string
-literals, so nothing else in the build ever compiles them.
+extension is bounded. Everything else the sketch
+can be asked about without a board — the `/data` contract, the routing, the caching
+headers, the DID watch wiring, the trip columns, the history constants — is asserted
+against the source under node.
+
+The frontend has its own suite, `npm --prefix web test`: 206 checks over the
+hold-last-value merge, the warning-flag gating, the rate tracker, the mileage
+readouts and each page's logic, run against the modules that implement them. That is
+the point of the split — those used to be JavaScript inside C++ raw string literals,
+which nothing in the build ever parsed, so a typo shipped and surfaced as a dead
+dashboard in the car.
 
 The "All values" table is checked in a real browser instead, because the node
 harness structurally cannot check it: its fake DOM creates any element asked for by
 id, so a table whose cells are built once and then addressed by id passes whether or
 not those ids line up with the rows — the whole suite goes green with every value
-shown against the wrong PID. `test_table.mjs` renders both dashboards, drives them
-through a full sample, a partial poll and a recovery, and asserts that row *i* shows
-the value of the PID row *i* names. It skips itself, without failing, where
+shown against the wrong PID. `test_table.mjs` renders the built bundle and
+`tools/dashboard.html`, drives both through a full sample, a partial poll and a
+recovery, and asserts that row *i* shows the value of the PID row *i* names. It skips itself, without failing, where
 Playwright is not installed.
 
 To look at the pages without flashing anything:
@@ -521,7 +583,7 @@ here is from the unit this was developed against.
                     ┌───────────────────────────┐
   phone ──Wi-Fi AP──┤  XIAO ESP32S3             │
                     │   WebServer :80           │
-                    │   dashboard / scan / OTA  │
+                    │   bundle (LittleFS) + API │
                     │                           │
                     │   obdIsoTp() dispatcher   │
                     │      ├── canIsoTp  (TWAI) ├──SN65HVD230──┐
