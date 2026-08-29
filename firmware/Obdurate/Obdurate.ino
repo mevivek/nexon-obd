@@ -2273,8 +2273,7 @@ void setup() {
     if (triagePrefs.getBool("run", false)) {
       triageOn = true;
       triageStartedMs = millis();
-      Serial.printf("[triage] resuming, %u identifiers
-", didMapN);
+      Serial.printf("[triage] resuming across a power cycle, %u identifiers\n", didMapN);
     }
     triagePrefs.end();
   }

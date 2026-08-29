@@ -16,6 +16,7 @@
 // HTTP-fairness work, the DID watch wiring, the trip totals and the history ring.
 
 import { pageSource, scriptsOf, fwVersion, uiCss } from './pagesrc.mjs';
+import { unbalancedQuotes, firmwareSources } from './quotes.mjs';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -635,6 +636,48 @@ console.log('\nstored state survives the rename');
   }
 }
 
+// ---------------------------------------------------------------- syntax lint
+//
+// Nothing in this suite parses the sketch as C++. extract.py pulls named functions
+// and compiles those; everything outside that list - setup(), the handlers, the
+// periodic tasks - is only ever read as text. So a broken string literal there
+// passes every check in this file and surfaces at arduino-cli, which needs a 6 GB
+// toolchain and is the slowest possible place to find it. That happened twice in
+// one afternoon, and one of the two was committed and pushed.
+//
+// A line whose double quotes do not balance is the whole class, and it costs
+// milliseconds to check.
+console.log('\nsyntax lint');
+{
+  const files = firmwareSources(join(here, '../Obdurate'));
+  ok(files.length >= 15, `linting the firmware sources (${files.length} files)`);
+
+  let flagged = 0;
+  for (const { name, src } of files) {
+    for (const h of unbalancedQuotes(src)) {
+      flagged++;
+      ok(false, `${name}:${h.line} unterminated string: ${h.text.slice(0, 60)}`);
+    }
+  }
+  ok(flagged === 0, 'every string literal in the firmware closes on its own line');
+
+  // The guard checked against itself. A lint that quietly stopped matching would
+  // look exactly like a clean tree, which is the failure it exists to prevent.
+  const Q = String.fromCharCode(34), NL = String.fromCharCode(10),
+        BS = String.fromCharCode(92);
+  const broken = 'Serial.printf(' + Q + '[triage] resuming, %u ids' + NL + Q + ', n);';
+  const intact = 'Serial.printf(' + Q + '[trip] fs %u bytes' + BS + 'n' + Q + ', n);';
+  // Both halves of a split literal are unbalanced, so it reports two lines - which
+  // is what you want when locating it, not one.
+  ok(unbalancedQuotes(broken).length >= 1, 'it catches the shape that shipped twice');
+  ok(unbalancedQuotes(intact).length === 0, 'and leaves an intact escape alone');
+  // The idioms this file is full of, which must not trip it.
+  ok(unbalancedQuotes('// the ' + Q + 'sub' + Q + ' span').length === 0, 'quotes in comments');
+  ok(unbalancedQuotes('s += ' + Q + BS + Q + 'ok' + BS + Q + Q + ';').length === 0,
+     'escaped quotes in a JSON string');
+  ok(unbalancedQuotes('X = R' + Q + 'J({' + NL + Q + 'a' + Q + NL + '})J' + Q + ';').length === 0,
+     'a raw string spanning lines');
+}
 // ---------------------------------------------------------------- read-only
 //
 // The README's safety section promises this firmware never sends a service that
