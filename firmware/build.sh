@@ -82,7 +82,9 @@ echo "OTA image: $IMAGE"
 ls -lh "$IMAGE"
 echo
 echo "Upload it at http://192.168.4.1/update after joining the board's Wi-Fi."
-echo "The dashboard header shows v$VERSION once it boots, so you can confirm it took."
+echo "The /update page shows \"running v$VERSION\" once the new image boots, so it"
+echo "doubles as confirmation. The dashboard header shows the frontend bundle's own"
+echo "version instead - the frontend split decoupled the two."
 echo "NexonOBD.ino.merged.bin is a full-flash image for USB recovery - do NOT"
 echo "feed that one to /update, it is not an OTA app image."
 
