@@ -8,6 +8,13 @@
 
 uint32_t g_millis = 0;
 
+// RTC slow memory only means something on the chip. On the host the extracted
+// declarations are wanted as ordinary zero-initialised statics, which is what a
+// cold boot gives them on the board anyway - the deep-sleep survival this attribute
+// buys is not a property any host test can observe, and test_dashboard.mjs asserts
+// the attribute is present on the source instead.
+#define RTC_DATA_ATTR
+
 // ---------------------------------------------------------------- TWAI
 #define ESP_OK 0
 #define ESP_FAIL -1

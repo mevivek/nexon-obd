@@ -97,14 +97,27 @@ static bool tripDeleteOldest() {
   return LittleFS.remove(oldest);
 }
 
-static void tripEnsureSpace() {
+// True when the floor is met. False means the partition is as empty as deleting
+// trips can make it and there is still not enough room.
+//
+// The caller has to act on that. Returning void - which this did until the recorder
+// was first switched on - means a file gets opened on a partition that cannot take
+// it: every write then fails, and because a failed write leaves size() where it was,
+// the TRIP_MAX_BYTES rotation in tripTick never fires either. Logging stops for the
+// rest of the drive with nothing said. Refusing to open is the honest failure.
+//
+// The guard is a backstop against a delete that reports success without freeing
+// anything, not a limit on how many trips may be reclaimed - a partition of short
+// files can need more than a handful.
+static bool tripEnsureSpace() {
   // Leave headroom rather than filling the partition: LittleFS needs free blocks to
   // do its copy-on-write, and a full filesystem fails writes instead of rotating.
-  for (int guard = 0; guard < 32; guard++) {
+  for (int guard = 0; guard < 256; guard++) {
     size_t freeB = LittleFS.totalBytes() - LittleFS.usedBytes();
-    if (freeB >= TRIP_FREE_MIN) return;
-    if (!tripDeleteOldest()) return;
+    if (freeB >= TRIP_FREE_MIN) return true;
+    if (!tripDeleteOldest()) return false;
   }
+  return (LittleFS.totalBytes() - LittleFS.usedBytes()) >= TRIP_FREE_MIN;
 }
 
 static void tripClose() {
@@ -127,7 +140,13 @@ static void tripBegin() {
 // A new file per run of the board, opened lazily on the first row so a key-on that
 // never reaches the ECU does not litter the partition with empty logs.
 static bool tripOpenNew() {
-  tripEnsureSpace();
+  if (!tripEnsureSpace()) {
+    // Not a transient miss: every trip that could be deleted has been, and the
+    // partition is still short. Say so once per attempt and leave the file closed
+    // rather than opening one whose rows go nowhere.
+    Serial.println("[trip] partition full - not opening a log");
+    return false;
+  }
   tripSeq++;
   if (tripPrefs.begin("nexontrip", false)) {
     tripPrefs.putULong("seq", tripSeq);
@@ -203,7 +222,20 @@ static void tripTick(const Live &L) {
     uint8_t n = watchColCells(watch[i], now, cells, WATCH_COLS_PER_DID);
     for (uint8_t c = 0; c < n; c++) { tripFile.print(','); tripFile.print(cells[c]); }
   }
-  tripFile.print('\n');
+
+  // The row terminator is the write that gets checked. A full partition returns 0
+  // from it, and an unchecked zero here is how logging dies quietly: the row is
+  // lost, size() does not move, and the rotation above therefore never fires again.
+  //
+  // Only the newline is tested, not every field. A row cut short by a failure
+  // partway is a torn last line - which is exactly what the ignition being switched
+  // off mid-write already produces, and every CSV reader handles. What must not
+  // happen is carrying on as though the write landed.
+  if (tripFile.print('\n') == 0) {
+    Serial.printf("[trip] write failed on %s - closing\n", tripName);
+    tripClose();
+    return;
+  }
 
   if (now - tripLastFlush > TRIP_FLUSH_MS) { tripFile.flush(); tripLastFlush = now; }
 }

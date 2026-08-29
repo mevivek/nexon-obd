@@ -42,8 +42,13 @@ def extract(src: str, name: str) -> str:
 
 
 def extract_var(src: str, name: str) -> str:
-    m = re.search(r"^static\s[^\n]*\b" + re.escape(name) +
-                  r"\s*(?:\[[^\]]*\])?\s*=[^;]*;", src, re.M)
+    # A leading storage attribute is optional, and so is the initialiser: a variable
+    # that lives in RTC slow memory is written `RTC_DATA_ATTR static float g_tripKm;`
+    # with no `= 0.0f`, because the whole point is that a deep-sleep wake must not
+    # reinitialise it. shims.h defines RTC_DATA_ATTR away, so the extracted line
+    # still compiles on the host as the plain zero-initialised static it needs to be.
+    m = re.search(r"^(?:[A-Z_][A-Z0-9_]*\s+)?static\s[^\n]*\b" + re.escape(name) +
+                  r"\s*(?:\[[^\]]*\])?\s*(?:=[^;]*)?;", src, re.M)
     if not m:
         sys.exit(f"extract: no definition of {name} found")
     return m.group(0)

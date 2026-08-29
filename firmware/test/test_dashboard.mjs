@@ -282,6 +282,130 @@ console.log('\ntrip totals');
   // batch - or a held fuel rate would be integrated as though it had just arrived.
   ok(/if \(any\) tripIntegrate\(pub\.speed, pub\.fuelRate, millis\(\)\);/.test(ino),
      'integration runs on the published sample, after staleness has been applied');
+
+  // A power cut ends a drive; a deep-sleep wake does not. On the permanently live
+  // pin 16 the board wakes through setup() every SLEEP_WAKE_US, so plain statics
+  // reset the drive's totals mid-drive - and the mileage tile, the "right now"
+  // figure and the trip_km/trip_l columns all read from them.
+  ok(/RTC_DATA_ATTR static float\s+g_tripKm;/.test(ino) &&
+     /RTC_DATA_ATTR static float\s+g_tripL;/.test(ino),
+     'the totals survive a deep-sleep wake');
+  ok(/RTC_DATA_ATTR static uint32_t tripIntMagic;/.test(ino) &&
+     /tripIntMagic == TRIPINT_MAGIC/.test(ino),
+     'guarded by a magic, because RTC memory is garbage on a cold boot');
+  ok(/tripIntBegin\(\);/.test(ino.slice(ino.indexOf('void setup()'))),
+     'and are initialised from setup(), before tripBegin opens a file');
+
+  // Deliberately NOT in RTC memory: it is the timestamp the next interval is
+  // measured from, and a sleep is exactly the gap TRIP_INT_MAX_MS refuses to
+  // integrate across. Carrying it over would close an interval spanning the sleep.
+  ok(/\nstatic uint32_t tripIntAt = 0;/.test(ino),
+     'but the interval clock is not, so a wake starts a fresh interval');
+}
+
+// ---------------------------------------------------------------- periodic tasks
+//
+// The one that would have caught it. tripTick() was written, reviewed, documented
+// in the README and given CSV columns, a rotation policy, a space guard and a
+// watch-set generation check - and never called. Not once, on any board. The whole
+// per-drive log, and with it the DID-correlation workflow the README calls the route
+// to decoding the 10xx block, was dead code from the day it was added: /trips/list
+// returned [] permanently and every test went green, because every test asserted
+// what the code says rather than whether anything runs it.
+//
+// That is the same failure the /data contract exists to prevent - a green bench and
+// a blank feature in the car - one layer further out. The contract checks that two
+// sides agree about a field; this checks that the code producing it is reached at
+// all. A periodic task nobody calls is indistinguishable from a working one in
+// every other check in this file.
+console.log('\nperiodic tasks');
+{
+  const files = ['../NexonOBD/NexonOBD.ino',
+                 ...readdirSync(join(here, '../NexonOBD'))
+                   .filter(f => f.endsWith('.h'))
+                   .map(f => `../NexonOBD/${f}`)];
+  const src = new Map(files.map(f => [f, readSrc(join(here, f))]));
+  const all = [...src.values()].join('\n');
+
+  // Named by convention: a *Tick or *Step is something loop() has to come back to.
+  // The convention is the whole reason this check can be mechanical, so a task added
+  // under a different name escapes it - which is worth knowing rather than pretending
+  // otherwise.
+  const DEF = /^static\s+[A-Za-z_][A-Za-z0-9_\s\*&:<>]*?\b(\w+(?:Tick|Step))\s*\(/gm;
+  const tasks = [];
+  for (const [f, text] of src)
+    for (const m of text.matchAll(DEF)) tasks.push({ name: m[1], file: f });
+
+  ok(tasks.length >= 6, `found the periodic tasks to check (${tasks.length})`);
+  ok(tasks.some(t => t.name === 'tripTick'), 'tripTick is among them');
+
+  for (const { name, file } of tasks) {
+    // Definition plus at least one call. Counting uses rather than searching for a
+    // call site keeps this independent of which function does the calling, which is
+    // the part that legitimately moves.
+    const uses = [...all.matchAll(new RegExp(`\\b${name}\\s*\\(`, 'g'))].length;
+    ok(uses >= 2, `${name} (${file.split('/').pop()}) is called, not just defined`);
+  }
+}
+
+// Where the two recorders are called from is itself load-bearing, so it is pinned
+// rather than left to the check above.
+//
+// g_live keeps its last good sample, with ok still set, once the ECU stops
+// answering - freshness is carried by g_liveMs, which these do not read. Called from
+// loop(), tripTick would therefore write a row a second of carried-forward values
+// for as long as the car was silent, and a held reading recorded as a measurement is
+// the one thing the log must never contain. The published-sample branch is the only
+// place a fresh sample exists.
+console.log('\nrecorders run on published samples');
+{
+  const ino = readSrc(join(here, '../NexonOBD/NexonOBD.ino'));
+
+  const sampler = ino.slice(ino.indexOf('static void samplerStep'));
+  const body = sampler.slice(0, sampler.indexOf('\n}\n'));
+  ok(body.length > 0 && body.length < ino.length,
+     'samplerStep body isolated (the \\n}\\n marker matched)');
+
+  // if (any) is the last block in samplerStep, so everything past it is the branch
+  // that runs only when a sample was actually published.
+  const branch = body.slice(body.indexOf('if (any) {'));
+  ok(/\bhistTick\(g_live\);/.test(branch), 'histTick runs on a published sample');
+  ok(/\btripTick\(g_live\);/.test(branch), 'tripTick runs on a published sample');
+
+  const loop = ino.slice(ino.indexOf('\nvoid loop() {'));
+  ok(!/\btripTick\s*\(/.test(loop.slice(0, loop.indexOf('\n}\n'))),
+     'and not from loop(), where the sample may be stale');
+}
+
+// ---------------------------------------------------------------- trip log safety
+//
+// A full partition is the ordinary end state of a device left in a car, not an edge
+// case, and it used to fail silently in a way that could not recover: tripEnsureSpace
+// returned void and gave up the first time a delete failed, tripTick checked no write
+// return, and a file opened on a partition that could not take it produced rows that
+// went nowhere. Because a failed write leaves size() where it was, the TRIP_MAX_BYTES
+// rotation never fired again either, so logging stopped for the rest of the drive
+// with nothing in the serial log and nothing on the page.
+console.log('\ntrip log survives a full partition');
+{
+  const trip = readSrc(join(here, '../NexonOBD/triplog.h'));
+
+  ok(/static bool tripEnsureSpace\(\)/.test(trip),
+     'tripEnsureSpace reports whether it met the floor');
+  ok(/if \(!tripEnsureSpace\(\)\)/.test(trip),
+     'and tripOpenNew refuses to open a file when it did not');
+
+  const ensure = trip.slice(trip.indexOf('static bool tripEnsureSpace'));
+  const eb = ensure.slice(0, ensure.indexOf('\n}\n'));
+  ok(/return true;/.test(eb) && /return false;/.test(eb),
+     'it distinguishes met-the-floor from nothing-left-to-delete');
+
+  const tick = trip.slice(trip.indexOf('static void tripTick'));
+  const tb = tick.slice(0, tick.indexOf('\n}\n'));
+  ok(/if \(tripFile\.print\('\\n'\) == 0\)/.test(tb),
+     'the row terminator is checked, so a failed write is seen');
+  ok(/tripClose\(\);/.test(tb.slice(tb.indexOf("print('\\n')"))),
+     'and closes the file rather than writing into one that cannot take rows');
 }
 
 // ---------------------------------------------------------------- bundle serving

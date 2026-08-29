@@ -955,9 +955,33 @@ static uint32_t pickBackoff(uint32_t cur) {
 //
 // Totals start at zero every time the board powers up. Given the accessory-socket
 // supply that is exactly one drive, which is the span an average is worth over.
-static float    g_tripKm  = 0.0f;
-static float    g_tripL   = 0.0f;
+//
+// A power cut is the end of a drive; a deep-sleep wake is not. On the permanently
+// live pin 16 the board sleeps after IDLE_SLEEP_MS and wakes through setup() every
+// SLEEP_WAKE_US, so plain statics would reset the drive's totals mid-drive - and
+// the dashboard's mileage, the "right now" figure and the trip_km/trip_l columns
+// all read from these, so every one of them would inherit the reset. RTC slow
+// memory carries them over a wake for free and is still cleared by a power cut,
+// which is exactly the distinction wanted.
+//
+// Same magic idiom as history.h and clock.h: RTC memory is garbage on a cold boot,
+// so nothing here may be trusted until the magic says it was written by this build.
+#define TRIPINT_MAGIC 0x4E584903UL
+RTC_DATA_ATTR static uint32_t tripIntMagic;
+RTC_DATA_ATTR static float    g_tripKm;
+RTC_DATA_ATTR static float    g_tripL;
+// Deliberately not in RTC memory. It is the timestamp the next interval is measured
+// from, and a sleep is precisely the gap TRIP_INT_MAX_MS exists to refuse to
+// integrate across - so it must come back zeroed and make the first sample after a
+// wake start a fresh interval rather than close the one that spans the sleep.
 static uint32_t tripIntAt = 0;
+
+static void tripIntBegin() {
+  if (tripIntMagic == TRIPINT_MAGIC) return;   // carried across a deep-sleep wake
+  tripIntMagic = TRIPINT_MAGIC;
+  g_tripKm = 0.0f;
+  g_tripL  = 0.0f;
+}
 
 // A longer gap than this is not an interval anything is known about - a BLE
 // dropout, a scan taking the bus, a wake from sleep. Integrating across it would
@@ -1055,6 +1079,14 @@ static void samplerStep() {
     lastEcuOkMs = millis();
     everSawEcu  = true;
     histTick(g_live);
+    // Beside histTick, and for the same reason: both record a published sample, and
+    // this branch is the only place one exists. Not from loop() - g_live keeps its
+    // last good sample with ok still set once the ECU stops answering, so a caller
+    // out there would write a row a second of carried-forward values for as long as
+    // the car was silent, which is the one thing the trip log must never do. Each
+    // owns its own period gate, so being called per sample rather than per second
+    // costs a comparison.
+    tripTick(g_live);
   }
 }
 
@@ -1784,6 +1816,7 @@ void setup() {
 
   scanHitsBegin();
   watchLoad();          // before tripBegin: the watch set decides the CSV columns
+  tripIntBegin();       // before tripBegin: the totals are columns on the first row
   tripBegin();
   scanBegin();          // resumes an interrupted sweep, needs the filesystem up
   histBegin();
