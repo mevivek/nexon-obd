@@ -1,7 +1,7 @@
 /* ==========================================================================
    SECTION 1 — the shared stylesheet.
 
-   Ported verbatim from firmware/NexonOBD/ui_css.h. Do not redesign: the firmware
+   Ported verbatim from firmware/Obdurate/ui_css.h. Do not redesign: the firmware
    pages and this bundle have to look like one product on the same phone, and the
    comments below record why each rule is the way it is. This section must not
    drift from ui_css.h — a change here is a change the firmware pages need too.

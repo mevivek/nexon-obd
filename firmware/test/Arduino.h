@@ -1,5 +1,5 @@
 // Host-side stand-in for the Arduino core, enough to compile and drive the parts
-// of NexonOBD.ino under test. Only what the extracted functions actually touch.
+// of Obdurate.ino under test. Only what the extracted functions actually touch.
 #pragma once
 
 #include <cstdint>

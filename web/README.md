@@ -20,7 +20,7 @@ npm run build    # one dist/index.html.gz, with a size report against the budget
 ## What is in `src/lib/`
 
 The framework-free half of the dashboard, lifted out of
-`firmware/NexonOBD/dashboard_html.h` and turned into pure ES modules. No DOM access
+`firmware/Obdurate/dashboard_html.h` and turned into pure ES modules. No DOM access
 anywhere in here — the modules take a sample and return values and descriptors, and
 the components decide what a `warn` looks like.
 
@@ -110,7 +110,7 @@ the same document every time.
 
 `package.json` carries its own `version`, starting at **0.1.0**, and it is
 **independent of the firmware's `FW_VERSION`** in
-`firmware/NexonOBD/version.h`. The two ship on different cadences over different
+`firmware/Obdurate/version.h`. The two ship on different cadences over different
 channels — firmware over `/update`, this over LittleFS — and conflating them would
 mean a frontend fix needed a firmware flash to be legible in the header. The header
 shows `web v<version>`; the firmware pages keep showing `v<FW_VERSION>`.
@@ -155,7 +155,7 @@ duplicated here:
   `suiteScanBanner` and `suiteSeed` *are* covered here, against the pure step
   functions they were extracted into: `live/status.js` and `live/hist.js`.)
 - The version-stamp, tab-switching, DID-watch and trip-column suites — they assert
-  against firmware source (`NexonOBD.ino`, `triplog.h`, `version.h`) and are about the
+  against firmware source (`Obdurate.ino`, `triplog.h`, `version.h`) and are about the
   board, not the browser.
 - The syntax suite — it exists because the firmware's JavaScript lives inside C++ raw
   string literals and nothing else in that build ever parses it. Vite parses this

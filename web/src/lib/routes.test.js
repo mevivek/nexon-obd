@@ -17,7 +17,7 @@ import { dirname, join } from 'node:path';
 import { ROUTES } from '../routes.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const DASHBOARD = join(here, '../../../firmware/NexonOBD/dashboard_html.h');
+const DASHBOARD = join(here, '../../../firmware/Obdurate/dashboard_html.h');
 
 describe('nav', () => {
   it('has the six tabs in order', () => {

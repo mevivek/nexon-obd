@@ -1,4 +1,4 @@
-// Trip logs. Ported from firmware/NexonOBD/trip_html.h.
+// Trip logs. Ported from firmware/Obdurate/trip_html.h.
 //
 // The board records a CSV row a second to its own filesystem while the ECU is
 // answering. This lists what it has, downloads it, and deletes what you are done

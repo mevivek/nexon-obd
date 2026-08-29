@@ -49,7 +49,7 @@ describe('what the driver is told', () => {
   it('says what to do next on success', () => {
     // The board is about to disappear off the network on purpose; saying so is the
     // difference between a successful flash and an apparently dead board.
-    expect(OTA_MSG.ok).toBe('Flashed. Rebooting - reconnect to NexonOBD in a few seconds.');
+    expect(OTA_MSG.ok).toBe('Flashed. Rebooting - reconnect to Obdurate in a few seconds.');
   });
 
   it('carries the board\'s own words on failure', () => {

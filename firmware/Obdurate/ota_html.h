@@ -40,8 +40,8 @@ The board reboots automatically once the write verifies.</div>
 <div class="hint" style="margin-top:0">
 Build it with:<br>
 <code>firmware/build.sh</code><br>
-then upload <code>firmware/build/NexonOBD-v&lt;version&gt;.bin</code>.<br><br>
-That is the app image. <code>NexonOBD.ino.merged.bin</code> sitting next to it is a
+then upload <code>firmware/build/Obdurate-v&lt;version&gt;.bin</code>.<br><br>
+That is the app image. <code>Obdurate.ino.merged.bin</code> sitting next to it is a
 full-flash image for USB recovery and will not work here.<br><br>
 The version above updates when the new image boots, so it doubles as confirmation
 that the flash took.<br><br>
@@ -71,7 +71,7 @@ go.onclick=()=>{
   x.onload=()=>{
     let ok=false;
     try{ok=JSON.parse(x.responseText).ok}catch(e){}
-    if(ok){m.className='msg ok';m.textContent='Flashed. Rebooting - reconnect to NexonOBD in a few seconds.';p.style.width='100%'}
+    if(ok){m.className='msg ok';m.textContent='Flashed. Rebooting - reconnect to Obdurate in a few seconds.';p.style.width='100%'}
     else{m.className='msg err';m.textContent='Update failed: '+x.responseText;go.disabled=false}
   };
   x.onerror=()=>{m.className='msg err';m.textContent='Connection lost during upload.';go.disabled=false};

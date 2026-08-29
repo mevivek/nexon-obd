@@ -8,9 +8,9 @@
 
 #include "shims.h"
 #include "isotp_extract.h"
-#include "../NexonOBD/didwatch.h"
-#include "../NexonOBD/trip_names.h"
-#include "../NexonOBD/ui_paths.h"
+#include "../Obdurate/didwatch.h"
+#include "../Obdurate/trip_names.h"
+#include "../Obdurate/ui_paths.h"
 
 #include <cstdio>
 

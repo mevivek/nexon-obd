@@ -1,4 +1,4 @@
-// OTA upload logic, ported from the <script> in firmware/NexonOBD/ota_html.h.
+// OTA upload logic, ported from the <script> in firmware/Obdurate/ota_html.h.
 //
 // Split out from the page so the parts that decide what the driver is told — did it
 // flash, how far along is it — can be asserted on the host rather than by flashing a
@@ -34,7 +34,7 @@ export function uploadingText(size) {
 
 /** What the page says while and after the upload. Wording is the firmware's. */
 export const OTA_MSG = {
-  ok: 'Flashed. Rebooting - reconnect to NexonOBD in a few seconds.',
+  ok: 'Flashed. Rebooting - reconnect to Obdurate in a few seconds.',
   lost: 'Connection lost during upload.',
 };
 

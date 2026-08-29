@@ -1,4 +1,4 @@
-// Mode 06 on-board monitor results. Ported from firmware/NexonOBD/mon_html.h.
+// Mode 06 on-board monitor results. Ported from firmware/Obdurate/mon_html.h.
 //
 // Mode 06 is a read, like everything else here. The ECU reports what each of its
 // own monitors measured and the limits it judges that against, so this page can say
@@ -47,7 +47,7 @@ export function Monitors() {
 
   // Results only refresh while this page is open — which is also what arms the
   // board: a request to /mon buys MON_WANTED_MS of discovery and reading (see
-  // monStep() in NexonOBD.ino). So the interval is the page's half of that
+  // monStep() in Obdurate.ino). So the interval is the page's half of that
   // handshake, and stopping it on unmount is what lets the bus go back to the
   // values that move now.
   useEffect(() => {

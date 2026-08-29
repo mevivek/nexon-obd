@@ -1,9 +1,27 @@
-# NexonOBD
+# Obdurate
 
-Live telemetry and UDS diagnostics for a **2022 Tata Nexon 1.2 petrol (BS6)**, built on a
-**Seeed XIAO ESP32S3**. The board hosts its own Wi-Fi access point and serves a gauge
-dashboard, a UDS identifier scanner, and browser-based OTA updates — no laptop, no app,
-no cloud.
+> *ob·du·rate* — adj. unyielding; refusing to be moved.
+
+**A read-only black box for your car.** It plugs into the OBD-II port and stays
+there. It records every drive to onboard flash whether or not a phone is connected,
+prints the sample rate it is actually achieving next to every reading, and never
+writes anything to the car — which is a test, not a promise: the build fails if a
+write service ever appears in the source.
+
+Built on a **Seeed XIAO ESP32S3**. It hosts its own Wi-Fi access point and serves a
+gauge dashboard, on-board monitor results, a UDS identifier scanner and browser-based
+OTA updates. No app, no account, no internet, no cloud. Join its Wi-Fi and a page
+opens; don't, and it keeps recording anyway.
+
+**Developed and verified against a 2022 Tata Nexon 1.2 petrol (BS6).** The transport
+layer, ISO-TP, the recorder, the scanner and the honesty rules are generic. The PID
+lists (`PID_B1`–`PID_B4`), the ECU addresses (`ID_ECM_REQ`/`ID_TCM_REQ`), the bus
+timing and the warning thresholds are that car's — a different one needs those
+changed in the source, and there is no porting guide yet. If you try it on another
+car, the measurements are the interesting part; open an issue.
+
+[`docs/FINDINGS.md`](docs/FINDINGS.md) is what was measured on this one, including a
+catalogue of the ways a cheap ELM327 clone lies to you.
 
 It reaches the car two ways and picks whichever works:
 
@@ -21,7 +39,7 @@ it says so.
 
 1. Flash the firmware (see [Building](#building)).
 2. Power the board — USB, or from the OBD port via a 12 V→5 V buck.
-3. Join Wi-Fi **`NexonOBD`** / **`nexon1234`**.
+3. Join Wi-Fi **`Obdurate`** / **`changeme1234`**.
 4. Install the frontend: **`web/deploy.sh`** (see [Frontend](#frontend)). Once only —
    it lives on the board's filesystem and survives reflashing.
 5. Open **`http://192.168.4.1`**.
@@ -561,11 +579,11 @@ First run installs `arduino-cli` and the ESP32 core into `firmware/.toolchain/`
 (~6 GB unpacked, several minutes) and reuses them after that. Nothing lands outside
 the repo, so deleting `firmware/.toolchain/` undoes the install completely.
 
-The output you want is **`firmware/build/NexonOBD-v<version>.bin`** — the app image,
+The output you want is **`firmware/build/Obdurate-v<version>.bin`** — the app image,
 which is what `/update` takes. The version comes from
-[`firmware/NexonOBD/version.h`](firmware/NexonOBD/version.h); bump it there and the
+[`firmware/Obdurate/version.h`](firmware/Obdurate/version.h); bump it there and the
 filename, the dashboard header and the serial banner all follow.
-`NexonOBD.ino.merged.bin` in the same directory is a full-flash image for USB
+`Obdurate.ino.merged.bin` in the same directory is a full-flash image for USB
 recovery; feeding *that* to `/update` will not work.
 
 By hand, if you would rather not use the script:
@@ -576,8 +594,8 @@ arduino-cli config add board_manager.additional_urls \
 arduino-cli core update-index
 arduino-cli core install esp32:esp32
 
-arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32S3 --output-dir build firmware/NexonOBD
-arduino-cli upload -p COM3 --fqbn esp32:esp32:XIAO_ESP32S3 firmware/NexonOBD
+arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32S3 --output-dir build firmware/Obdurate
+arduino-cli upload -p COM3 --fqbn esp32:esp32:XIAO_ESP32S3 firmware/Obdurate
 ```
 
 Current size: **1.26 MB flash (37 % of `app0`)**, 49 KB RAM (15 %), plus 4.8 KB of
@@ -594,7 +612,7 @@ firmware/test/run.sh          # needs g++, python3 and node — no ESP32 core, n
 ```
 
 The ISO-TP layer and the mode-01 batch poller are extracted straight out of
-`NexonOBD.ino` and compiled against fake TWAI and ELM327 shims, so frame sequences
+`Obdurate.ino` and compiled against fake TWAI and ELM327 shims, so frame sequences
 that are impractical to stage against a real car — a dropped consecutive frame, a
 reordered sequence number, a reply that stops halfway — are covered. The same shims
 stand in for the web server, so the deadline give-back described above is tested for
@@ -633,8 +651,8 @@ code, since that is the state that used to blank the dashboard.
 
 ### OTA
 
-Run `firmware/build.sh`, join `NexonOBD`, and upload
-`firmware/build/NexonOBD-v<version>.bin` at `http://192.168.4.1/update`. The header
+Run `firmware/build.sh`, join `Obdurate`, and upload
+`firmware/build/Obdurate-v<version>.bin` at `http://192.168.4.1/update`. The header
 shows the new version once it reboots, which is how you confirm the flash took.
 
 The board runs from `app0`; an upload streams into `app1`; `otadata` only flips once
@@ -660,12 +678,12 @@ upload at `/update`. No dev machine needed at the car, only to produce the image
 
 ## Before you use this
 
-Change the access point credentials in `NexonOBD.ino` — they are placeholders, and the
+Change the access point credentials in `Obdurate.ino` — they are placeholders, and the
 board is an open target on any network it creates:
 
 ```cpp
-static const char *AP_SSID = "NexonOBD";
-static const char *AP_PASS = "nexon1234";   // >= 8 chars
+static const char *AP_SSID = "Obdurate";
+static const char *AP_PASS = "changeme1234";   // >= 8 chars
 ```
 
 `/update` has **no authentication**. Anyone who can join the AP can flash the board, so a

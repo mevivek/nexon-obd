@@ -1,4 +1,4 @@
-// Trip-log list arithmetic, ported from the <script> in firmware/NexonOBD/trip_html.h.
+// Trip-log list arithmetic, ported from the <script> in firmware/Obdurate/trip_html.h.
 //
 // The board records a CSV row a second to its own filesystem while the ECU is
 // answering. This is the display side of listing what it has.

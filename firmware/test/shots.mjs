@@ -44,9 +44,9 @@ const CRUISING = {
 
 // url path -> page source. '/' is the boot fallback, as on the board.
 const PAGES = [
-  ['boot', '/', '../NexonOBD/boot_html.h'],
-  ['update', '/update', '../NexonOBD/ota_html.h'],
-  ['ui', '/ui', '../NexonOBD/ui_html.h'],
+  ['boot', '/', '../Obdurate/boot_html.h'],
+  ['update', '/update', '../Obdurate/ota_html.h'],
+  ['ui', '/ui', '../Obdurate/ui_html.h'],
 ];
 
 const WIDTHS = [[390, 'phone'], [768, 'tablet']];

@@ -76,7 +76,7 @@ inline String elmCommand(const String &cmd, uint32_t timeoutMs = 1500) {
 // it burns a settable number of milliseconds, counts its calls, and records whether
 // the bus guard was set while it ran - a handler reached from a yield is running
 // underneath a half-finished reassembly and has to be able to tell.
-#include "../NexonOBD/bus_yield.h"
+#include "../Obdurate/bus_yield.h"
 
 bool     g_busBusy         = false;
 uint32_t g_yieldCostMs     = 0;      // wall-clock each yield consumes
@@ -101,7 +101,7 @@ static const uint32_t ID_TCM_RSP = 0x7E9;
 
 float g_baro = NAN;
 
-#include "../NexonOBD/obd_types.h"
+#include "../Obdurate/obd_types.h"
 
 inline void resetBus() {
   g_rx.clear();

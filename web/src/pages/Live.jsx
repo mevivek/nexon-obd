@@ -1,4 +1,4 @@
-// The live dashboard, ported from firmware/NexonOBD/dashboard_html.h.
+// The live dashboard, ported from firmware/Obdurate/dashboard_html.h.
 //
 // Ordered for a glance from the driver's seat rather than by PID number: speed and
 // engine speed first, then the two that tell you to stop (boost, coolant), then the

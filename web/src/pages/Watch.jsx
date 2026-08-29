@@ -1,4 +1,4 @@
-// DID watch. Ported from firmware/NexonOBD/watch_html.h.
+// DID watch. Ported from firmware/Obdurate/watch_html.h.
 //
 // The scanner finds identifiers that answer; it cannot say what they hold. This
 // reads a chosen handful continuously and puts them next to rpm, coolant and load,

@@ -10,8 +10,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-echo "== extracting transport code from NexonOBD.ino =="
-python3 extract.py ../NexonOBD/NexonOBD.ino isotp_extract.h
+echo "== extracting transport code from Obdurate.ino =="
+python3 extract.py ../Obdurate/Obdurate.ino isotp_extract.h
 
 echo "== ISO-TP + mode 01 =="
 g++ -std=c++17 -I. -Wall -Wextra -Wno-unused-parameter -o isotp_test test_isotp.cpp

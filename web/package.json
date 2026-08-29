@@ -1,9 +1,9 @@
 {
-  "name": "nexon-obd-web",
+  "name": "obdurate-web",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Frontend bundle for the ESP32-hosted Nexon OBD dashboard. Versioned independently of firmware FW_VERSION.",
+  "description": "Frontend bundle for the ESP32-hosted Obdurate dashboard. Versioned independently of firmware FW_VERSION.",
   "license": "MIT",
   "scripts": {
     "dev": "vite",

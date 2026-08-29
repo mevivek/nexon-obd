@@ -28,7 +28,7 @@ function rawLiteral(src, tag) {
 let cssCache = null;
 export function uiCss() {
   if (cssCache === null) {
-    cssCache = rawLiteral(readFileSync(join(here, '../NexonOBD/ui_css.h'), 'utf8'), 'css');
+    cssCache = rawLiteral(readFileSync(join(here, '../Obdurate/ui_css.h'), 'utf8'), 'css');
   }
   return cssCache;
 }
@@ -37,7 +37,7 @@ export function uiCss() {
 let verCache = null;
 export function fwVersion() {
   if (verCache === null) {
-    const src = readFileSync(join(here, '../NexonOBD/version.h'), 'utf8');
+    const src = readFileSync(join(here, '../Obdurate/version.h'), 'utf8');
     const m = src.match(/#define\s+FW_VERSION\s+"([^"]+)"/);
     if (!m) throw new Error('no FW_VERSION in version.h');
     verCache = m[1];

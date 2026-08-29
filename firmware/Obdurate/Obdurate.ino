@@ -1,4 +1,4 @@
-// NexonOBD - XIAO ESP32S3 + SN65HVD230 CAN transceiver, plugged into the OBD-II port.
+// Obdurate - XIAO ESP32S3 + SN65HVD230 CAN transceiver, plugged into the OBD-II port.
 //
 // Two modes, one binary:
 //   1. Live dashboard  - hosts a Wi-Fi AP and serves gauges at http://192.168.4.1/
@@ -54,8 +54,22 @@ static Transport activeTransport = TR_NONE;
 static const gpio_num_t PIN_CAN_TX = GPIO_NUM_2;   // XIAO pad D1
 static const gpio_num_t PIN_CAN_RX = GPIO_NUM_3;   // XIAO pad D2
 
-static const char *AP_SSID = "NexonOBD";
-static const char *AP_PASS = "nexon1234";          // >= 8 chars, change if you like
+static const char *AP_SSID = "Obdurate";
+static const char *AP_PASS = "changeme1234";          // >= 8 chars, change if you like
+
+// A note on the NVS namespaces, which are still "nexonscan", "nexonwatch",
+// "nexontrip" and "nexonhist" after the rename and are staying that way.
+//
+// They are storage keys, not branding: nothing shows them to anyone. Renaming them
+// orphans everything a board already has - and one of those is scanSaveState()'s
+// position, which is the resume point of a sweep that takes over half an hour on
+// CAN and the better part of a day over BLE. A board mid-sweep would come up
+// believing it had never started. The trend history and the trip sequence go the
+// same way, quietly, on the first boot after an update.
+//
+// A cosmetic rename that silently destroys days of scanning is a bad trade, and NVS
+// namespaces are capped at 15 characters, so there is no room to be clever about
+// migrating. They keep the old names.
 
 static const uint32_t ID_ECM_REQ = 0x7E0;          // engine ECU request
 static const uint32_t ID_ECM_RSP = 0x7E8;          // engine ECU response
@@ -1916,7 +1930,7 @@ static void chooseTransport() {
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("[fw] NexonOBD " FW_VERSION);
+  Serial.println("[fw] Obdurate " FW_VERSION);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);        // solid on through boot, so power is visible
   delay(300);

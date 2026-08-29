@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build NexonOBD locally and leave an OTA-ready image in firmware/build/.
+# Build Obdurate locally and leave an OTA-ready image in firmware/build/.
 #
 # Installs arduino-cli and the ESP32 core into firmware/.toolchain/ on first run
 # (~6 GB unpacked, several minutes) and reuses them afterwards. Nothing is written
@@ -66,16 +66,16 @@ echo "==> host tests"
 "$HERE/test/run.sh"
 
 VERSION=$(sed -n 's/.*#define[[:space:]]\+FW_VERSION[[:space:]]\+"\([^"]*\)".*/\1/p' \
-          "$HERE/NexonOBD/version.h")
+          "$HERE/Obdurate/version.h")
 [ -n "$VERSION" ] || { echo "could not read FW_VERSION from version.h" >&2; exit 1; }
 
 echo "==> compiling v$VERSION"
-"$CLI" compile --fqbn "$FQBN" --output-dir "$OUT" --warnings default "$HERE/NexonOBD"
+"$CLI" compile --fqbn "$FQBN" --output-dir "$OUT" --warnings default "$HERE/Obdurate"
 
 # Name the image after the version so a .bin sitting in a downloads folder still
-# says which build it is. arduino-cli always writes NexonOBD.ino.bin, so copy.
-IMAGE="$OUT/NexonOBD-v$VERSION.bin"
-cp "$OUT/NexonOBD.ino.bin" "$IMAGE"
+# says which build it is. arduino-cli always writes Obdurate.ino.bin, so copy.
+IMAGE="$OUT/Obdurate-v$VERSION.bin"
+cp "$OUT/Obdurate.ino.bin" "$IMAGE"
 
 echo
 echo "OTA image: $IMAGE"
@@ -85,7 +85,7 @@ echo "Upload it at http://192.168.4.1/update after joining the board's Wi-Fi."
 echo "The /update page shows \"running v$VERSION\" once the new image boots, so it"
 echo "doubles as confirmation. The dashboard header shows the frontend bundle's own"
 echo "version instead - the frontend split decoupled the two."
-echo "NexonOBD.ino.merged.bin is a full-flash image for USB recovery - do NOT"
+echo "Obdurate.ino.merged.bin is a full-flash image for USB recovery - do NOT"
 echo "feed that one to /update, it is not an OTA app image."
 
 if [ "${1:-}" = "--upload" ]; then
@@ -95,5 +95,5 @@ if [ "${1:-}" = "--upload" ]; then
     exit 1
   fi
   echo "==> uploading over USB on $PORT"
-  "$CLI" upload -p "$PORT" --fqbn "$FQBN" --input-dir "$OUT" "$HERE/NexonOBD"
+  "$CLI" upload -p "$PORT" --fqbn "$FQBN" --input-dir "$OUT" "$HERE/Obdurate"
 fi

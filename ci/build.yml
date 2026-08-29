@@ -100,7 +100,7 @@ jobs:
             --fqbn esp32:esp32:XIAO_ESP32S3:PSRAM=opi \
             --output-dir build \
             --warnings default \
-            firmware/NexonOBD
+            firmware/Obdurate
 
       - name: Report size
         run: |
@@ -118,7 +118,7 @@ jobs:
         with:
           name: firmware
           path: |
-            build/NexonOBD.ino.bin
-            build/NexonOBD.ino.merged.bin
+            build/Obdurate.ino.bin
+            build/Obdurate.ino.merged.bin
           if-no-files-found: error
           retention-days: 90

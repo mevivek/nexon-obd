@@ -1,4 +1,4 @@
-// Mode 06 monitor decoding, ported from the <script> in firmware/NexonOBD/mon_html.h.
+// Mode 06 monitor decoding, ported from the <script> in firmware/Obdurate/mon_html.h.
 //
 // The page's whole claim is that pass and headroom are readable *without* knowing
 // the units: a test passes when its value sits inside its own limits, and the bar

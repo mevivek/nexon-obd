@@ -1,5 +1,5 @@
 // The DID scanner's framework-free half, lifted out of the <script> block in
-// firmware/NexonOBD/scan_html.h so it can be asserted against directly.
+// firmware/Obdurate/scan_html.h so it can be asserted against directly.
 //
 // Everything here is a pure function of the /scan/status payload. The component
 // does the fetching, the timers and the anchor click; this module decides what a

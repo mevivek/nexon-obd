@@ -14,7 +14,7 @@
 // the firmware prints after the version in the subtitle, for the pages whose detail
 // is a constant; Live and Firmware report theirs at runtime (see shell.jsx).
 export const ROUTES = [
-  { path: '/', label: 'Live', fw: '/', title: 'Nexon Live' },
+  { path: '/', label: 'Live', fw: '/', title: 'Live' },
   { path: '/monitors', label: 'Monitors', fw: '/monitors', title: 'Monitors', sub: 'mode 06' },
   { path: '/trips', label: 'Trips', fw: '/trips', title: 'Trips', sub: 'CSV logs' },
   { path: '/watch', label: 'Watch', fw: '/watch', title: 'DID Watch', sub: 'service 0x22' },

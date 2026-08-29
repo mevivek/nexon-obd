@@ -1,4 +1,4 @@
-// UDS DID scanner. Ported from firmware/NexonOBD/scan_html.h.
+// UDS DID scanner. Ported from firmware/Obdurate/scan_html.h.
 //
 // Service 0x22 reads only — this page cannot issue any state-changing service, and
 // the wording throughout says so on purpose. Everything it shows comes from

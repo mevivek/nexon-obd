@@ -40,8 +40,8 @@ const readSrc = (p) => readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
 // when no bundle is installed, /update is the recovery path of last resort, and /ui
 // is how a bundle gets installed in the first place. /monitors, /trips, /watch and
 // /scan are 302s into the bundle's hash routes and have no page of their own.
-const FW_PAGES = ['../NexonOBD/boot_html.h', '../NexonOBD/ota_html.h',
-                  '../NexonOBD/ui_html.h'];
+const FW_PAGES = ['../Obdurate/boot_html.h', '../Obdurate/ota_html.h',
+                  '../Obdurate/ui_html.h'];
 
 let ran = 0, failed = 0;
 function ok(cond, what) {
@@ -83,7 +83,7 @@ console.log('\nversion stamp');
 
   // history.h cannot be compiled on the host - it needs RTC attributes and NVS - so
   // check the constants that encode the design decisions instead of nothing at all.
-  const hist = readSrc(join(here, '../NexonOBD/history.h'));
+  const hist = readSrc(join(here, '../Obdurate/history.h'));
   const konst = (n) => {
     const m = hist.match(new RegExp(n + '\\s*=\\s*([^;]+);'));
     return m ? Function('return ' + m[1].replace(/UL|U|\b_\b/g, ''))() : NaN;
@@ -139,7 +139,7 @@ console.log('\nversion stamp');
   ok(/npm --prefix web run build/.test(ci), 'and the bundle budget gate');
   ok(/'web\/\*\*'/.test(ci), 'and watches web/ for changes');
   ok(/'contract\/\*\*'/.test(ci), 'and contract/, which both ends are checked against');
-  ok(/FW_VERSION/.test(build) && /NexonOBD-v\$VERSION\.bin/.test(build),
+  ok(/FW_VERSION/.test(build) && /Obdurate-v\$VERSION\.bin/.test(build),
      'build.sh names the image from the same FW_VERSION');
 }
 
@@ -163,7 +163,7 @@ console.log('\ntab switching');
 
   // A page added to the firmware but not to FW_PAGES would silently skip every
   // check in this file. Compare the list against what is actually on disk.
-  const onDisk = readdirSync(join(here, '../NexonOBD'))
+  const onDisk = readdirSync(join(here, '../Obdurate'))
     .filter(n => n.endsWith('_html.h')).sort();
   const listed = ALL.map(f => f.split('/').pop()).sort();
   ok(onDisk.join() === listed.join(),
@@ -181,7 +181,7 @@ console.log('\ntab switching');
   }
   ok(uiCss().includes('--plane:'), 'ui.css carries the palette');
 
-  const ino = readSrc(join(here, '../NexonOBD/NexonOBD.ino'));
+  const ino = readSrc(join(here, '../Obdurate/Obdurate.ino'));
 
   // Caching. A version-stamped immutable URL means the stylesheet is fetched once
   // per build; an ETag on the pages turns a re-visit into a 304 with no body.
@@ -198,7 +198,7 @@ console.log('\ntab switching');
   // Fairness. Both transports have to yield, or the fix only covers one of them.
   ok(/twai_receive\([\s\S]*?!=\s*ESP_OK\)\s*\{\s*busWaitYield/.test(ino),
      'the CAN wait loop serves HTTP while the bus is quiet');
-  const elm = readSrc(join(here, '../NexonOBD/elm_ble.h'));
+  const elm = readSrc(join(here, '../Obdurate/elm_ble.h'));
   ok(/busWaitYield\(deadline,\s*extended\)/.test(elm),
      'the ELM327 wait loop serves HTTP while the adapter thinks');
 
@@ -236,8 +236,8 @@ console.log('\ntab switching');
 // Vitest in web/src/pages/watch. Everything below is firmware-side.
 console.log('\nDID watch');
 {
-  const ino = readSrc(join(here, '../NexonOBD/NexonOBD.ino'));
-  const trip = readSrc(join(here, '../NexonOBD/triplog.h'));
+  const ino = readSrc(join(here, '../Obdurate/Obdurate.ino'));
+  const trip = readSrc(join(here, '../Obdurate/triplog.h'));
 
   ok(/server\.on\("\/watch\/list",/.test(ino) && /server\.on\("\/watch\/set",/.test(ino),
      'the watch endpoints are routed');
@@ -287,9 +287,9 @@ console.log('\nDID watch');
 // ---------------------------------------------------------------- trip columns
 console.log('\ntrip totals');
 {
-  const ino = readSrc(join(here, '../NexonOBD/NexonOBD.ino'));
-  const trip = readSrc(join(here, '../NexonOBD/triplog.h'));
-  const types = readSrc(join(here, '../NexonOBD/obd_types.h'));
+  const ino = readSrc(join(here, '../Obdurate/Obdurate.ino'));
+  const trip = readSrc(join(here, '../Obdurate/triplog.h'));
+  const types = readSrc(join(here, '../Obdurate/obd_types.h'));
 
   ok(/float tripKm = NAN, tripL = NAN;/.test(types),
      'the totals ride on Live, so /data and the CSV both get them for free');
@@ -323,6 +323,33 @@ console.log('\ntrip totals');
      'but the interval clock is not, so a wake starts a fresh interval');
 }
 
+// ---------------------------------------------------------------- stored state
+//
+// The NVS namespaces did not follow the rename to Obdurate, and must not. They are
+// storage keys that nothing displays, and renaming one orphans what a board already
+// holds - including scanSaveState()'s position, which is the resume point of a sweep
+// that runs for over half an hour on CAN and the better part of a day over BLE. A
+// board mid-sweep would come up believing it had never started, and the trend
+// history and trip sequence would go the same way on the first boot after an update.
+//
+// So this is pinned. A future tidy-up that "finishes the rename" fails here with the
+// reason attached, rather than costing somebody a day of scanning.
+console.log('\nstored state survives the rename');
+{
+  const files = ['../Obdurate/Obdurate.ino', '../Obdurate/triplog.h', '../Obdurate/history.h'];
+  const all = files.map(f => readSrc(join(here, f))).join('\n');
+  const spaces = [...all.matchAll(/\.begin\("([a-z0-9_]+)"/g)].map(m => m[1]);
+
+  ok(spaces.length >= 4, `found the NVS namespaces (${[...new Set(spaces)].join(', ')})`);
+  for (const ns of new Set(spaces)) {
+    ok(ns.startsWith('nexon'),
+       `${ns} keeps its pre-rename name - renaming it orphans a resumable sweep`);
+    // NVS caps a namespace at 15 characters, and a name that silently overruns is
+    // a begin() that fails and a feature that stops persisting with no error.
+    ok(ns.length <= 15, `${ns} is within the 15-character NVS limit`);
+  }
+}
+
 // ---------------------------------------------------------------- read-only
 //
 // The README's safety section promises this firmware never sends a service that
@@ -336,7 +363,7 @@ console.log('\ntrip totals');
 // coding feature, this fails and names it.
 console.log('\nread-only, structurally');
 {
-  const ino = readSrc(join(here, '../NexonOBD/NexonOBD.ino'));
+  const ino = readSrc(join(here, '../Obdurate/Obdurate.ino'));
 
   // Reads, and only reads. 0x22 is ReadDataByIdentifier, which the ECUs on this car
   // answer in the default session with no security access - it is still a read.
@@ -416,10 +443,10 @@ console.log('\nread-only, structurally');
 // every other check in this file.
 console.log('\nperiodic tasks');
 {
-  const files = ['../NexonOBD/NexonOBD.ino',
-                 ...readdirSync(join(here, '../NexonOBD'))
+  const files = ['../Obdurate/Obdurate.ino',
+                 ...readdirSync(join(here, '../Obdurate'))
                    .filter(f => f.endsWith('.h'))
-                   .map(f => `../NexonOBD/${f}`)];
+                   .map(f => `../Obdurate/${f}`)];
   const src = new Map(files.map(f => [f, readSrc(join(here, f))]));
   const all = [...src.values()].join('\n');
 
@@ -455,7 +482,7 @@ console.log('\nperiodic tasks');
 // place a fresh sample exists.
 console.log('\nrecorders run on published samples');
 {
-  const ino = readSrc(join(here, '../NexonOBD/NexonOBD.ino'));
+  const ino = readSrc(join(here, '../Obdurate/Obdurate.ino'));
 
   const sampler = ino.slice(ino.indexOf('static void samplerStep'));
   const body = sampler.slice(0, sampler.indexOf('\n}\n'));
@@ -484,7 +511,7 @@ console.log('\nrecorders run on published samples');
 // with nothing in the serial log and nothing on the page.
 console.log('\ntrip log survives a full partition');
 {
-  const trip = readSrc(join(here, '../NexonOBD/triplog.h'));
+  const trip = readSrc(join(here, '../Obdurate/triplog.h'));
 
   ok(/static bool tripEnsureSpace\(\)/.test(trip),
      'tripEnsureSpace reports whether it met the floor');
@@ -517,7 +544,7 @@ console.log('\ntrip log survives a full partition');
 // they cannot come back silently.
 console.log('\nbundle serving');
 {
-  const ino = readSrc(join(here, '../NexonOBD/NexonOBD.ino'));
+  const ino = readSrc(join(here, '../Obdurate/Obdurate.ino'));
   const send = ino.slice(ino.indexOf('static bool uiTrySend'));
   const body = send.slice(0, send.indexOf('\n}\n'));
 
@@ -548,7 +575,7 @@ console.log('\nbundle serving');
 console.log('\n/data contract');
 {
   const contract = JSON.parse(readFileSync(join(here, '../../contract/data.json'), 'utf8'));
-  const ino = readSrc(join(here, '../NexonOBD/NexonOBD.ino'));
+  const ino = readSrc(join(here, '../Obdurate/Obdurate.ino'));
 
   const body = ino.slice(ino.indexOf('static void handleData()'));
   const fn = body.slice(0, body.indexOf('\n}\n'));
@@ -634,7 +661,7 @@ console.log('\n/data contract');
 // charging.
 console.log('\npower');
 {
-  const ino = readSrc(join(here, '../NexonOBD/NexonOBD.ino'));
+  const ino = readSrc(join(here, '../Obdurate/Obdurate.ino'));
 
   // One exit, because there is now more than one reason to take it and the
   // expensive mistake is a path that forgets tripClose() - the trip file is
