@@ -66,7 +66,13 @@ radial-gradient(64% 40% at 2% 78%,rgba(95,227,192,.13),rgba(95,227,192,0) 68%)}
 /* header ---------------------------------------------------------------- */
 header{position:sticky;top:0;z-index:5;margin-bottom:12px;padding:16px 18px 12px;
 background:rgba(7,7,11,.92);border-bottom:1px solid var(--grid)}
-@supports (backdrop-filter:blur(1px)){header{backdrop-filter:blur(12px)}}
+/* Translucent only where there is a blur to keep the text legible. The opaque
+   value above is the fallback: without backdrop-filter, cards scrolling under a
+   see-through header are unreadable. With it, the header stops being a slab laid
+   over the lit ground - which is what hid the brighter source, since that one is
+   centred at the top right, directly behind this bar. */
+@supports (backdrop-filter:blur(1px)){header{background:rgba(7,7,11,.58);
+backdrop-filter:blur(16px)}}
 .bar{display:flex;align-items:center;gap:10px;max-width:1100px;margin:0 auto}
 /* Title over subtitle, so the pill has the whole right-hand side to itself and a
    long transport string cannot push the version off the screen. */
