@@ -17,8 +17,11 @@ import { useShellStatus } from '../shell.jsx';
 import { DASH } from '../lib/format.js';
 import {
   ratePerSec, rateText, etaText, percent, progressText, scanStatus, spacedHex,
-  hitsCsv, CSV_NAME, ECUS,
+  hitsCsv, CSV_NAME, ECUS, hms,
 } from './scanner/scan.js';
+import {
+  readRate, readProgress, readsEta, tallyText, CONDITIONS_NOTE,
+} from './scanner/triage.js';
 
 // A running sweep is watched; an idle board is left alone. The interval used to be
 // created only inside the firmware's Start handler, so opening the page mid-sweep
@@ -37,6 +40,10 @@ export function Scanner() {
   const [err, setErr] = useState(false);
   // Start is reflected the moment it is pressed, not a round trip later.
   const [busy, setBusy] = useState(false);
+  const [tri, setTri] = useState(null);
+  // Optimistic like the sweep's Start, and for the same reason: a button that
+  // waits a round trip to look pressed gets pressed twice.
+  const [tBusy, setTBusy] = useState(false);
   const pollRef = useRef(null);
 
   // The page must be live however the scan was started — it may have been kicked
@@ -55,6 +62,20 @@ export function Scanner() {
         setErr(false);
         setBusy(false);
         next = j.running ? POLL_RUNNING_MS : POLL_IDLE_MS;
+
+        // The register, polled in the same turn. Triage is driven by the board
+        // too, so this page has to arrive at a run already in progress rather
+        // than assume its own buttons started one.
+        try {
+          const d = await (await fetch('/didmap', { cache: 'no-store' })).json();
+          if (!live || my !== seq) return;
+          setTri(d);
+          setTBusy(false);
+          if (d.on) next = POLL_RUNNING_MS;
+        } catch (e) {
+          // A board too old to serve /didmap is not an error worth a red header;
+          // the sweep half of this page still works.
+        }
       } catch (e) {
         // The hits already on screen stay there; only the header changes. A dropped
         // poll does not mean the identifiers it already found stopped answering.
@@ -76,6 +97,21 @@ export function Scanner() {
   const running = busy || !!(data && data.running);
   useShellStatus(scanStatus(data, err));
   const rps = data ? ratePerSec(data.tried, data.elapsed) : 0;
+
+  const hitCount = hits.length;
+  const tOn = tBusy || !!(tri && tri.on);
+
+  async function triageStart() {
+    setTBusy(true);
+    try { await fetch('/triage/start', { cache: 'no-store' }); } catch (e) { setTBusy(false); }
+    if (pollRef.current) pollRef.current();
+  }
+
+  async function triageStop() {
+    // The board saves the register on stop, so this is also how a run is banked.
+    try { await fetch('/triage/stop', { cache: 'no-store' }); } catch (e) { /* poll corrects it */ }
+    if (pollRef.current) pollRef.current();
+  }
 
   async function start() {
     setBusy(true);
@@ -180,6 +216,51 @@ export function Scanner() {
           0x11 (reset) or 0x10 (session change). A full 0000&ndash;FFFF pass is 65,536 requests.
           Run it parked.
         </div>
+      </div>
+
+      {/* Triage lives here rather than on its own tab: it re-reads exactly what the
+          sweep above found, and the nav is already six wide on a phone. */}
+      <div class="card scan">
+        <h2 class="sec">Triage</h2>
+        <div class="note" style="margin-bottom:10px">
+          Re-reads every identifier the sweep found, to see which of them actually move.
+          A value that never changes cannot be correlated against anything, so this is
+          what decides which are worth one of the eight watch slots.
+        </div>
+
+        <div class="btns">
+          <button disabled={tOn || !hitCount} onClick={triageStart}>
+            {tOn ? 'Triaging…' : 'Start triage'}
+          </button>
+          <button class="ghost" disabled={!tOn} onClick={triageStop}>Stop</button>
+        </div>
+
+        <div class="bar2">
+          <i style={'width:' + (readProgress(tri && tri.reads, tri && tri.total,
+                                             tri && tri.needed) * 100).toFixed(1) + '%'} />
+        </div>
+        <div class="note">{tallyText(tri)}</div>
+
+        <div class="meta">
+          <span>pass <b>{tri ? tri.passes : 0}</b></span>
+          <span>reads <b>{tri ? tri.reads : 0}</b></span>
+          <span>elapsed <b>{tri ? hms(tri.elapsed) : DASH}</b></span>
+          <span>rate <b>{tri ? readRate(tri.reads, tri.elapsed).toFixed(1) : DASH}</b>/s</span>
+          <span>left <b>{(tri && readsEta(tri.reads, tri.total, tri.needed, tri.elapsed)) || DASH}</b></span>
+        </div>
+
+        {tOn && !(tri && tri.reads) && (
+          <div class="hint" style="color:var(--warning)">
+            Armed, but nothing has answered yet &mdash; the ECU is not talking. This
+            starts on its own the moment it does, so leaving it armed and turning the
+            key is fine.
+          </div>
+        )}
+
+        {/* In front of you while it runs, because the conditions during the run are
+            what the result is worth, and no amount of staring at the numbers
+            afterwards recovers whether the car was idling. */}
+        <div class="hint">{CONDITIONS_NOTE}</div>
       </div>
 
       <div class="card tw">

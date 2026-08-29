@@ -1008,6 +1008,10 @@ static const uint32_t TRIAGE_BUDGET_MS = 250;
 static uint16_t triageTurn   = 0;
 static uint16_t triagePasses = 0;
 static uint16_t triageReads  = 0;
+// When the current run was armed, so the page can show a timer that survives a
+// reload and is the same on every phone looking at it. Client-side elapsed would
+// restart every time the page was reopened, which is exactly when you want it.
+static uint32_t triageStartedMs = 0;
 
 static void triageStep() {
   if (!triageOn || !didMapN) return;
@@ -1482,6 +1486,9 @@ static void handleTriageStart() {
                 "{\"ok\":false,\"error\":\"no identifiers - run a sweep first\"}");
     return;
   }
+  // Only restart the clock on a fresh run, so re-pressing Start on an already
+  // running triage does not make it look like it just began.
+  if (!triageOn) triageStartedMs = millis();
   triageOn = true;
 
   bool ecuLive = (millis() - lastEcuOkMs) < 3000;
@@ -1522,6 +1529,7 @@ static void handleDidMap() {
   head += ",\"reads\":";   head += triageReads;
   head += ",\"turn\":";    head += triageTurn;
   head += ",\"needed\":";  head += DIDMAP_CONST_READS;
+  head += ",\"elapsed\":";  head += triageStartedMs ? (millis() - triageStartedMs) / 1000 : 0;
   head += ",\"total\":";      head += t.total;
   head += ",\"unknown\":";    head += t.unknown;
   head += ",\"constant\":";   head += t.constant;
