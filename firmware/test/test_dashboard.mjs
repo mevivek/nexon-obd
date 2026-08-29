@@ -22,6 +22,15 @@ import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
+// Firmware source is read as text and sliced with indexOf('\n}\n') to find where a
+// function ends. The blob in git is LF, but a Windows checkout with core.autocrlf
+// on has a CRLF working tree, where that marker never matches: indexOf returns -1
+// and slice(0, -1) does not fail, it quietly hands back the whole rest of the file.
+// A check meant for one function then reads the entire sketch - which is how the
+// /data contract test came to see six fields from handleWatchList() and call them
+// duplicates of handleData()'s. Read source with the endings the checks assume.
+const readSrc = (p) => readFileSync(p, 'utf8').replace(/\r\n/g, '\n');
+
 // Every page still built into flash, in one list, because these checks had already
 // drifted apart once: the trips page was added in 1.7.0 and three of the four loops
 // below never picked it up. A page missing from here is caught by the first test in
@@ -74,7 +83,7 @@ console.log('\nversion stamp');
 
   // history.h cannot be compiled on the host - it needs RTC attributes and NVS - so
   // check the constants that encode the design decisions instead of nothing at all.
-  const hist = readFileSync(join(here, '../NexonOBD/history.h'), 'utf8');
+  const hist = readSrc(join(here, '../NexonOBD/history.h'));
   const konst = (n) => {
     const m = hist.match(new RegExp(n + '\\s*=\\s*([^;]+);'));
     return m ? Function('return ' + m[1].replace(/UL|U|\b_\b/g, ''))() : NaN;
@@ -108,7 +117,7 @@ console.log('\nversion stamp');
   }
 
   // PSRAM is off by default on this board; the scan hit list depends on it being on.
-  const build = readFileSync(join(here, '../build.sh'), 'utf8');
+  const build = readSrc(join(here, '../build.sh'));
   ok(/PSRAM=opi/.test(build), 'build.sh asks for the board with PSRAM enabled');
   ok(/FW_VERSION/.test(build) && /NexonOBD-v\$VERSION\.bin/.test(build),
      'build.sh names the image from the same FW_VERSION');
@@ -152,7 +161,7 @@ console.log('\ntab switching');
   }
   ok(uiCss().includes('--plane:'), 'ui.css carries the palette');
 
-  const ino = readFileSync(join(here, '../NexonOBD/NexonOBD.ino'), 'utf8');
+  const ino = readSrc(join(here, '../NexonOBD/NexonOBD.ino'));
 
   // Caching. A version-stamped immutable URL means the stylesheet is fetched once
   // per build; an ETag on the pages turns a re-visit into a 304 with no body.
@@ -169,7 +178,7 @@ console.log('\ntab switching');
   // Fairness. Both transports have to yield, or the fix only covers one of them.
   ok(/twai_receive\([\s\S]*?!=\s*ESP_OK\)\s*\{\s*busWaitYield/.test(ino),
      'the CAN wait loop serves HTTP while the bus is quiet');
-  const elm = readFileSync(join(here, '../NexonOBD/elm_ble.h'), 'utf8');
+  const elm = readSrc(join(here, '../NexonOBD/elm_ble.h'));
   ok(/busWaitYield\(deadline,\s*extended\)/.test(elm),
      'the ELM327 wait loop serves HTTP while the adapter thinks');
 
@@ -207,8 +216,8 @@ console.log('\ntab switching');
 // Vitest in web/src/pages/watch. Everything below is firmware-side.
 console.log('\nDID watch');
 {
-  const ino = readFileSync(join(here, '../NexonOBD/NexonOBD.ino'), 'utf8');
-  const trip = readFileSync(join(here, '../NexonOBD/triplog.h'), 'utf8');
+  const ino = readSrc(join(here, '../NexonOBD/NexonOBD.ino'));
+  const trip = readSrc(join(here, '../NexonOBD/triplog.h'));
 
   ok(/server\.on\("\/watch\/list",/.test(ino) && /server\.on\("\/watch\/set",/.test(ino),
      'the watch endpoints are routed');
@@ -258,9 +267,9 @@ console.log('\nDID watch');
 // ---------------------------------------------------------------- trip columns
 console.log('\ntrip totals');
 {
-  const ino = readFileSync(join(here, '../NexonOBD/NexonOBD.ino'), 'utf8');
-  const trip = readFileSync(join(here, '../NexonOBD/triplog.h'), 'utf8');
-  const types = readFileSync(join(here, '../NexonOBD/obd_types.h'), 'utf8');
+  const ino = readSrc(join(here, '../NexonOBD/NexonOBD.ino'));
+  const trip = readSrc(join(here, '../NexonOBD/triplog.h'));
+  const types = readSrc(join(here, '../NexonOBD/obd_types.h'));
 
   ok(/float tripKm = NAN, tripL = NAN;/.test(types),
      'the totals ride on Live, so /data and the CSV both get them for free');
@@ -288,7 +297,7 @@ console.log('\ntrip totals');
 // they cannot come back silently.
 console.log('\nbundle serving');
 {
-  const ino = readFileSync(join(here, '../NexonOBD/NexonOBD.ino'), 'utf8');
+  const ino = readSrc(join(here, '../NexonOBD/NexonOBD.ino'));
   const send = ino.slice(ino.indexOf('static bool uiTrySend'));
   const body = send.slice(0, send.indexOf('\n}\n'));
 
@@ -319,7 +328,7 @@ console.log('\nbundle serving');
 console.log('\n/data contract');
 {
   const contract = JSON.parse(readFileSync(join(here, '../../contract/data.json'), 'utf8'));
-  const ino = readFileSync(join(here, '../NexonOBD/NexonOBD.ino'), 'utf8');
+  const ino = readSrc(join(here, '../NexonOBD/NexonOBD.ino'));
 
   const body = ino.slice(ino.indexOf('static void handleData()'));
   const fn = body.slice(0, body.indexOf('\n}\n'));

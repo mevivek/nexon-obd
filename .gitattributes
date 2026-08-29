@@ -1,0 +1,12 @@
+# The working tree on Windows had CRLF endings while the blob in git is LF, and the
+# host tests slice firmware source by looking for a "\n}\n" function end - a marker
+# CRLF never matches, which silently widened a per-function check to the whole
+# sketch. Normalise on checkout so the tree and the blob agree everywhere.
+* text=auto eol=lf
+
+# Binaries and images must not be touched.
+*.bin  binary
+*.png  binary
+*.ico  binary
+*.woff2 binary
+*.gz   binary
