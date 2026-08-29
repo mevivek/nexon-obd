@@ -389,6 +389,21 @@ console.log('\ntriage and the DID register');
   ok(sb >= 0 && db > sb && ds > db,
      'the register is built and seeded after the hits are restored');
 
+
+  // Arming is not running. With the ignition off triage is armed and reads
+  // nothing, and a bare ok:true cannot be told apart from a run in progress -
+  // which is exactly the reply someone gets standing on the driveway.
+  const start = ino.slice(ino.indexOf('static void handleTriageStart'));
+  const sbody = start.slice(0, start.indexOf('\n}\n'));
+  ok(sbody.length > 0 && sbody.length < ino.length, 'handleTriageStart body isolated');
+  // Escaped, because these are quotes inside a C++ string literal - the same shape
+  // the /data contract checks match against.
+  ok(/\\"armed\\"/.test(sbody), 'the reply says whether it is armed');
+  ok(/\\"total\\"/.test(sbody), 'and how many identifiers are queued');
+  ok(/lastEcuOkMs/.test(sbody), 'and whether the ECU is actually answering');
+  ok(/scan\.running/.test(sbody), 'and whether a sweep is holding the bus');
+  ok(/no identifiers - run a sweep first/.test(sbody),
+     'and refuses outright when there is nothing to triage');
   for (const r of ['/triage/start', '/triage/stop', '/didmap']) {
     ok(ino.includes(`server.on("${r}"`), `${r} is a route`);
   }

@@ -1469,10 +1469,38 @@ static void handleTime() {
   server.send(200, "application/json", s);
 }
 
+// Arming is not the same as running, and a bare {"ok":true} cannot tell the two
+// apart - which is the reply you get with the ignition off, when triage is armed and
+// will not read a single identifier until the ECU answers. So the reply says what it
+// is about to be able to do: how many identifiers are queued, which transport is
+// live, and whether the car is actually talking. "Armed but the ECU is silent" is a
+// perfectly ordinary state - you start it on the driveway and it begins when you turn
+// the key - but it has to be distinguishable from working.
 static void handleTriageStart() {
-  if (!didMapN) { server.send(409, "application/json", "{\"ok\":false,\"error\":\"no identifiers - run a sweep first\"}"); return; }
+  if (!didMapN) {
+    server.send(409, "application/json",
+                "{\"ok\":false,\"error\":\"no identifiers - run a sweep first\"}");
+    return;
+  }
   triageOn = true;
-  server.send(200, "application/json", "{\"ok\":true}");
+
+  bool ecuLive = (millis() - lastEcuOkMs) < 3000;
+  String s = "{\"ok\":true,\"armed\":true,\"total\":";
+  s += didMapN;
+  s += ",\"transport\":\"";
+  s += transportName();
+  s += "\",\"ecu\":\"";
+  s += ecuLive ? "answering" : "silent";
+  s += "\",\"scanning\":";
+  s += scan.running ? "true" : "false";
+  s += ",\"note\":\"";
+  // The two reasons nothing will happen yet, named rather than left to be inferred
+  // from a passes counter that stays at zero.
+  if (scan.running)   s += "armed - a sweep has the bus, triage starts when it ends";
+  else if (!ecuLive)  s += "armed - the ECU is not answering, triage starts when it does";
+  else                s += "running";
+  s += "\"}";
+  server.send(200, "application/json", s);
 }
 
 static void handleTriageStop() {
