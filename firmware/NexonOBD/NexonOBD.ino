@@ -8,16 +8,25 @@
 // replaces the ELM327 rather than depending on it. Bluetooth is not used at all:
 // the XIAO ESP32S3 is BLE-only and cannot speak the Classic SPP an ELM327 needs.
 //
-// SAFETY: this firmware only ever transmits diagnostic requests (mode 01/03/09 and
-// UDS service 0x22 reads) plus ISO-TP flow-control frames. It never sends
-// arbitrary frames, never writes (0x2E), never runs routines (0x31), never resets
-// an ECU (0x11) and never changes diagnostic session (0x10).
+// SAFETY: this firmware only ever transmits diagnostic requests - mode 01 (live
+// data), mode 03 (stored codes), mode 06 (on-board monitor results) and UDS service
+// 0x22 (ReadDataByIdentifier), all of them reads - plus ISO-TP flow-control frames.
+// It never sends arbitrary frames, never writes (0x2E), never runs routines (0x31),
+// never resets an ECU (0x11), never changes diagnostic session (0x10) and never
+// clears the car's own record (0x14).
+//
+// That is checked, not asserted: test_dashboard.mjs finds every request buffer from
+// its call sites, reads its service byte out of this file, and fails the build on
+// anything outside the list of reads. This comment claimed mode 09 for a long time
+// while no 0x09 request existed anywhere in the sketch; writing the check is what
+// found it.
 
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <vector>
 #include "driver/twai.h"
+#include "esp_system.h"
 #include "obd_types.h"
 #include "bus_yield.h"
 #include "elm_ble.h"
@@ -57,6 +66,56 @@ static const uint32_t ID_TCM_RSP = 0x7E9;
 // the thing being left plugged in. OBD pin 16 is permanently live.
 static const uint32_t IDLE_SLEEP_MS = 10UL * 60UL * 1000UL;
 static const uint64_t SLEEP_WAKE_US = 30ULL * 1000000ULL;   // re-check every 30 s
+
+// A second floor, under the idle timer rather than beside it.
+//
+// The idle timer answers "the car is off", which is the ordinary case. It does not
+// answer "the battery is going flat", and those come apart precisely where it
+// matters: an ECU that keeps answering with the engine not running - ignition on at
+// the roadside, a long diagnostic session parked, a module that stays awake - resets
+// lastEcuOkMs on every reply, so the ten-minute guard never arms and the board draws
+// from a battery nothing is charging for as long as that lasts.
+//
+// A lead-acid battery at rest sits near 12.6 V. 11.8 V is roughly a quarter charged
+// and about where a cold start stops being a certainty. Past that, nothing this board
+// does is worth the car not starting.
+static const float    BATT_SLEEP_V       = 11.8f;
+// Cranking pulls the rail to nine volts and below for a second or so, which is the
+// one moment the reading is low and sleeping would be exactly wrong. Thirty seconds
+// continuously below the floor is well past any crank, and past the sag from an
+// electric fan or a heated screen starting up.
+static const uint32_t BATT_SLEEP_HOLD_MS = 30000;
+// The engine turning is proof something is charging, whatever the rail reads.
+static const float    BATT_ENGINE_RPM    = 300.0f;
+
+// Boot forensics.
+//
+// A recorder that runs unattended has to be able to answer "what happened while I
+// was not looking". From the page, a board that has quietly panicked and restarted
+// forty times looks exactly like one that has been up all week - same version, same
+// readings, a trip log full of short files nobody can explain. A brownout in
+// particular is a car-electrical event worth seeing, and it is invisible today.
+//
+// The counter lives in RTC memory, which does not survive a power cut - and that is
+// correct rather than a limitation, because it counts deep-sleep wakes and those
+// are precisely the restarts RTC memory does survive. A cold boot resets it, which
+// esp_reset_reason() can say for certain, so no magic word is needed here.
+RTC_DATA_ATTR static uint32_t g_bootWakes;
+
+static const char *resetReasonName() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   return "power";
+    case ESP_RST_DEEPSLEEP: return "wake";
+    case ESP_RST_SW:        return "software";
+    case ESP_RST_PANIC:     return "panic";
+    case ESP_RST_INT_WDT:   return "int-wdt";
+    case ESP_RST_TASK_WDT:  return "task-wdt";
+    case ESP_RST_WDT:       return "wdt";
+    case ESP_RST_BROWNOUT:  return "brownout";
+    case ESP_RST_EXT:       return "external";
+    default:                return "unknown";
+  }
+}
 
 // The XIAO ESP32S3 has no power LED - the only visible indicator is the user LED
 // on GPIO21, and it is active LOW. Without this the board looks dead even when
@@ -1016,6 +1075,30 @@ static void tripIntegrate(float speedKmh, float rateLph, uint32_t now) {
   g_tripL  += rateLph  * dt / 3600000.0f;
 }
 
+// How long the rail has been under BATT_SLEEP_V without a break, or 0 for not low.
+static uint32_t g_battLow = 0;
+
+// The battery floor, as a pure step so the rule can be tested rather than driven at
+// a real battery - which is a test that takes a flat car to run once.
+//
+// Returns the new run start: 0 means the run is broken, otherwise the moment it
+// began. Sleeping is that being old enough, which the caller decides.
+static uint32_t battLowStep(uint32_t lowSince, float volt, float rpm, uint32_t now) {
+  // Never on absent data. An unread voltage is not a low voltage and an unknown
+  // engine state is not a stopped engine. This is the same rule voltFlag() follows
+  // on the page, where it is load-bearing in the most literal way - `null < 12.2`
+  // is true in JavaScript, and getting it wrong there reported a healthy charging
+  // system as broken. Getting it wrong here would switch the board off mid-drive.
+  if (isnan(volt) || isnan(rpm)) return 0;
+  // The engine turning is proof something is charging, whatever the rail reads -
+  // and cranking is exactly when it reads lowest.
+  if (rpm >= BATT_ENGINE_RPM) return 0;
+  if (volt >= BATT_SLEEP_V) return 0;
+  // millis() is 0 for the first millisecond after boot, and 0 is the sentinel for
+  // "not low", so the run would never start if it began there.
+  return lowSince ? lowSince : (now ? now : 1);
+}
+
 static uint32_t pickWaitMs = PICK_MIN_MS;
 
 // One cached reply per batch, with the moment it arrived.
@@ -1173,6 +1256,20 @@ static void jsonQuality(String &s) {
   s += "}";
 }
 
+// How this run of the firmware started, and how long it has been going.
+//
+// Emitted on both paths, like jsonScan and jsonQuality: a board that cannot talk to
+// the car is exactly when you most want to know whether it has just rebooted.
+static void jsonBoot(String &s) {
+  s += ",\"boot\":{\"reason\":\"";
+  s += resetReasonName();
+  s += "\",\"up\":";
+  s += millis();
+  s += ",\"wakes\":";
+  s += g_bootWakes;
+  s += "}";
+}
+
 static void handleData() {
   String s = "{";
   bool fresh = g_seq && (millis() - g_liveMs < 4000);
@@ -1186,6 +1283,7 @@ static void handleData() {
     s += "\"";
     jsonScan(s);
     jsonQuality(s);
+    jsonBoot(s);
     s += "}";
     server.send(200, "application/json", s);
     return;
@@ -1202,6 +1300,7 @@ static void handleData() {
   s += (long long)clockNowMs();
   jsonScan(s);
   jsonQuality(s);
+  jsonBoot(s);
   s += ",\"v\":{";
   jsonNum(s, "rpm", L.rpm, 0);        jsonNum(s, "speed", L.speed, 0);
   jsonNum(s, "map", L.map_, 0);       jsonNum(s, "baro", L.baro, 0);
@@ -1877,6 +1976,13 @@ void setup() {
   server.on("/scan/status", handleScanStatus);
   server.begin();
 
+  // RTC memory holds garbage on a cold boot, so the wake counter only means
+  // anything when this start was itself a wake - which esp_reset_reason() can say
+  // for certain, so this needs no magic word of its own.
+  if (esp_reset_reason() != ESP_RST_DEEPSLEEP) g_bootWakes = 0;
+  Serial.printf("[boot] reset=%s wakes=%lu\n",
+                resetReasonName(), (unsigned long)g_bootWakes);
+
   scanHitsBegin();
   watchLoad();          // before tripBegin: the watch set decides the CSV columns
   tripIntBegin();       // before tripBegin: the totals are columns on the first row
@@ -1885,6 +1991,22 @@ void setup() {
   histBegin();
   lastEcuOkMs = millis();
   chooseTransport();
+}
+
+// Everything that has to happen before the power goes, in one place because there
+// is now more than one reason to go and the expensive mistake is a path that forgets
+// one of them. tripClose() in particular: the file is buffered, and a sleep that
+// skips it drops up to TRIP_FLUSH_MS of the drive that was just recorded.
+static void powerDown(const char *why) {
+  Serial.printf("[pwr] %s - deep sleep after %lus, %lu wakes\n",
+                why, (unsigned long)(millis() / 1000UL), (unsigned long)g_bootWakes);
+  histSave();
+  tripClose();
+  g_bootWakes++;          // RTC memory, so it counts across the sleep it is entering
+  twai_stop();
+  twai_driver_uninstall();
+  esp_sleep_enable_timer_wakeup(SLEEP_WAKE_US);
+  esp_deep_sleep_start();
 }
 
 // Requests served per turn. A page load is the document, /time, and the page's
@@ -1943,13 +2065,20 @@ void loop() {
   // Battery guard: nothing from the car for a while means the ignition is off.
   // Only arms once the ECU has actually answered at least once, otherwise a
   // bench board with no transceiver wired would sleep mid-test and look dead.
-  if (everSawEcu && millis() - lastEcuOkMs > IDLE_SLEEP_MS) {
-    Serial.println("[pwr] idle - deep sleep");
-    histSave();
-    tripClose();
-    twai_stop();
-    twai_driver_uninstall();
-    esp_sleep_enable_timer_wakeup(SLEEP_WAKE_US);
-    esp_deep_sleep_start();
+  if (everSawEcu && millis() - lastEcuOkMs > IDLE_SLEEP_MS) powerDown("idle");
+
+  // The battery floor, under the idle timer rather than beside it. Only ever on a
+  // fresh sample: g_live keeps its last values once the ECU stops answering, and a
+  // voltage from ten minutes ago must not put the board to sleep now - that case is
+  // the idle timer's, and it is already running.
+  bool freshSample = g_seq && (millis() - g_liveMs < 4000);
+  g_battLow = battLowStep(g_battLow,
+                          freshSample ? g_live.volt : NAN,
+                          freshSample ? g_live.rpm : NAN,
+                          millis());
+  if (g_battLow && millis() - g_battLow >= BATT_SLEEP_HOLD_MS) {
+    char why[48];
+    snprintf(why, sizeof(why), "battery %.2f V, engine stopped", (double)g_live.volt);
+    powerDown(why);
   }
 }

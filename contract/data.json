@@ -48,6 +48,12 @@
     "share": "a scan is taking most of the bus, so the sampler is on its slow share"
   },
 
+  "boot": {
+    "reason": "how this run started: power | wake | panic | brownout | wdt | ...",
+    "up": "milliseconds since this run began",
+    "wakes": "deep-sleep wakes since the last cold boot"
+  },
+
   "scan": {
     "scan": "a DID sweep has the bus",
     "scanPct": "percent complete",

@@ -120,6 +120,47 @@ interval.
 The `[alive]` serial line prints `batch=`, `cycle=` and `stale=` so all three are
 visible rather than inferred.
 
+### The board says how fast it is actually reading the car
+
+Those numbers used to go only to the serial log, where nobody sitting in a car can
+read them. They are now in `/data` as a `q` block, and on the page as the muted
+trailer next to the status pill:
+
+```
+live · holding 2      1.87 Hz · b3 6.8 s
+```
+
+The rate quoted is **the board's**, not the page's. The page's fetch loop is capped
+by its poll interval and throttled harder still in a backgrounded tab, so a rate
+measured there can only ever be at or below the one the board is publishing — it
+would understate a healthy link and could never catch a sick one. Where the two
+genuinely disagree, both are shown, because that is the case worth knowing about:
+the log holds samples the screen is not showing you.
+
+This is the number every tool in this category leaves out. An ELM327 round trip puts
+a cheap clone somewhere near five PIDs a second; set a tenth-of-a-second logging
+interval against that and you get a log that looks complete and is mostly the
+previous row repeated, with nothing anywhere to tell you which it is.
+
+Two rules keep it honest, and they are the same ones the readings themselves follow:
+
+- **`hz` is null, not zero, until a full pass has been timed.** A rate of zero is a
+  claim that the bus is dead. Not having measured one yet is not that claim, and the
+  first second of every drive is spent in that state.
+- **A batch that has never answered is null, not a very large age.** Never-answered
+  is usually a PID this ECU does not support; long-ago-answered is a link going bad.
+  Collapsing them presents the first as the second.
+
+The stalest batch is named only once it is past the board's own derived staleness
+window — `b2` and `b3` come round once every four turns by design, so reporting the
+worst one unconditionally would be a permanent complaint about nothing.
+
+`/data` also carries a `boot` block: how this run started (`power`, `wake`, `panic`,
+`brownout`, `wdt`, …), how long it has been going, and how many deep-sleep wakes
+since the last cold boot. A recorder that runs unattended has to be able to answer
+*what happened while I was not looking* — a board that has quietly panicked and
+restarted forty times otherwise looks exactly like one that has been up all week.
+
 **On BLE, the bus transaction rate is the limit**, and it is mostly round-trip
 latency rather than the ECU. The connection interval is the floor: at a default of
 40–50 ms a request and its reply cannot beat about a tenth of a second however fast
@@ -272,14 +313,32 @@ Service `0x22` is still a read — only the identifier varies, never the service
 ### Trip logs
 
 A CSV row a second while the ECU is answering, written to the 1.5 MB filesystem
-partition. Twenty-two columns, wall-clock time and uptime on every row, and empty
-cells rather than zeros where a value was not read — so a gap is a gap, not a
-reading of nought.
+partition. Twenty-six columns — wall-clock time and uptime, then twenty-four
+readings — and empty cells rather than zeros where a value was not read, so a gap is
+a gap and not a reading of nought.
 
-Roughly half a megabyte an hour, so the partition holds a few hours and the oldest
-trip is deleted automatically when space runs short. LittleFS rather than SPIFFS:
-the board loses power the instant the ignition goes off, mid-write as often as not,
-and LittleFS is built to survive exactly that.
+> **This did not work until v1.12.0.** `tripTick()` was written, documented here,
+> and never called from anywhere. `/trips/list` returned an empty array on every
+> board that has ever run this firmware, and the DID-correlation workflow described
+> below — the route this project has for decoding the `10xx` block — has never
+> produced a row. If you flashed anything before v1.12.0, there are no trip logs to
+> recover; there never were any.
+
+Roughly half a megabyte an hour bare, so the partition holds two to three hours, and
+the oldest trip is deleted automatically when space runs short. Watched identifiers
+change that materially: each one adds two columns and up to 26 bytes to every row,
+so a full set of eight is closer to **1.3 MB an hour — about one hour of capacity**.
+The columns are chosen when a file is opened, so the cost is fixed for that file.
+
+LittleFS rather than SPIFFS: the board loses power the instant the ignition goes
+off, mid-write as often as not, and LittleFS is built to survive exactly that.
+
+A full partition is the ordinary end state of a device left in a car, not an edge
+case. Logging stops rather than pretending: `tripEnsureSpace()` reports whether it
+managed to reach the free-space floor, a file is not opened when it did not, and the
+row terminator is checked so a write that did not land is seen. Without those, a
+failed write left `size()` where it was, the rotation that would have freed space
+never fired again, and logging stopped for the rest of the drive in silence.
 
 The clock comes from whichever page you open, so a drive that starts before you open
 one has an unset clock for its first rows. Each file's header records whether the
@@ -335,6 +394,40 @@ did until v1.3.0 — costs somewhere over a flash sector erase per save, so shor
 the interval that way would have burned through NVS endurance in a couple of years.
 Chunked, ten times the flush rate still churns less flash than the old
 sixty-second full-buffer write did.
+
+### Being left in the car
+
+The board deep-sleeps after ten minutes with no ECU response. That timer answers
+*the car is off*, which is the ordinary case, and it does not answer *the battery is
+going flat* — the two come apart exactly where it matters. An ECU that keeps
+answering with the engine stopped (ignition on at the roadside, a long session
+parked, a module that stays awake) resets the idle timer on every reply, so the
+ten-minute guard never arms and the board keeps drawing from a battery nothing is
+charging.
+
+So there is a second floor under it: **below 11.8 V for thirty continuous seconds
+with the engine stopped, the board shuts down.** A lead-acid battery at rest sits
+near 12.6 V; 11.8 V is roughly a quarter charged and about where a cold start stops
+being a certainty.
+
+Three things keep it from firing when it should not, and each is tested:
+
+- **Cranking does not trip it.** The rail sits at nine volts and below for about a
+  second while the starter turns, which is the one moment the reading is low and
+  switching off would be exactly wrong. Thirty continuous seconds is well past any
+  crank, and past the sag from a fan or a heated screen starting up.
+- **A turning engine is proof something is charging**, whatever the rail reads, so
+  any rpm above 300 breaks the run outright.
+- **An absent reading is never a low reading.** An unread voltage and an unknown
+  engine state both break the run rather than counting toward it, and the guard is
+  fed the sample only while it is fresh — a voltage from ten minutes ago must not
+  switch the board off now. That is the idle timer's job and it is already running.
+
+> **The idle draw has not been measured.** The guard above bounds the worst case at
+> a battery that can still start the car, but no number for what this board actually
+> pulls — asleep, or awake with the AP up — has been put on a meter yet. Until it
+> has, treat the advice below about unplugging a parked car as applying to the board
+> as much as to the adapter.
 
 The onboard LED encodes state, which matters when the board is hidden under the dash:
 
@@ -617,9 +710,21 @@ every ignition.
 
 ## Safety
 
-This firmware is **read-only by design**. It sends mode 01 (live data), mode 03/07 (fault
-codes), mode 09 (vehicle info), UDS `0x22` (ReadDataByIdentifier), and ISO-TP flow
-control. It never sends:
+This firmware is **read-only by design**, and since v1.12.0 that is a test rather
+than a promise. Every request buffer in the sketch is found from its call sites, its
+service byte read out of the source, and checked against the list of reads. Adding a
+write service fails the build and names it.
+
+What it actually sends, as the check reports it:
+
+| Service | |
+|---|---|
+| `0x01` | mode 01 live data |
+| `0x03` | mode 03 stored fault codes |
+| `0x06` | mode 06 on-board monitor results |
+| `0x22` | UDS ReadDataByIdentifier |
+
+plus ISO-TP flow control. It never sends:
 
 | Service | Why not |
 |---|---|
@@ -628,6 +733,21 @@ control. It never sends:
 | `0x11` ECUReset | resets a live ECU |
 | `0x10` DiagnosticSessionControl | changes ECU state |
 | `0x27` SecurityAccess | unlocks protected functions |
+| `0x14` ClearDiagnosticInformation | erases the car's own record |
+
+> This table used to claim mode 07 (pending codes) and mode 09 (vehicle info) as
+> well. Neither is sent — there is no `0x07` or `0x09` request anywhere in the
+> sketch, and the sketch's own header comment made the same claim. Writing the check
+> is what found it. Both are reads and both are worth having; they are simply not
+> implemented yet.
+
+A request is also bounded now. An ISO-TP single frame is one PCI byte and seven of
+payload, and the request was copied into an eight-byte stack buffer with nothing
+checking the length. The largest caller in the tree — the mode 01 batch, six PIDs
+plus the mode byte — passes exactly seven. At the limit, with nothing spare: a
+seventh PID in a batch, or packing two identifiers into one `0x22` request to get
+the obvious threefold throughput win, would have written past the frame and said
+nothing about it.
 
 Run scans **parked**. Reading is safe; a stalled request while driving is not worth the risk.
 

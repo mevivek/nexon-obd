@@ -137,6 +137,70 @@ static void test_can_still_sends_a_full_single_frame() {
   ok(g_tx.size() == 1 && g_tx[0].data[0] == 0x07, "and the PCI byte says seven");
 }
 
+// ------------------------------------------------------------------ battery floor
+//
+// The rule that decides whether the board switches itself off to save the car's
+// battery. Testable because it is a pure step over the run of low readings - the
+// alternative is a test that needs a flat car and can be run once.
+//
+// The expensive mistake in both directions: sleeping while the engine is cranking
+// (the rail is at its lowest exactly then) or while the reading is simply absent,
+// and never sleeping at all on a car whose ECU keeps answering with nothing
+// charging.
+
+static void test_batt_ignores_absent_readings() {
+  printf("battery floor: an unread value is not a low value\n");
+  // The same rule voltFlag() follows on the page, where `null < 12.2` being true in
+  // JavaScript reported healthy charging systems as broken. Here the equivalent
+  // mistake would switch the board off in the middle of a drive.
+  eq((int)battLowStep(0, NAN, 0.0f, 5000), 0, "no voltage: no run starts");
+  eq((int)battLowStep(0, 11.0f, NAN, 5000), 0, "no rpm: no run starts");
+  eq((int)battLowStep(4000, NAN, 0.0f, 5000), 0, "and an existing run is broken");
+}
+
+static void test_batt_never_while_the_engine_runs() {
+  printf("battery floor: a turning engine is proof something is charging\n");
+  eq((int)battLowStep(0, 11.0f, 800.0f, 5000), 0, "idling at 11.0 V does not count");
+  eq((int)battLowStep(4000, 9.5f, 2500.0f, 5000), 0, "and breaks a run in progress");
+}
+
+static void test_batt_survives_cranking() {
+  printf("battery floor: cranking does not trip it\n");
+  // The rail sits at nine volts and below for about a second while the starter
+  // turns, which is the one moment a naive threshold would fire.
+  uint32_t run = 0, t = 1000;
+  for (int i = 0; i < 10; i++) { run = battLowStep(run, 9.2f, 0.0f, t); t += 100; }
+  ok(run != 0, "a run does start - the reading really is low");
+  ok(t - run < BATT_SLEEP_HOLD_MS, "but a second of it is nowhere near the hold");
+  // Then it fires and the rail recovers.
+  run = battLowStep(run, 13.8f, 900.0f, t);
+  eq((int)run, 0, "and the run is broken the moment it recovers");
+}
+
+static void test_batt_fires_on_a_sustained_low() {
+  printf("battery floor: sustained low with the engine stopped\n");
+  uint32_t run = 0, t = 1000;
+  run = battLowStep(run, 11.5f, 0.0f, t);
+  ok(run == t, "the run starts at the first low reading");
+  for (int i = 0; i < 60; i++) { t += 1000; run = battLowStep(run, 11.5f, 0.0f, t); }
+  eq((int)run, 1000, "and keeps its original start rather than sliding forward");
+  ok(t - run >= BATT_SLEEP_HOLD_MS, "so the hold is reached");
+}
+
+static void test_batt_boundary_is_not_low() {
+  printf("battery floor: the threshold itself is not below it\n");
+  eq((int)battLowStep(0, BATT_SLEEP_V, 0.0f, 5000), 0, "exactly at the floor is fine");
+  ok(battLowStep(0, BATT_SLEEP_V - 0.01f, 0.0f, 5000) != 0, "just under it is not");
+  eq((int)battLowStep(0, 11.0f, BATT_ENGINE_RPM, 5000), 0, "exactly at cranking rpm counts as running");
+}
+
+static void test_batt_run_can_start_at_time_zero() {
+  printf("battery floor: a run beginning in the first millisecond\n");
+  // 0 is the sentinel for "not low", so a run starting at millis() == 0 would never
+  // start at all if the timestamp were stored as it comes.
+  ok(battLowStep(0, 11.0f, 0.0f, 0) != 0, "still starts a run");
+}
+
 // ------------------------------------------------------------------ HTTP yield
 //
 // The transports serve the web server while they wait on the car, so a tab switch
@@ -1122,6 +1186,13 @@ int main() {
   test_trip_skips_intervals_it_knows_nothing_about();
   test_trip_needs_both_inputs();
   test_trip_totals_only_grow();
+
+  test_batt_ignores_absent_readings();
+  test_batt_never_while_the_engine_runs();
+  test_batt_survives_cranking();
+  test_batt_fires_on_a_sustained_low();
+  test_batt_boundary_is_not_low();
+  test_batt_run_can_start_at_time_zero();
 
   test_watch_value_is_big_endian();
   test_watch_freshness();

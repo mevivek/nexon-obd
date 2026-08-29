@@ -590,6 +590,68 @@ console.log('\n/data contract');
   const stale = ino.slice(ino.indexOf('static void handleData()'));
   ok(/if \(!fresh\) \{[\s\S]*?jsonQuality\(s\);[\s\S]*?return;/.test(stale),
      'and on the stale path, where the rate is just as interesting');
+
+  // Boot forensics, same treatment. A board that has quietly panicked and restarted
+  // forty times looks identical from the page to one that has been up all week.
+  const bootFn = ino.slice(ino.indexOf('static void jsonBoot'));
+  const bootKeys = [...bootFn.slice(0, bootFn.indexOf('\n}\n'))
+    .matchAll(/\\"([a-zA-Z]+)\\":/g)].map(m => m[1]).filter(k => k !== 'boot');
+  const bootDeclared = Object.keys(contract.boot);
+  ok(bootKeys.filter(k => !bootDeclared.includes(k)).length === 0,
+     `every boot field is declared (${bootKeys.length} fields)`);
+  ok(bootDeclared.filter(k => !bootKeys.includes(k)).length === 0,
+     'every declared boot field is still sent');
+  ok(/if \(!fresh\) \{[\s\S]*?jsonBoot\(s\);[\s\S]*?return;/.test(stale),
+     'boot is reported on the stale path too - a silent board is when it matters most');
+}
+
+// ---------------------------------------------------------------- power
+//
+// The idle timer answers "the car is off". It does not answer "the battery is going
+// flat", and the two come apart exactly where it matters: an ECU that keeps
+// answering with the engine stopped resets lastEcuOkMs on every reply, so the
+// ten-minute guard never arms and the board keeps drawing from a battery nothing is
+// charging.
+console.log('\npower');
+{
+  const ino = readSrc(join(here, '../NexonOBD/NexonOBD.ino'));
+
+  // One exit, because there is now more than one reason to take it and the
+  // expensive mistake is a path that forgets tripClose() - the trip file is
+  // buffered, so a sleep that skips it drops up to TRIP_FLUSH_MS of the drive that
+  // was just recorded.
+  const down = ino.slice(ino.indexOf('static void powerDown('));
+  const db = down.slice(0, down.indexOf('\n}\n'));
+  for (const step of ['histSave();', 'tripClose();', 'twai_stop();',
+                      'esp_deep_sleep_start();']) {
+    ok(db.includes(step), `powerDown does ${step}`);
+  }
+
+  const loop = ino.slice(ino.indexOf('\nvoid loop() {'));
+  const lb = loop.slice(0, loop.indexOf('\n}\n'));
+  const sleeps = [...lb.matchAll(/esp_deep_sleep_start\(\)/g)].length;
+  eq(sleeps, 0, 'loop() never sleeps directly - it goes through powerDown');
+  eq([...lb.matchAll(/powerDown\(/g)].length, 2,
+     'and has exactly two reasons to: the idle timer and the battery floor');
+
+  // The guard must never read a carried-forward sample. g_live keeps its last
+  // values once the ECU stops answering, and a voltage from ten minutes ago must
+  // not switch the board off now.
+  ok(/freshSample \? g_live\.volt : NAN/.test(lb) && /freshSample \? g_live\.rpm : NAN/.test(lb),
+     'the battery guard is fed NAN rather than a stale reading');
+  ok(/g_seq && \(millis\(\) - g_liveMs < 4000\)/.test(lb),
+     'and freshness is the same test /data uses');
+
+  // The rule itself is host-tested against the extracted function; these pin the
+  // constants, which are the part a well-meaning edit would move.
+  const step = ino.slice(ino.indexOf('static uint32_t battLowStep('));
+  const sb = step.slice(0, step.indexOf('\n}\n'));
+  ok(/if \(isnan\(volt\) \|\| isnan\(rpm\)\) return 0;/.test(sb),
+     'absent readings break the run before anything else is considered');
+  ok(sb.indexOf('isnan') < sb.indexOf('BATT_SLEEP_V'),
+     'and are checked before the threshold, not after');
+  ok(/BATT_SLEEP_HOLD_MS = 30000/.test(ino),
+     'the hold is long enough to sit out a crank');
 }
 
 // ---------------------------------------------------------------- syntax
