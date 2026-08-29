@@ -1533,7 +1533,11 @@ static bool uiTrySend(const char *path) {
     if (!LittleFS.exists(fp)) continue;
     File f = LittleFS.open(fp, FILE_READ);
     if (!f) continue;
-    if (gz) server.sendHeader("Content-Encoding", "gzip");
+    // Do NOT set Content-Encoding here. streamFile() -> _streamFileCore() already
+    // adds it for a name ending in .gz, and WebServer::sendHeader appends without
+    // deduplicating - so setting it too sends the header twice, the browser reads
+    // "gzip, gzip", decompresses once, fails on the second pass and renders the
+    // compressed bytes as text. That is what shipped in 1.11.0.
     // Asset names carry a content hash, so they can be cached forever. index.html
     // names the others, so it must not be - a deploy would never be picked up.
     server.sendHeader("Cache-Control", uiImmutable(path)
@@ -1584,15 +1588,24 @@ static void handleUiUpload() {
 
   if (up.status == UPLOAD_FILE_START) {
     uiUpOpen = false; uiUpWrote = 0; uiUpErr = nullptr;
-    String name = up.filename;
-    if (!name.startsWith("/")) name = "/" + name;
 
-    char fp[80];
-    if (!uiFsPath(fp, sizeof(fp), name.c_str(), false)) {
+    // Not the name the client sent: see uiStoreName. A phone that renamed the
+    // download to index-1.11.1.html.gz would otherwise install a bundle the
+    // firmware cannot find, and report "no frontend installed" over the top of it.
+    char stored[64];
+    if (!uiStoreName(up.filename.c_str(), stored, sizeof(stored))) {
       uiUpErr = "bad filename";
-      Serial.printf("[ui] rejected upload name %s\n", name.c_str());
+      Serial.printf("[ui] rejected upload name %s\n", up.filename.c_str());
       return;
     }
+
+    char fp[80];
+    if (!uiFsPath(fp, sizeof(fp), stored, false)) {
+      uiUpErr = "bad filename";
+      return;
+    }
+    if (strcmp(stored, up.filename.c_str()) != 0)
+      Serial.printf("[ui] %s stored as %s\n", up.filename.c_str(), stored);
     LittleFS.mkdir(UI_DIR);
 
     // Budget check up front. Replacing an existing file does not count its old
