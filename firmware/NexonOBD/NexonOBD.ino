@@ -167,6 +167,15 @@ static int canIsoTp(uint32_t reqId, uint32_t rspId,
                     uint8_t *out, size_t outCap, uint32_t timeoutMs,
                     int *partial = nullptr) {
   if (partial) *partial = 0;
+  // A single frame is eight bytes: one of PCI and seven of payload. Nothing here
+  // sends a multi-frame request, so anything longer is a caller error - and it used
+  // to be a silent one, because the memcpy below is into a stack buffer with no
+  // bound. Every current caller passes a constant, and the largest of them - the
+  // mode 01 batch at PID_B*, six PIDs plus the mode byte - is exactly 7. That is at
+  // the limit with nothing spare, which is precisely the shape of a bug that waits:
+  // a seventh PID in a batch, or packing two DIDs into one 0x22 request, smashes the
+  // frame on the stack and nothing says so.
+  if (plen > 7) return -1;
   uint8_t frame[8] = {0};
   frame[0] = plen;                                  // single-frame PCI
   memcpy(&frame[1], payload, plen);
@@ -332,6 +341,10 @@ static int obdIsoTp(uint32_t reqId, uint32_t rspId,
                     const uint8_t *payload, uint8_t plen,
                     uint8_t *out, size_t outCap, uint32_t timeoutMs,
                     int *partial = nullptr) {
+  // The same seven-byte single-frame limit canIsoTp enforces, stated once at the
+  // door so both transports refuse an over-long request identically rather than one
+  // truncating it into a valid-looking shorter request.
+  if (plen == 0 || plen > 7) return -1;
   // One exchange at a time. The wait loops below serve HTTP, so a handler can run
   // underneath a half-finished reassembly; a second request issued from there would
   // interleave its frames with ours and corrupt both.

@@ -115,6 +115,28 @@ static void test_can_silent() {
   eq(canIsoTp(0x7E0, 0x7E8, req, 2, out, sizeof(out), 400), -1, "reports -1");
 }
 
+// A single frame is one PCI byte and seven of payload. The request was memcpy'd into
+// an eight-byte stack buffer with no bound, and the largest caller in the firmware -
+// the mode 01 batch, six PIDs plus the mode byte - passes exactly 7. At the limit
+// with nothing spare: a seventh PID in a batch, or two DIDs packed into one 0x22
+// request, would have written past the frame and said nothing about it.
+static void test_can_rejects_an_overlong_request() {
+  printf("canIsoTp: a request that cannot fit one frame\n");
+  resetBus();
+  uint8_t req[8] = {0x01, 0x0C, 0x0D, 0x0B, 0x11, 0x04, 0x05, 0x0F}, out[64];
+  eq(canIsoTp(0x7E0, 0x7E8, req, 8, out, sizeof(out), 400), -1, "is refused");
+  ok(g_tx.empty(), "and nothing is put on the bus");
+}
+
+static void test_can_still_sends_a_full_single_frame() {
+  printf("canIsoTp: seven payload bytes still fit\n");
+  resetBus();
+  uint8_t req[7] = {0x01, 0x0C, 0x0D, 0x0B, 0x11, 0x04, 0x05}, out[64];
+  rx(0x7E8, {0x03, 0x41, 0x0C, 0x1A});
+  eq(canIsoTp(0x7E0, 0x7E8, req, 7, out, sizeof(out), 400), 3, "still exchanges");
+  ok(g_tx.size() == 1 && g_tx[0].data[0] == 0x07, "and the PCI byte says seven");
+}
+
 // ------------------------------------------------------------------ HTTP yield
 //
 // The transports serve the web server while they wait on the car, so a tab switch
@@ -1050,6 +1072,8 @@ int main() {
   test_can_dropped_consecutive_frame();
   test_can_oversize_reply();
   test_can_silent();
+  test_can_rejects_an_overlong_request();
+  test_can_still_sends_a_full_single_frame();
 
   test_yield_only_while_idle();
   test_yield_extends_the_deadline();

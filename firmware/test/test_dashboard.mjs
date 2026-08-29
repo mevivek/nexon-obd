@@ -303,6 +303,82 @@ console.log('\ntrip totals');
      'but the interval clock is not, so a wake starts a fresh interval');
 }
 
+// ---------------------------------------------------------------- read-only
+//
+// The README's safety section promises this firmware never sends a service that
+// writes ECU memory, moves an actuator, resets a module or changes session state.
+// Until now that promise was a paragraph. It is the strongest claim the project
+// makes - it is what makes leaving the board plugged into a car defensible - and a
+// paragraph is not what a claim like that should rest on.
+//
+// So the service byte of every request handed to a transport is collected from the
+// source and checked against the list of reads. The day someone adds 0x2E to try a
+// coding feature, this fails and names it.
+console.log('\nread-only, structurally');
+{
+  const ino = readSrc(join(here, '../NexonOBD/NexonOBD.ino'));
+
+  // Reads, and only reads. 0x22 is ReadDataByIdentifier, which the ECUs on this car
+  // answer in the default session with no security access - it is still a read.
+  const READS = new Set(['0x01', '0x02', '0x03', '0x06', '0x07', '0x09', '0x0A', '0x22']);
+  // The five the README names, plus the transfer services. Listed rather than
+  // inferred so the failure message can say what was attempted.
+  const WRITES = {
+    '0x10': 'DiagnosticSessionControl', '0x11': 'ECUReset',
+    '0x14': 'ClearDiagnosticInformation', '0x27': 'SecurityAccess',
+    '0x2E': 'WriteDataByIdentifier', '0x31': 'RoutineControl',
+    '0x34': 'RequestDownload', '0x36': 'TransferData',
+  };
+
+  // The payload is the third argument, so the names of every request buffer in the
+  // firmware come from the call sites rather than from a naming convention.
+  const calls = [...ino.matchAll(/\b(?:obd|can|ble)IsoTp\(\s*[^,]+,\s*[^,]+,\s*(\w+)\s*,/g)]
+    .map(m => m[1]);
+  // obdIsoTp forwards its own parameter to the two transports; those two calls carry
+  // no service byte of their own and are not request sites. Anything declared as a
+  // pointer parameter is a forward, not a buffer.
+  const isParam = (nm) => new RegExp(`const uint8_t \\*${nm}\\b`).test(ino);
+  const sites = calls.filter(nm => !isParam(nm));
+  const names = [...new Set(sites)];
+  ok(sites.length >= 8 && names.length >= 3,
+     `found the request buffers from their call sites (${sites.length} sites, ${names.join(', ')})`);
+  ok(calls.length - sites.length === 2,
+     'the only unresolved payloads are the dispatcher forwarding to its two transports');
+
+  let checked = 0;
+  for (const nm of names) {
+    // Both shapes the firmware uses: an initialiser, and a declaration whose first
+    // byte is assigned separately (the mode 01 batch builds its PID list at runtime).
+    const bytes = [
+      ...[...ino.matchAll(new RegExp(`\\buint8_t\\s+${nm}\\s*\\[[^\\]]*\\]\\s*=\\s*\\{\\s*(0x[0-9A-Fa-f]{2})`, 'g'))],
+      ...[...ino.matchAll(new RegExp(`\\b${nm}\\[0\\]\\s*=\\s*(0x[0-9A-Fa-f]{2})\\s*;`, 'g'))],
+    ].map(m => m[1].toUpperCase().replace('0X', '0x'));
+
+    // An unresolved buffer must fail rather than pass by finding nothing to object
+    // to - that is the difference between this check and a decoration.
+    ok(bytes.length > 0, `${nm}: its service byte is visible in the source`);
+    for (const b of bytes) {
+      checked++;
+      const bad = WRITES[b];
+      ok(READS.has(b) && !bad,
+         `${nm}: service ${b} is a read${bad ? ` - ${b} is ${bad}` : ''}`);
+    }
+  }
+  ok(checked >= 6, `every request's service byte was checked (${checked})`);
+
+  // And the negative, stated directly. Only for the services whose byte cannot also
+  // be a mode 01 PID: 0x34 is RequestDownload as a service and wide-range lambda as
+  // a PID, and PID_B3 legitimately opens with it - a sweep that cannot tell those
+  // apart reports the firmware's own sampler as an attempted download. The positive
+  // check above is the rigorous one; this is the backstop for a request buffer built
+  // in a shape the call-site scan cannot resolve.
+  const NO_PID_COLLISION = ['0x2E', '0x31', '0x27', '0x11', '0x10', '0x14'];
+  for (const b of NO_PID_COLLISION) {
+    const re = new RegExp(`\\{\\s*${b}\\s*,|\\[0\\]\\s*=\\s*${b}\\s*;`, 'i');
+    ok(!re.test(ino), `never sends ${b} (${WRITES[b]})`);
+  }
+}
+
 // ---------------------------------------------------------------- periodic tasks
 //
 // The one that would have caught it. tripTick() was written, reviewed, documented
