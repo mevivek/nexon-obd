@@ -1013,6 +1013,25 @@ static uint16_t triageReads  = 0;
 // restart every time the page was reopened, which is exactly when you want it.
 static uint32_t triageStartedMs = 0;
 
+// Armed across a power cycle, because the ignition going off IS a power cycle and
+// a triage run is meant to span a drive. The sweep has always done this - it keeps
+// its position in NVS and resumes on the next boot - and triage not doing it meant
+// a board carried out to a car came up with the register loaded and triage quietly
+// off, with every restart during the drive stopping it without saying so.
+//
+// Written only when it changes, never periodically: one bool on start and one on
+// stop is nothing against the erase budget the trend ring already spends.
+static Preferences triagePrefs;
+
+static void triageSetOn(bool on) {
+  if (triageOn == on) return;
+  triageOn = on;
+  if (triagePrefs.begin("nexontriage", false)) {
+    triagePrefs.putBool("run", on);
+    triagePrefs.end();
+  }
+}
+
 static void triageStep() {
   if (!triageOn || !didMapN) return;
   // A sweep is hours of work and owns the bus; triage is minutes and can wait.
@@ -1489,7 +1508,7 @@ static void handleTriageStart() {
   // Only restart the clock on a fresh run, so re-pressing Start on an already
   // running triage does not make it look like it just began.
   if (!triageOn) triageStartedMs = millis();
-  triageOn = true;
+  triageSetOn(true);
 
   bool ecuLive = (millis() - lastEcuOkMs) < 3000;
   String s = "{\"ok\":true,\"armed\":true,\"total\":";
@@ -1511,7 +1530,7 @@ static void handleTriageStart() {
 }
 
 static void handleTriageStop() {
-  triageOn = false;
+  triageSetOn(false);
   if (didMapDirty) didMapSave();
   server.send(200, "application/json", "{\"ok\":true}");
 }
@@ -2247,6 +2266,18 @@ void setup() {
   // Costs one 10 KB write on the first boot after a sweep and nothing after that,
   // because the load below then finds every record and seeds nothing new.
   if (didMapDirty) didMapSave();
+
+  // Resume a run the ignition interrupted. Only when there is something to triage:
+  // a board with an empty register has nothing to resume into.
+  if (didMapN && triagePrefs.begin("nexontriage", true)) {
+    if (triagePrefs.getBool("run", false)) {
+      triageOn = true;
+      triageStartedMs = millis();
+      Serial.printf("[triage] resuming, %u identifiers
+", didMapN);
+    }
+    triagePrefs.end();
+  }
   histBegin();
   lastEcuOkMs = millis();
   chooseTransport();

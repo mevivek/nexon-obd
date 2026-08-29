@@ -404,6 +404,22 @@ console.log('\ntriage and the DID register');
   ok(/scan\.running/.test(sbody), 'and whether a sweep is holding the bus');
   ok(/no identifiers - run a sweep first/.test(sbody),
      'and refuses outright when there is nothing to triage');
+
+  // The ignition going off is a power cycle, and a triage run is meant to span a
+  // drive. Without this the board comes up in the car with the register loaded and
+  // triage quietly off, and every restart mid-drive stops it without saying so.
+  ok(/triagePrefs\.begin\("nexontriage"/.test(ino),
+     'the armed flag is persisted, so a run survives the ignition');
+  ok(/getBool\("run", false\)/.test(setup) && /triageOn = true;/.test(setup),
+     'and is restored at boot');
+  ok(/didMapN && triagePrefs\.begin/.test(setup),
+     'but only when there is a register to resume into');
+  // Written on change, not periodically - NVS erase budget is already spoken for.
+  ok(/if \(triageOn == on\) return;/.test(ino),
+     'and written only when it actually changes');
+  // The namespace keeps the pre-rename prefix like every other one, and fits NVS's
+  // 15-character cap.
+  ok('nexontriage'.length <= 15, 'the namespace fits NVS');
   for (const r of ['/triage/start', '/triage/stop', '/didmap']) {
     ok(ino.includes(`server.on("${r}"`), `${r} is a route`);
   }
