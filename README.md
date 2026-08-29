@@ -575,9 +575,22 @@ firmware/build.sh              # tests, then compile
 firmware/build.sh --upload     # …then flash over USB (PORT=… to pick the port)
 ```
 
-First run installs `arduino-cli` and the ESP32 core into `firmware/.toolchain/`
-(~6 GB unpacked, several minutes) and reuses them after that. Nothing lands outside
-the repo, so deleting `firmware/.toolchain/` undoes the install completely.
+If you already have `arduino-cli` with the ESP32 core — an Arduino IDE install counts
+— it uses that and downloads nothing. Only on a machine with neither does it install a
+private copy into `firmware/.toolchain/` (~6 GB unpacked, several minutes), and that
+install writes nothing outside the repo, so deleting the directory undoes it
+completely. `OBDURATE_ISOLATED=1` forces the private toolchain, which is what CI
+wants: a build that depends on whatever happens to be on the machine is not
+reproducible.
+
+The upload port is guessed from `arduino-cli board list`, taking only a port it
+recognises as an ESP32 — Windows has several Bluetooth serial ports that must not be
+flashed at. Override with `PORT=COM3` or `PORT=/dev/ttyACM0`.
+
+> Building needs `g++`, `python3` and `node` on `PATH` for the host tests, which run
+> before the compile. Contributor notes for the development machine — including where
+> its compiler lives and how to read the board's serial log on Windows — are in
+> [`CLAUDE.md`](CLAUDE.md).
 
 The output you want is **`firmware/build/Obdurate-v<version>.bin`** — the app image,
 which is what `/update` takes. The version comes from

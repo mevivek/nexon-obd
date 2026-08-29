@@ -127,6 +127,18 @@ static const char *resetReasonName() {
     case ESP_RST_WDT:       return "wdt";
     case ESP_RST_BROWNOUT:  return "brownout";
     case ESP_RST_EXT:       return "external";
+    // The ones a developer sees constantly and a car never does. Flashing over the
+    // XIAO's USB-Serial/JTAG resets through the debug unit, which reported "unknown"
+    // on the first board this ran on - a reset reason that says nothing is the
+    // failure this whole block exists to avoid, so name them.
+    case ESP_RST_USB:       return "usb";
+    case ESP_RST_JTAG:      return "jtag";
+    case ESP_RST_SDIO:      return "sdio";
+    // Rare, and worth never having to guess at: a glitched supply and a locked-up
+    // CPU are both things a board wired into a car can genuinely meet.
+    case ESP_RST_PWR_GLITCH: return "power-glitch";
+    case ESP_RST_CPU_LOCKUP: return "cpu-lockup";
+    case ESP_RST_EFUSE:     return "efuse";
     default:                return "unknown";
   }
 }
