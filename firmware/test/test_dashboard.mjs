@@ -323,6 +323,43 @@ console.log('\ntrip totals');
      'but the interval clock is not, so a wake starts a fresh interval');
 }
 
+// ---------------------------------------------------------------- mode 06
+//
+// A timeout and a refusal mean opposite things. The sweep has always known that -
+// it is why 25 consecutive timeouts hold position instead of recording thousands of
+// identifiers as "no response" - but mode 06 discovery did not.
+//
+// It latched monDiscovered with monMidCount at zero whenever the first request went
+// unanswered, and since the poll returns immediately on an empty list, the page then
+// stayed empty for the whole boot however long the car ran afterwards. Opening
+// Monitors once with the ignition off was enough, which is exactly what someone
+// checking the dashboard on the driveway does.
+console.log('\nmode 06 does not conclude from silence');
+{
+  const ino = readSrc(join(here, '../Obdurate/Obdurate.ino'));
+  const fn = ino.slice(ino.indexOf('static void monStep()'));
+  const body = fn.slice(0, fn.indexOf('\n}\n'));
+  ok(body.length > 0 && body.length < ino.length, 'monStep body isolated');
+
+  const disc = body.indexOf('if (!monDiscovered)');
+  const guard = body.search(/if \(len == -1 \|\| len == -3\)/);
+  const latch = body.indexOf('monDiscovered = true');
+  ok(guard >= 0, 'a timeout is handled apart from an answer');
+  ok(disc >= 0 && guard > disc && guard < latch,
+     'and handled before anything is concluded and latched');
+
+  // -2 is the ECU refusing, which IS an answer: mode 06 unsupported means no
+  // monitors, and that conclusion is correct. Only -1 and -3 must be held.
+  ok(!/len == -2/.test(body.slice(0, latch)),
+     'a negative response still counts as an answer, not a retry');
+
+  // The retry must actually be able to succeed later: leaving monDiscBase part-way
+  // up the mask chain would resume a walk whose earlier masks were never read.
+  const held = body.slice(guard, guard + 400);
+  ok(/monDiscBase = 0x00;/.test(held), 'the mask walk restarts from the base');
+  ok(/return;/.test(held), 'and nothing downstream runs on a silent bus');
+}
+
 // ---------------------------------------------------------------- scan hits
 //
 // A sweep's results are the point of running one, and they outlive it: /watch offers

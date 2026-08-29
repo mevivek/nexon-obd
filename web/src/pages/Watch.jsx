@@ -15,7 +15,7 @@ import { useShellStatus } from '../shell.jsx';
 import { n, DASH } from '../lib/format.js';
 import { parseCsv, mergeHits, watchName, loadStoredHits, saveStoredHits } from './watch/hits.js';
 import { pushReadings, sparkPoints } from './watch/series.js';
-import { addTyped, costText, WATCH_MAX } from './watch/picker.js';
+import { addTyped, costText, fillFrom, WATCH_MAX } from './watch/picker.js';
 import { watchStatus } from './watch/status.js';
 
 /** Faster than any identifier is read, so a new reply is never sat on. */
@@ -149,6 +149,28 @@ export function Watch() {
     apply('');
   }
 
+  // Take the next unselected hits, in the order they are listed, until the board's
+  // cap is reached. Says what it did rather than leaving you to count checkboxes -
+  // the whole risk with a bulk control here is ending up watching a set you did not
+  // choose, so the number it added is reported every time.
+  //
+  // Nothing is applied yet: this only ticks boxes. Apply is still a deliberate press,
+  // because changing the set rotates the trip CSV.
+  function onFill() {
+    const { next, added, room } = fillFrom(sel, hits.map(watchName), max);
+    if (!room) {
+      setMsg({ cls: 'msg err', text: `Already watching ${max}, which is the board's limit.` });
+      return;
+    }
+    setSel(next);
+    setMsg({
+      cls: 'msg',
+      text: added < room
+        ? `Added ${added} — that is every identifier on the list.`
+        : `Added ${added}. ${hits.length - next.size} more found; untick some and fill again.`,
+    });
+  }
+
   function toggle(k, on) {
     if (on && sel.size >= max) {
       setMsg({ cls: 'msg err', text: `At most ${max} at a time.` });
@@ -260,6 +282,24 @@ export function Watch() {
                    value={typed} onInput={(e) => setTyped(e.currentTarget.value)} />
           </div>
         </div>
+
+        {hits.length ? (
+          <div class="row" style="margin:2px 0 8px;align-items:center;gap:8px;flex-wrap:wrap">
+            {/* Not "select all". The board watches `max`, a sweep finds hundreds, and
+                a control that ticks every box would drop all but a handful without
+                saying which ones survived. This says what it will do and then does
+                exactly that. */}
+            <button class="ghost" onClick={onFill} disabled={sel.size >= max}>
+              {sel.size >= max ? `Watching ${max} — full` : `Fill to ${max}`}
+            </button>
+            <button class="ghost" onClick={() => setSel(new Set())} disabled={!sel.size}>
+              Untick all
+            </button>
+            <span style="color:var(--muted);font-size:12px">
+              {sel.size} of {max} chosen · {hits.length} found
+            </span>
+          </div>
+        ) : null}
 
         <div class="pick">
           {hits.length ? hits.map((h) => {

@@ -30,6 +30,40 @@ export function addTyped(sel, text, max = WATCH_MAX) {
 }
 
 /**
+ * Fill the selection from a list of sweep hits, up to the cap.
+ *
+ * Deliberately not "select all". The board watches at most WATCH_MAX identifiers,
+ * and a sweep routinely finds hundreds — this board has 214 — so a control labelled
+ * "select all" would tick 214 boxes, silently drop 206 of them, and leave whichever
+ * eight happened to sort first. Truncation dressed as a bulk action is worse than no
+ * bulk action: the set you end up watching is not the set you asked for, and nothing
+ * on screen says which one you got.
+ *
+ * So this takes the next unselected hits in the order they are offered, stops at the
+ * cap, and the caller says how many it actually added. Pressing it again after
+ * unticking a few fills the gaps, which is the motion this is actually for: work
+ * through a long hit list eight at a time.
+ *
+ * Existing choices are kept. Nothing already ticked is dropped to make room — the
+ * one already-watched identifier that is holding a correlation is not worth losing
+ * to a convenience button.
+ *
+ * @param {Set<string>} sel   current selection
+ * @param {string[]} keys     hit keys in display order, e.g. ['E1002', 'E1003']
+ * @param {number} max        the board's cap
+ * @returns {{ next: Set<string>, added: number, room: number }}
+ */
+export function fillFrom(sel, keys, max = WATCH_MAX) {
+  const next = new Set(sel || []);
+  const before = next.size;
+  for (const k of keys || []) {
+    if (next.size >= max) break;
+    next.add(k);
+  }
+  return { next, added: next.size - before, room: Math.max(0, max - before) };
+}
+
+/**
  * What the chosen set costs the bus, in the transport actually in use.
  *
  * A BLE exchange is roughly 165 ms on this adapter, so the budget is about six

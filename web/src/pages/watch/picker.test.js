@@ -1,7 +1,7 @@
 // Typed identifiers and the bus-cost estimate.
 
 import { describe, it, expect } from 'vitest';
-import { addTyped, costText, WATCH_MAX } from './picker.js';
+import { addTyped, costText, WATCH_MAX, fillFrom } from './picker.js';
 
 const keys = (s) => [...s];
 
@@ -88,5 +88,65 @@ describe('bus cost', () => {
     // four reads a second is most of what there is.
     expect(costText(250, 1)).toContain('about 67% of the bus');
     expect(costText(5000, 1)).toContain('about 3% of the bus');
+  });
+});
+
+describe('fillFrom', () => {
+  const hits = ['E1000', 'E1001', 'E1002', 'E1003', 'E1004',
+                'E1005', 'E1006', 'E1007', 'E1008', 'E1009'];
+
+  it('fills up to the cap and no further', () => {
+    // The point of the whole function. A sweep finds hundreds - this board has 214 -
+    // and the board watches eight. Anything that ticks more than the cap is a set
+    // the user did not choose.
+    const { next, added } = fillFrom(new Set(), hits, WATCH_MAX);
+    expect(next.size).toBe(WATCH_MAX);
+    expect(added).toBe(WATCH_MAX);
+  });
+
+  it('takes them in the order they are offered', () => {
+    // Not sorted, not arbitrary: the order on screen. If the caller has to explain
+    // which eight of 214 it picked, "the first eight of the ones you can see" is the
+    // only answer anybody can check.
+    const { next } = fillFrom(new Set(), hits, 3);
+    expect([...next]).toEqual(['E1000', 'E1001', 'E1002']);
+  });
+
+  it('keeps what is already chosen', () => {
+    // An identifier already being watched may be the one holding a correlation.
+    // Losing it to a convenience button would be the most annoying possible bug.
+    const { next } = fillFrom(new Set(['E2FFF']), hits, 3);
+    expect(next.has('E2FFF')).toBe(true);
+    expect(next.size).toBe(3);
+  });
+
+  it('fills the gaps left by unticking, rather than starting over', () => {
+    // The motion this exists for: work through a long hit list eight at a time.
+    const first = fillFrom(new Set(), hits, 4).next;
+    first.delete('E1001');
+    const { next, added } = fillFrom(first, hits, 4);
+    expect(added).toBe(1);
+    expect(next.size).toBe(4);
+    expect(next.has('E1001')).toBe(true);
+  });
+
+  it('reports how much room there was, so the caller can say what it did', () => {
+    // A button that silently does nothing is the same failure as one that silently
+    // truncates. room === 0 is what lets the page say "already full".
+    expect(fillFrom(new Set(), hits, 8).room).toBe(8);
+    expect(fillFrom(new Set(hits.slice(0, 8)), hits, 8).room).toBe(0);
+    expect(fillFrom(new Set(hits.slice(0, 8)), hits, 8).added).toBe(0);
+  });
+
+  it('does not mutate the set it was given', () => {
+    const sel = new Set(['E1000']);
+    fillFrom(sel, hits, 8);
+    expect(sel.size).toBe(1);
+  });
+
+  it('survives nothing to fill from', () => {
+    expect(fillFrom(new Set(), [], 8).added).toBe(0);
+    expect(fillFrom(new Set(), null, 8).added).toBe(0);
+    expect(fillFrom(null, hits, 8).next.size).toBe(8);
   });
 });

@@ -994,6 +994,31 @@ static void monStep() {
   if (!monDiscovered) {
     uint8_t req[2] = {0x06, monDiscBase};
     int len = obdIsoTp(ID_ECM_REQ, ID_ECM_RSP, req, 2, buf, sizeof(buf), tmo);
+
+    // A timeout and a refusal mean opposite things - the same rule the sweep
+    // already follows, and for the same reason.
+    //
+    // A negative response (-2) is the ECU saying this mode or this range is not
+    // supported. That is an answer, and "no monitors" is the right conclusion.
+    // A timeout (-1) or a half-arrived reply (-3) is not an answer at all, and on a
+    // car it is the ordinary state between the key going in and the engine running.
+    //
+    // Treating those the same latched monDiscovered with monMidCount at zero, and
+    // because the poll below then returns immediately on an empty list, the page
+    // stayed empty for the rest of the boot however long the car ran afterwards.
+    // Opening the page once with the ignition off was enough to do it, which is
+    // exactly what someone checking the dashboard on the driveway does.
+    //
+    // So: hold, and start the walk again from the base when it does answer. Nothing
+    // is recorded, nothing is latched, and the page keeps saying it has nothing yet
+    // - which is true, rather than a conclusion drawn from silence.
+    if (len == -1 || len == -3) {
+      monDiscBase = 0x00;
+      monMidCount = 0;
+      Serial.println("[mon] no reply - discovery held, not concluded");
+      return;
+    }
+
     uint8_t got[32];
     uint8_t n = (len > 0) ? monMaskMids(buf, len, monDiscBase, got, 32) : 0;
     bool more = false;
