@@ -54,6 +54,13 @@ enum ResetScope : uint8_t { RESET_DATA = 0, RESET_ALL = 1 };
 // The NVS namespaces a reset clears. Every one of them is state the board rebuilds
 // on its own, and all of them keep their pre-rename names - see the note in the
 // sketch about why those did not follow Obdurate.
+//
+// "nexonveh" is the newest and the only one that was never named before the
+// rename; it keeps the prefix anyway so the list reads as one thing rather than as
+// five legacy names and an exception. It holds the discovered VIN and calibration
+// id, and a reset clears it for the same reason it clears the register: both are
+// conclusions about a particular car, and the board is about to stop being that
+// board. The next drive rediscovers it in about ten seconds.
 static const char *RESET_NVS[] = {"nexonscan", "nexonwatch", "nexontrip",
-                                  "nexonhist", "nexontriage"};
+                                  "nexonhist", "nexontriage", "nexonveh"};
 static const uint8_t RESET_NVS_N = sizeof(RESET_NVS) / sizeof(RESET_NVS[0]);

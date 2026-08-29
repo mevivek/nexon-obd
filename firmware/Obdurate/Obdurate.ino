@@ -38,6 +38,7 @@
 #include "ui_fs.h"
 #include "triplog.h"
 #include "didmap.h"
+#include "vehicle.h"
 #include "datafiles.h"
 #include <Update.h>
 #include "boot_html.h"
@@ -1260,6 +1261,179 @@ static uint32_t battLowStep(uint32_t lowSince, float volt, float rpm, uint32_t n
 
 static uint32_t pickWaitMs = PICK_MIN_MS;
 
+// ---------------------------------------------------------------- vehicle
+//
+// Discovery: what car this is, and which of the readings the dashboard draws it can
+// actually produce. The parsers and the reasoning are in vehicle.h; what is here is
+// the walk over the bus and where the answers are kept.
+//
+// It runs ONLY while the ECU is currently answering. Everything else on this bus
+// treats silence as a hold rather than an answer, and the same rule here would mean
+// a board sitting on a bench re-asking twelve questions forever, one every second,
+// for no reason - so instead of holding on silence it simply does not start. The
+// distinction is preserved where it matters: a NEGATIVE response is an answer and
+// ends the walk, a timeout mid-walk leaves the step where it was to be retried.
+//
+// Once complete it stops. A VIN does not change, and a calibration id changes when
+// the ECU is reflashed - which is not something to poll a running car for.
+
+static Vehicle  g_veh;
+static uint8_t  vehTurn   = 0;     // which question is next; see vehicleStep()
+static bool     vehDone   = false;
+static uint32_t vehLastMs = 0;
+static uint16_t vehTries  = 0;     // attempts spent on the current question
+static const uint32_t VEH_PERIOD_MS = 800;
+// A question that is answered neither way after this many attempts is abandoned,
+// and its answer stays unknown - which is a state the page can render, unlike a
+// walk that never finishes. Twelve attempts is about ten seconds of a running
+// engine, against an adapter that drops roughly half of what it is asked.
+static const uint16_t VEH_MAX_TRIES = 12;
+
+static const uint8_t VEH_STEP_M09 = VEH_BLOCKS;       // 09 00 - mode 09 support
+static const uint8_t VEH_STEP_VIN = VEH_BLOCKS + 1;   // 09 02
+static const uint8_t VEH_STEP_CAL = VEH_BLOCKS + 2;   // 09 04
+static const uint8_t VEH_STEP_CVN = VEH_BLOCKS + 3;   // 09 06
+static const uint8_t VEH_STEP_TCM = VEH_BLOCKS + 4;   // 01 00, at the other responder
+static const uint8_t VEH_STEPS    = VEH_BLOCKS + 5;
+
+// The identity survives the ignition, because a backup is taken at a desk.
+//
+// The support bitmaps deliberately do not. They are cheap to re-read, they are the
+// one thing here that would be wrong after the board is moved to another car, and a
+// stale bitmap claiming this car supports a PID it has never heard of is exactly
+// the failure this whole file exists to prevent. The identity is safe to keep for
+// the same reason it is worth keeping: it is what tells you the car changed.
+static Preferences vehPrefs;
+
+static void vehSave() {
+  if (!vehPrefs.begin("nexonveh", false)) return;
+  vehPrefs.putString("vin", g_veh.vin);
+  vehPrefs.putString("cal", g_veh.cal);
+  vehPrefs.putString("cvn", g_veh.cvn);
+  vehPrefs.end();
+}
+
+static void vehLoad() {
+  if (!vehPrefs.begin("nexonveh", true)) return;
+  vehPrefs.getString("vin", g_veh.vin, sizeof(g_veh.vin));
+  vehPrefs.getString("cal", g_veh.cal, sizeof(g_veh.cal));
+  vehPrefs.getString("cvn", g_veh.cvn, sizeof(g_veh.cvn));
+  vehPrefs.end();
+  // A restored VIN that does not survive the same check a fresh one does is not
+  // kept: NVS holds whatever a previous firmware wrote, and vehKey() has to mean
+  // the same thing across versions or a backup stops matching its own car.
+  if (g_veh.vin[0] && !vehVinOk(g_veh.vin)) g_veh.vin[0] = 0;
+}
+
+// One question per period. Advances on an answer, retries on silence, gives up on
+// a question that is neither after VEH_MAX_TRIES.
+static void vehicleStep() {
+  if (vehDone) return;
+  if (scan.running || activeTransport == TR_NONE) return;
+  if (millis() - lastEcuOkMs > 3000) return;      // not talking - do not start
+  if (millis() - vehLastMs < VEH_PERIOD_MS) return;
+  vehLastMs = millis();
+
+  uint8_t buf[64];
+  const uint32_t tmo = (activeTransport == TR_BLE) ? 1200 : 400;
+
+  // Move to the next question, or stop. `skipTo` exists because an answer of "no"
+  // to the first mode 01 block ends the whole mode 01 walk, not just that block.
+  auto advance = [&](uint8_t to) {
+    vehTurn = to;
+    vehTries = 0;
+    if (vehTurn >= VEH_STEPS) {
+      vehDone = true;
+      vehSave();
+      char key[9];
+      vehKey(g_veh, key, sizeof(key));
+      Serial.printf("[veh] done vin=%s cal=%s key=%s\n",
+                    g_veh.vin[0] ? "yes" : "-",
+                    g_veh.cal[0] ? g_veh.cal : "-",
+                    key[0] ? key : "-");
+    }
+  };
+
+  if (++vehTries > VEH_MAX_TRIES) {               // neither answered nor refused
+    Serial.printf("[veh] step %u abandoned after %u tries\n", vehTurn, vehTries - 1);
+    advance((uint8_t)(vehTurn + 1));
+    return;
+  }
+
+  // ---- mode 01 support bitmaps
+  if (vehTurn < VEH_BLOCKS) {
+    const uint8_t base = vehBlockBase(vehTurn);
+    uint8_t req[2] = {0x01, base};
+    int len = obdIsoTp(ID_ECM_REQ, ID_ECM_RSP, req, 2, buf, sizeof(buf), tmo);
+    if (len == -2) { advance(VEH_STEP_M09); return; }   // an answer: no such block
+    if (len < 0) return;                                // silence: retry this one
+    if (!vehMaskParse(buf, len, 0x01, base, g_veh.m01[vehTurn])) return;
+    g_veh.m01Have[vehTurn] = true;
+    // The last bit of a bitmap says whether another block follows. Without this a
+    // car supporting PIDs to 0x40 costs six more full timeouts on every walk.
+    advance(vehMaskMore(g_veh.m01[vehTurn], base)
+              ? (uint8_t)(vehTurn + 1) : VEH_STEP_M09);
+    return;
+  }
+
+  // ---- the other ECU
+  //
+  // The last question, and the only one addressed anywhere but the engine. A reply
+  // of any kind - including a refusal - is a module answering to 0x7E9.
+  if (vehTurn == VEH_STEP_TCM) {
+    uint8_t treq[2] = {0x01, 0x00};
+    g_veh.tcmAsked = true;
+    int tlen = obdIsoTp(ID_TCM_REQ, ID_TCM_RSP, treq, 2, buf, sizeof(buf), tmo);
+    if (tlen == -1 || tlen == -3) return;      // silence: retry, then give up
+    g_veh.tcmSeen = true;
+    advance(VEH_STEPS);
+    return;
+  }
+
+  // ---- mode 09
+  static const uint8_t M09_PID[4] = {0x00, 0x02, 0x04, 0x06};
+  const uint8_t pid = M09_PID[vehTurn - VEH_STEP_M09];
+  uint8_t req[2] = {0x09, pid};
+  int len = obdIsoTp(ID_ECM_REQ, ID_ECM_RSP, req, 2, buf, sizeof(buf), tmo);
+
+  if (len == -2) {                                // refused: recorded as a refusal
+    if (vehTurn == VEH_STEP_VIN) g_veh.vinRefused = true;
+    if (vehTurn == VEH_STEP_CAL) g_veh.calRefused = true;
+    advance((uint8_t)(vehTurn + 1));
+    return;
+  }
+  if (len < 0) return;
+
+  if (vehTurn == VEH_STEP_M09) {
+    if (!vehMaskParse(buf, len, 0x09, 0x00, g_veh.m09)) return;
+    g_veh.m09Have = true;
+    advance(VEH_STEP_VIN);
+    return;
+  }
+
+  // A supported-mask that says no is an answer too, and a cheaper one than a
+  // request that will come back refused.
+  if (g_veh.m09Have && !vehMaskHas(g_veh.m09, 0x00, pid)) {
+    if (vehTurn == VEH_STEP_VIN) g_veh.vinRefused = true;
+    if (vehTurn == VEH_STEP_CAL) g_veh.calRefused = true;
+    advance((uint8_t)(vehTurn + 1));
+    return;
+  }
+
+  if (vehTurn == VEH_STEP_VIN) {
+    char got[VEH_VIN_LEN + 1] = {0};
+    if (vehItemParse(buf, len, 0x02, VEH_VIN_LEN, got, sizeof(got)) && vehVinOk(got))
+      strncpy(g_veh.vin, got, sizeof(g_veh.vin) - 1);
+    advance(VEH_STEP_CAL);
+  } else if (vehTurn == VEH_STEP_CAL) {
+    vehItemParse(buf, len, 0x04, VEH_CAL_LEN, g_veh.cal, sizeof(g_veh.cal));
+    advance(VEH_STEP_CVN);
+  } else {
+    vehCvnParse(buf, len, g_veh.cvn, sizeof(g_veh.cvn));
+    advance(VEH_STEP_TCM);
+  }
+}
+
 // One cached reply per batch, with the moment it arrived.
 static uint8_t  sampBuf[4][40];
 static uint8_t  sampLen[4]   = {0, 0, 0, 0};
@@ -1662,6 +1836,87 @@ static void handleReset() {
   // RAM describing files that no longer exist. The reply is already sent.
   delay(250);
   ESP.restart();
+}
+
+// ---------------------------------------------------------------- vehicle
+//
+// What discovery found, plus the one derived answer the page cannot work out for
+// itself: which of the readings this firmware polls the car actually supports.
+//
+// That verdict is computed here rather than in the browser deliberately. PID_B1..B4
+// are the single definition of what gets asked for - they are compiled into the
+// sampler and into the host tests - and a second copy of that list in JavaScript
+// would drift, silently, into telling somebody their car cannot fill a tile that is
+// filling fine.
+//
+// Three states, never two. "unknown" is a block whose support bitmap has not
+// arrived, and it is not the same answer as "no": absent data breaks the rule
+// rather than satisfying it, here as everywhere else.
+static void handleVehicle() {
+  char key[9];
+  vehKey(g_veh, key, sizeof(key));
+
+  String s = "{\"ok\":true,\"done\":";
+  s += vehDone ? "true" : "false";
+  s += ",\"step\":";
+  s += vehTurn;
+  s += ",\"steps\":";
+  s += VEH_STEPS;
+  s += ",\"ecu\":\"";
+  s += (millis() - lastEcuOkMs < 3000) ? "answering" : "silent";
+  s += "\",\"vin\":\"";
+  s += g_veh.vin;
+  s += "\",\"cal\":\"";
+  s += g_veh.cal;
+  s += "\",\"cvn\":\"";
+  s += g_veh.cvn;
+  s += "\",\"key\":\"";
+  s += key;
+  s += "\",\"vinRefused\":";
+  s += g_veh.vinRefused ? "true" : "false";
+  s += ",\"calRefused\":";
+  s += g_veh.calRefused ? "true" : "false";
+  s += ",\"tcm\":\"";
+  s += g_veh.tcmSeen ? "answering" : (g_veh.tcmAsked ? "silent" : "unasked");
+  s += "\",\"blocks\":[";
+  for (uint8_t b = 0; b < VEH_BLOCKS; b++) {
+    if (b) s += ",";
+    s += "{\"base\":";
+    s += vehBlockBase(b);
+    s += ",\"known\":";
+    s += g_veh.m01Have[b] ? "true" : "false";
+    s += ",\"mask\":\"";
+    if (g_veh.m01Have[b])
+      for (uint8_t i = 0; i < 4; i++) {
+        char hx[3];
+        snprintf(hx, sizeof(hx), "%02X", g_veh.m01[b][i]);
+        s += hx;
+      }
+    s += "\"}";
+  }
+
+  // The PIDs the sampler asks for, in the order it asks for them.
+  s += "],\"polled\":[";
+  bool first = true;
+  for (uint8_t b = 0; b < SAMPLE_BATCHES; b++) {
+    const uint8_t *pids = sampleBatchPids(b);
+    if (!pids) continue;
+    for (uint8_t i = 0; i < 6; i++) {
+      bool unknown = false;
+      const bool yes = vehPidSupported(g_veh, pids[i], &unknown);
+      if (!first) s += ",";
+      first = false;
+      char hx[3];
+      snprintf(hx, sizeof(hx), "%02X", pids[i]);
+      s += "{\"pid\":\"";
+      s += hx;
+      s += "\",\"state\":\"";
+      s += unknown ? "unknown" : (yes ? "yes" : "no");
+      s += "\"}";
+    }
+  }
+  s += "]}";
+  server.send(200, "application/json", s);
 }
 
 static void handleTriageStart() {
@@ -2440,6 +2695,7 @@ void setup() {
   server.on("/triage/start", handleTriageStart);
   server.on("/triage/stop",  handleTriageStop);
   server.on("/didmap",       handleDidMap);
+  server.on("/vehicle",      handleVehicle);
   server.on("/scan/start",  handleScanStart);
   server.on("/scan/stop",   handleScanStop);
   server.on("/scan/status", handleScanStatus);
@@ -2453,6 +2709,7 @@ void setup() {
                 resetReasonName(), (unsigned long)g_bootWakes);
 
   scanHitsBegin();
+  vehLoad();            // the identity a backup keys on, if a drive has found it
   watchLoad();          // before tripBegin: the watch set decides the CSV columns
   tripIntBegin();       // before tripBegin: the totals are columns on the first row
   tripBegin();
@@ -2511,6 +2768,7 @@ void loop() {
   watchStep();            // one watched identifier per period, paused during a scan
   monStep();              // only does anything while the monitors page is open
   triageStep();           // only while a triage run is armed
+  vehicleStep();          // twelve questions, once, while the ECU is answering
   heartbeat(millis() - lastEcuOkMs < 3000, scan.running);
 
   if (scan.running) {

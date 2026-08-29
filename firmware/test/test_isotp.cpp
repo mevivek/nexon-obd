@@ -11,6 +11,7 @@
 #include "../Obdurate/didwatch.h"
 #include "../Obdurate/trip_names.h"
 #include "../Obdurate/ui_paths.h"
+#include "../Obdurate/vehicle.h"
 #include "didmap_extract.h"
 
 #include <cstdio>
@@ -1260,6 +1261,211 @@ static void test_watch_parse_list() {
      WATCH_MAX, "and the set cannot exceed the cap");
 }
 
+// ------------------------------------------------------------------ vehicle
+
+static void streq(const char *got, const char *want, const char *what) {
+  g_ran++;
+  if (strcmp(got, want) != 0) {
+    g_fail++;
+    printf("  FAIL  %s (got \"%s\", want \"%s\")\n", what, got, want);
+  } else {
+    printf("  ok    %s\n", what);
+  }
+}
+
+// A real mode 01 PID 00 reply, off this car. 0xBE = 1011 1110: PID 01 supported,
+// 02 not, 03 04 05 supported, and so on.
+static const uint8_t M01_00[] = {0x41, 0x00, 0xBE, 0x3E, 0xA8, 0x13};
+
+static void test_veh_mask_parses_a_support_reply() {
+  printf("vehicle: support bitmaps\n");
+  uint8_t m[4] = {0};
+  ok(vehMaskParse(M01_00, sizeof(M01_00), 0x01, 0x00, m), "a mode 01 reply parses");
+  ok(m[0] == 0xBE && m[3] == 0x13, "the four bitmap bytes are taken verbatim");
+
+  uint8_t m9[4] = {0};
+  const uint8_t r9[] = {0x49, 0x00, 0x55, 0x40, 0x00, 0x00};
+  ok(vehMaskParse(r9, sizeof(r9), 0x09, 0x00, m9), "so does a mode 09 one");
+}
+
+static void test_veh_mask_checks_what_it_was_answering() {
+  printf("vehicle: a reply must say which question it answers\n");
+  uint8_t m[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+  // The late reply that motivates this: the 0x00 block's answer arriving while the
+  // 0x20 block is the outstanding question. Writing it into the 0x20 slot would
+  // report support for PIDs the car has never heard of.
+  ok(!vehMaskParse(M01_00, sizeof(M01_00), 0x01, 0x20, m),
+     "an echoed pid that is not the one asked for is refused");
+  ok(!vehMaskParse(M01_00, sizeof(M01_00), 0x09, 0x00, m),
+     "and so is the wrong mode");
+  ok(m[0] == 0xFF, "a refused reply writes nothing");
+  ok(!vehMaskParse(M01_00, 4, 0x01, 0x00, m), "a short reply is refused");
+}
+
+static void test_veh_mask_bit_order() {
+  printf("vehicle: the bitmap is big-endian by bit\n");
+  uint8_t m[4] = {0};
+  vehMaskParse(M01_00, sizeof(M01_00), 0x01, 0x00, m);
+  ok(vehMaskHas(m, 0x00, 0x01), "the top bit of the first byte is PID 01");
+  ok(!vehMaskHas(m, 0x00, 0x02), "the next bit down is PID 02");
+  ok(vehMaskHas(m, 0x00, 0x03), "PID 03");
+  ok(vehMaskHas(m, 0x00, 0x0C), "PID 0C - rpm, which this car does support");
+  ok(vehMaskHas(m, 0x00, 0x20), "the bottom bit of the last byte is PID 20");
+  ok(!vehMaskHas(m, 0x00, 0x21), "nothing outside the block is in the block");
+  ok(!vehMaskHas(m, 0x00, 0x00), "and PID 00 is the question, not an answer");
+}
+
+static void test_veh_mask_more_stops_at_the_end() {
+  printf("vehicle: the continuation bit\n");
+  uint8_t m[4] = {0};
+  vehMaskParse(M01_00, sizeof(M01_00), 0x01, 0x00, m);
+  ok(vehMaskMore(m, 0x00), "0x13 ends in 1, so another block follows");
+
+  const uint8_t last[] = {0x41, 0x20, 0x80, 0x00, 0x00, 0x00};
+  uint8_t l[4] = {0};
+  vehMaskParse(last, sizeof(last), 0x01, 0x20, l);
+  ok(!vehMaskMore(l, 0x20), "a clear bottom bit ends the walk");
+
+  // base + 0x20 wraps to 0x00 in a uint8_t, which would then be read as a PID
+  // inside the block and could report a ninth block that does not exist.
+  uint8_t all[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+  ok(!vehMaskMore(all, 0xE0), "there is no block after 0xE0, whatever the bit says");
+}
+
+static void test_veh_unknown_is_not_unsupported() {
+  printf("vehicle: an unread block is not a car that cannot\n");
+  Vehicle v;
+  bool unknown = false;
+  ok(!vehPidSupported(v, 0x0C, &unknown), "nothing is supported before anything is read");
+  ok(unknown, "but it is unknown, not refused");
+
+  vehMaskParse(M01_00, sizeof(M01_00), 0x01, 0x00, v.m01[0]);
+  v.m01Have[0] = true;
+  ok(vehPidSupported(v, 0x0C, &unknown) && !unknown, "a read block gives a real yes");
+  ok(!vehPidSupported(v, 0x02, &unknown) && !unknown, "and a real no");
+  ok(!vehPidSupported(v, 0x42, &unknown) && unknown,
+     "a PID in a block that was never read stays unknown");
+  eq(vehBlockOf(0x20), 0, "0x20 is the last PID of the first block, not the first of the second");
+  eq(vehBlockOf(0x21), 1, "0x21 opens the second");
+}
+
+static void test_veh_vin_parses_with_and_without_a_count() {
+  printf("vehicle: mode 09 items\n");
+  const char *VIN = "MAT625123ABC12345";
+  uint8_t with[3 + 17] = {0x49, 0x02, 0x01};
+  memcpy(&with[3], VIN, 17);
+  char out[VEH_VIN_LEN + 1] = {0};
+  eq(vehItemParse(with, sizeof(with), 0x02, VEH_VIN_LEN, out, sizeof(out)), 17,
+     "a VIN with the count byte");
+  streq(out, VIN, "and it is the VIN");
+
+  // Some ECUs omit the count byte. Which layout arrived is decided by arithmetic.
+  uint8_t without[2 + 17] = {0x49, 0x02};
+  memcpy(&without[2], VIN, 17);
+  out[0] = 0;
+  eq(vehItemParse(without, sizeof(without), 0x02, VEH_VIN_LEN, out, sizeof(out)), 17,
+     "a VIN without one");
+  streq(out, VIN, "same VIN");
+}
+
+static void test_veh_item_strips_padding_from_both_ends() {
+  printf("vehicle: a padded calibration id\n");
+  uint8_t buf[3 + 16] = {0x49, 0x04, 0x01};
+  memset(&buf[3], 0x00, 16);
+  memcpy(&buf[3 + 5], "SW1234", 6);          // right in the middle of the field
+  char out[VEH_CAL_LEN + 1] = {0};
+  eq(vehItemParse(buf, sizeof(buf), 0x04, VEH_CAL_LEN, out, sizeof(out)), 6,
+     "the padding is not part of the id");
+  streq(out, "SW1234", "and the id survives");
+
+  // 0xFF and space are the other two paddings seen in the field.
+  memset(&buf[3], 0xFF, 16);
+  memcpy(&buf[3], "CAL-9 ", 6);
+  buf[3 + 5] = 0x20;
+  out[0] = 0;
+  vehItemParse(buf, sizeof(buf), 0x04, VEH_CAL_LEN, out, sizeof(out));
+  streq(out, "CAL-9", "0xFF and space pad too");
+}
+
+static void test_veh_item_reports_nothing_rather_than_rubbish() {
+  printf("vehicle: a reply that is not text\n");
+  uint8_t buf[3 + 17] = {0x49, 0x02, 0x01};
+  memset(&buf[3], 0x01, 17);                 // control bytes, not characters
+  char out[VEH_VIN_LEN + 1] = {'x', 0};
+  eq(vehItemParse(buf, sizeof(buf), 0x02, VEH_VIN_LEN, out, sizeof(out)), 0,
+     "non-printable bytes are not a VIN");
+  streq(out, "", "and nothing is left behind to be shown as one");
+
+  uint8_t wrong[3 + 17] = {0x49, 0x04, 0x01};
+  memset(&wrong[3], 'A', 17);
+  eq(vehItemParse(wrong, sizeof(wrong), 0x02, VEH_VIN_LEN, out, sizeof(out)), 0,
+     "an answer to a different pid is not this one's answer");
+
+  uint8_t ragged[3 + 10] = {0x49, 0x02, 0x01};
+  memset(&ragged[3], 'A', 10);
+  eq(vehItemParse(ragged, sizeof(ragged), 0x02, VEH_VIN_LEN, out, sizeof(out)), 0,
+     "a body that is not a whole number of items is refused");
+}
+
+static void test_veh_vin_rejects_what_is_not_a_vin() {
+  printf("vehicle: VIN plausibility\n");
+  ok(vehVinOk("MAT625123ABC12345"), "a real one passes");
+  ok(!vehVinOk("MAT625I23ABC12345"), "I is excluded by ISO 3779 - it reads as 1");
+  ok(!vehVinOk("MAT625O23ABC12345"), "so is O");
+  ok(!vehVinOk("MAT625Q23ABC12345"), "so is Q");
+  ok(!vehVinOk("MAT625123ABC1234"), "sixteen characters is not a VIN");
+  ok(!vehVinOk("mat625123abc12345"), "and neither is a lower-case one");
+  ok(!vehVinOk(""), "nor an empty string");
+}
+
+static void test_veh_cvn_is_hex_not_text() {
+  printf("vehicle: the calibration verification number\n");
+  const uint8_t buf[] = {0x49, 0x06, 0x01, 0x12, 0xAB, 0x00, 0xFF};
+  char out[16] = {0};
+  eq(vehCvnParse(buf, sizeof(buf), out, sizeof(out)), 8, "four bytes become eight hex digits");
+  streq(out, "12AB00FF", "and 0x00 is a byte of the checksum, not a terminator");
+}
+
+static void test_veh_key_identifies_a_car() {
+  printf("vehicle: the backup key\n");
+  Vehicle a, b;
+  char ka[9] = {0}, kb[9] = {0};
+
+  vehKey(a, ka, sizeof(ka));
+  streq(ka, "", "a board that has never seen a car has no key");
+
+  strcpy(a.vin, "MAT625123ABC12345");
+  strcpy(a.cal, "SW1234");
+  vehKey(a, ka, sizeof(ka));
+  eq((int)strlen(ka), 8, "a known car keys to eight hex digits");
+
+  strcpy(b.vin, "MAT625123ABC12345");
+  strcpy(b.cal, "SW1234");
+  vehKey(b, kb, sizeof(kb));
+  streq(kb, ka, "the same car keys the same way - a backup matches its own board");
+
+  // The failure this exists to stop: a register from one car restored onto another.
+  strcpy(b.vin, "MAT625123ABC99999");
+  vehKey(b, kb, sizeof(kb));
+  ok(strcmp(kb, ka) != 0, "a different car keys differently");
+
+  // A reflash changes the calibration without changing the car. That IS a
+  // different key, and it should be - a register built before the reflash is
+  // about software that is no longer on the ECU.
+  strcpy(b.vin, "MAT625123ABC12345");
+  strcpy(b.cal, "SW5678");
+  vehKey(b, kb, sizeof(kb));
+  ok(strcmp(kb, ka) != 0, "so does a reflashed calibration on the same car");
+
+  // A garbled VIN must not key at all, or the backup would carry an identity its
+  // own board never reproduces and the restore would refuse a file that is fine.
+  Vehicle c;
+  strcpy(c.vin, "MAT625I23ABC12345");
+  char kc[9] = {0};
+  vehKey(c, kc, sizeof(kc));
+  streq(kc, "", "an implausible VIN with nothing else known keys to nothing");
+}
+
 static void test_watch_apply_detects_a_real_change() {
   printf("watch: only a real change rotates the CSV\n");
   WatchDid empty[1];
@@ -1391,6 +1597,18 @@ int main() {
   test_watch_parse();
   test_watch_parse_list();
   test_watch_apply_detects_a_real_change();
+
+  test_veh_mask_parses_a_support_reply();
+  test_veh_mask_checks_what_it_was_answering();
+  test_veh_mask_bit_order();
+  test_veh_mask_more_stops_at_the_end();
+  test_veh_unknown_is_not_unsupported();
+  test_veh_vin_parses_with_and_without_a_count();
+  test_veh_item_strips_padding_from_both_ends();
+  test_veh_item_reports_nothing_rather_than_rubbish();
+  test_veh_vin_rejects_what_is_not_a_vin();
+  test_veh_cvn_is_hex_not_text();
+  test_veh_key_identifies_a_car();
 
   printf("\n%d checks, %d failed\n", g_ran, g_fail);
   return g_fail ? 1 : 0;

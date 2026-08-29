@@ -120,7 +120,7 @@ static bool uiIsApiPath(const char *p) {
                               "/trips", "/scan", "/watch", "/update", "/ui",
                               "/manifest.webmanifest", "/icon.svg",
                               "/triage", "/didmap",
-                              "/files", "/file", "/reset"};
+                              "/files", "/file", "/reset", "/vehicle"};
   for (size_t i = 0; i < sizeof(API) / sizeof(API[0]); i++) {
     size_t n = strlen(API[i]);
     if (strncmp(p, API[i], n) == 0 && (p[n] == 0 || p[n] == '/' || p[n] == '?'))

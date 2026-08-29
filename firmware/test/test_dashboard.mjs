@@ -464,6 +464,71 @@ console.log('\nmode 06 does not conclude from silence');
   ok(/return;/.test(held), 'and nothing downstream runs on a silent bus');
 }
 
+// ---------------------------------------------------------------- vehicle
+//
+// The same rule as mode 06, applied to the newest thing on the bus. Discovery walks
+// twelve questions once and then stops for the life of the boot, so a conclusion
+// drawn from silence is not a wrong answer for a moment - it is a wrong answer that
+// nothing will ever revisit, sitting behind a page that says the walk is done.
+//
+// The parsers themselves are compiled and exercised by the C++ suite. What is
+// checked here is the wiring around them, which the host cannot see.
+console.log('\nvehicle discovery is honest about what it did not learn');
+{
+  const ino = readSrc(join(here, '../Obdurate/Obdurate.ino'));
+  const veh = readSrc(join(here, '../Obdurate/vehicle.h'));
+  const files = readSrc(join(here, '../Obdurate/datafiles.h'));
+
+  const fn = ino.slice(ino.indexOf('static void vehicleStep()'));
+  const body = fn.slice(0, fn.indexOf('\n}\n'));
+  ok(body.length > 0 && body.length < ino.length, 'vehicleStep body isolated');
+
+  // A negative response is an answer and advances. A timeout is not, and returns.
+  ok(/if \(len == -2\)[\s\S]{0,80}advance/.test(body),
+     'a refusal advances the walk - the ECU answered');
+  ok(/if \(len < 0\) return;/.test(body),
+     'and anything else negative returns without advancing');
+  ok(!/if \(len == -1\)[\s\S]{0,120}advance\(/.test(body),
+     'a timeout never advances past the question it failed to answer');
+  ok(/tlen == -1 \|\| tlen == -3/.test(body),
+     'the second ECU is probed with the same distinction');
+
+  // It must not run on a bench board with nothing attached: unlike mode 06, which
+  // only runs while a page is open, this is in loop() unconditionally.
+  ok(/millis\(\) - lastEcuOkMs > 3000\) return;/.test(body),
+     'the walk does not start while the ECU is silent');
+  ok(/if \(vehDone\) return;/.test(body), 'and stops for good once it is done');
+
+  // A question that is neither answered nor refused has to end somewhere, or the
+  // page shows a walk stuck at step 3 with no way to read it.
+  ok(/vehTries > VEH_MAX_TRIES/.test(body), 'an unanswerable question is abandoned');
+
+  // Absent data breaks the rule. handleVehicle must be able to say "unknown", and
+  // the bitmaps are the only thing that can distinguish it from "no".
+  const h = ino.slice(ino.indexOf('static void handleVehicle()'));
+  const hb = h.slice(0, h.indexOf('\n}\n'));
+  ok(hb.length > 0 && hb.length < ino.length, 'handleVehicle body isolated');
+  ok(/unknown \? "unknown"/.test(hb),
+     'an unread block reports unknown, never a car that cannot');
+  ok(/sampleBatchPids/.test(hb),
+     'the polled list comes from the sampler, not a second copy of it');
+
+  // The identity is what a backup keys on. A stale one is worse than none: it is
+  // the case where a register from the wrong car passes the check.
+  ok(/RESET_NVS\[\][\s\S]{0,200}"nexonveh"/.test(files),
+     'a reset forgets the car along with the conclusions drawn about it');
+  ok(/vehVinOk\(g_veh\.vin\)\) g_veh\.vin\[0\] = 0;/.test(ino),
+     'a VIN restored from NVS passes the same check a fresh one does');
+  ok(/if \(!haveVin && !haveCal\) return;/.test(veh),
+     'and a board that has never seen a car keys to nothing at all');
+
+  // HEX is a macro in the Arduino core (Print.h, `#define HEX 16`). The host shims
+  // do not define it, so a local named HEX compiles clean under g++ and fails only
+  // at arduino-cli - which is the slowest place in this project to find a typo.
+  ok(!/\bstatic const char HEX\b/.test(veh),
+     'no local named HEX - the Arduino core has already taken that name');
+}
+
 // ---------------------------------------------------------------- scan hits
 //
 // A sweep's results are the point of running one, and they outlive it: /watch offers
