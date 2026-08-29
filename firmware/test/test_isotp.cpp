@@ -253,6 +253,65 @@ static void test_did_state_names_round_trip() {
   ok(strcmp(DIDMAP_FILE, "/scanhits.csv") != 0, "and never the sweep's own record");
 }
 
+// The round trip. This is the test that was missing, and its absence let a parser
+// that dropped the state field ship - the register reloaded every record as
+// unknown with a fabricated change count, and reported a block of status flags
+// storing 01 as live data on a car that was idling.
+static void test_did_line_round_trips() {
+  printf("didmap: a record survives being written and read back\n");
+  DidRec a = {};
+  a.did = 0x1002; a.ecu = 0; a.state = DID_VARIES;
+  a.reads = 47; a.changes = 12; a.len = 2; a.first[0] = 0x15; a.first[1] = 0x4F;
+  a.last[0] = 0x1B; a.last[1] = 0x9A;
+
+  char line[96];
+  didFormatLine(line, sizeof(line), a);
+  DidRec b;
+  ok(didParseLine(String(line), b), "the line it wrote is a line it can read");
+
+  eq((int)b.did, (int)a.did, "did survives");
+  eq((int)b.ecu, (int)a.ecu, "ecu survives");
+  eq((int)b.state, (int)a.state, "state survives");
+  eq((int)b.reads, (int)a.reads, "reads survives");
+  eq((int)b.changes, (int)a.changes, "changes survives");
+  eq((int)b.len, (int)a.len, "length survives");
+  ok(memcmp(a.first, b.first, a.len) == 0, "the sweep baseline survives");
+  ok(memcmp(a.last, b.last, a.len) == 0, "the latest reading survives");
+}
+
+static void test_did_line_rejects_the_impossible() {
+  printf("didmap: counters that cannot have come from observation\n");
+  // changes can never reach reads - the first read is the baseline and cannot be a
+  // change. A file claiming otherwise is corrupt, and carrying it forward reports
+  // the corruption as a finding. Rebuild from observation instead.
+  DidRec r;
+  ok(didParseLine(String("E,1640,varies,4,4,01,01,"), r), "the line still parses");
+  eq((int)r.reads, 0, "but the counters are dropped");
+  eq((int)r.changes, 0, "both of them");
+  eq((int)r.state, DID_UNKNOWN, "and the verdict with them");
+  // The identifier itself is still worth keeping - it was found by a sweep.
+  eq((int)r.did, 0x1640, "the identifier is kept");
+}
+
+static void test_did_line_keeps_the_state_field() {
+  printf("didmap: the state field is not swallowed by the split\n");
+  // The exact failure: searching for a comma from index 7 lands inside "varies".
+  DidRec r;
+  ok(didParseLine(String("E,1002,constant,30,0,154F,154F,"), r), "parses");
+  eq((int)r.state, DID_CONSTANT, "constant is read as constant, not as unknown");
+  eq((int)r.reads, 30, "and reads is reads, not the change count");
+  ok(didParseLine(String("T,F190,identified,3,0,AA,AA,VIN"), r), "parses with a note");
+  eq((int)r.state, DID_IDENTIFIED, "identified survives a trailing note");
+  eq((int)r.ecu, 1, "and the TCM prefix");
+}
+
+static void test_did_line_rejects_rubbish() {
+  printf("didmap: a truncated or foreign line is refused\n");
+  DidRec r;
+  ok(!didParseLine(String("ecu,did,state,reads,changes,first,last,note"), r), "the header");
+  ok(!didParseLine(String(""), r), "an empty line");
+  ok(!didParseLine(String("E,1002,varies"), r), "too few fields");
+}
 // ------------------------------------------------------------------ battery floor
 //
 // The rule that decides whether the board switches itself off to save the car's
@@ -1311,6 +1370,10 @@ int main() {
   test_did_verdict_is_pure();
   test_did_hex_round_trip();
   test_did_state_names_round_trip();
+  test_did_line_round_trips();
+  test_did_line_rejects_the_impossible();
+  test_did_line_keeps_the_state_field();
+  test_did_line_rejects_rubbish();
 
   test_batt_ignores_absent_readings();
   test_batt_never_while_the_engine_runs();

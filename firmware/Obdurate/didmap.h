@@ -132,6 +132,61 @@ static uint8_t didUnhex(const char *s, uint8_t *out, uint8_t cap) {
   return n;
 }
 
+// One line of the register file, written and read back.
+//
+// Pure, and above the storage marker on purpose, because the bug that made this a
+// separate function was in the parsing - which never needed a filesystem, and was
+// only out of reach of the host suite because it sat inside a function that opens
+// one. Anything that can be tested without a board belongs on this side of the line.
+//
+// Fields: ecu,did,state,reads,changes,first,last,note
+static void didFormatLine(char *out, size_t cap, const DidRec &r) {
+  char a[24], b[24];
+  didHex(a, sizeof(a), r.first, r.len);
+  didHex(b, sizeof(b), r.last, r.len);
+  snprintf(out, cap, "%c,%04X,%s,%u,%u,%s,%s,", r.ecu ? 'T' : 'E', r.did,
+           didStateName(r.state), r.reads, r.changes, a, b);
+}
+
+static bool didParseLine(const String &line, DidRec &r) {
+  if (line.length() < 9 || line.startsWith("ecu,")) return false;
+
+  // Split into fields rather than walking offsets. The version this replaces
+  // searched for a comma from index 7 - which is already inside the state name - so
+  // it found the comma AFTER the state, dropped it, and shifted every field one to
+  // the left. Every record then reloaded as `unknown` with `changes` holding
+  // whatever the first data byte happened to parse to as decimal, which turned a
+  // whole block of status flags storing 01 into "varies" before a single read.
+  String f[8];
+  uint8_t nf = 0;
+  int from = 0;
+  while (nf < 8) {
+    int c = line.indexOf(',', from);
+    if (c < 0) { f[nf++] = line.substring(from); break; }
+    f[nf++] = line.substring(from, c);
+    from = c + 1;
+  }
+  if (nf < 7) return false;
+
+  r = DidRec();
+  r.ecu = (f[0] == "T") ? 1 : 0;
+  r.did = (uint16_t)strtoul(f[1].c_str(), nullptr, 16);
+  r.state = f[2] == "identified" ? DID_IDENTIFIED : f[2] == "varies" ? DID_VARIES
+          : f[2] == "constant"   ? DID_CONSTANT   : DID_UNKNOWN;
+  r.reads   = (uint16_t)f[3].toInt();
+  r.changes = (uint16_t)f[4].toInt();
+  r.len = didUnhex(f[5].c_str(), r.first, sizeof(r.first));
+  didUnhex(f[6].c_str(), r.last, sizeof(r.last));
+
+  // An invariant, not a formality: the first read establishes the baseline and
+  // cannot itself be a change, so changes can never reach reads. A file saying
+  // otherwise was written or parsed wrongly, and carrying those counters forward
+  // reports the corruption as a finding about the car - which is exactly what
+  // happened. Drop them and let triage rebuild from observation.
+  if (r.reads && r.changes >= r.reads) { r.reads = 0; r.changes = 0; r.state = DID_UNKNOWN; }
+  return true;
+}
+
 // ---------------------------------------------------------------- storage
 //
 // A file on LittleFS, not NVS. NVS holds small state that is written rarely - the
@@ -160,20 +215,21 @@ static DidRec *didFind(uint8_t ecu, uint16_t did) {
 }
 
 
+static const char *DIDMAP_HEADER = "ecu,did,state,reads,changes,first,last,note";
+
 static bool didMapSave() {
   if (!didMap || !tripFsUp) return false;
   File f = LittleFS.open(DIDMAP_FILE, FILE_WRITE);
   if (!f) return false;
   // A header, because this file is meant to be read by a person with a spreadsheet
   // as much as by the board.
-  f.print("ecu,did,state,reads,changes,first,last,note\n");
-  char a[24], b[24];
+  f.print(DIDMAP_HEADER);
+  f.print('\n');
+  char line[96];
   for (uint16_t i = 0; i < didMapN; i++) {
-    const DidRec &r = didMap[i];
-    didHex(a, sizeof(a), r.first, r.len);
-    didHex(b, sizeof(b), r.last, r.len);
-    f.printf("%c,%04X,%s,%u,%u,%s,%s,\n", r.ecu ? 'T' : 'E', r.did,
-             didStateName(r.state), r.reads, r.changes, a, b);
+    didFormatLine(line, sizeof(line), didMap[i]);
+    f.print(line);
+    f.print('\n');
   }
   bool ok = (f.print('\n') != 0);
   f.close();
@@ -187,23 +243,8 @@ static void didMapLoad() {
   if (!f) return;
   while (f.available() && didMapN < didMapCap) {
     String line = f.readStringUntil('\n');
-    if (line.length() < 9 || line.startsWith("ecu,")) continue;
-    DidRec r = {};
-    r.ecu = (line[0] == 'T') ? 1 : 0;
-    r.did = (uint16_t)strtoul(line.substring(2, 6).c_str(), nullptr, 16);
-    int p = line.indexOf(',', 7);
-    if (p < 0) continue;
-    String rest = line.substring(p + 1);          // state,reads,changes,first,last,note
-    int c1 = rest.indexOf(','), c2 = rest.indexOf(',', c1 + 1),
-        c3 = rest.indexOf(',', c2 + 1), c4 = rest.indexOf(',', c3 + 1);
-    if (c1 < 0 || c2 < 0 || c3 < 0 || c4 < 0) continue;
-    String st = rest.substring(0, c1);
-    r.state = st == "identified" ? DID_IDENTIFIED : st == "varies" ? DID_VARIES
-            : st == "constant"   ? DID_CONSTANT   : DID_UNKNOWN;
-    r.reads   = (uint16_t)rest.substring(c1 + 1, c2).toInt();
-    r.changes = (uint16_t)rest.substring(c2 + 1, c3).toInt();
-    r.len = didUnhex(rest.substring(c3 + 1, c4).c_str(), r.first, sizeof(r.first));
-    didUnhex(rest.substring(c4 + 1).c_str(), r.last, sizeof(r.last));
+    DidRec r;
+    if (!didParseLine(line, r)) continue;
     didMap[didMapN++] = r;
   }
   f.close();

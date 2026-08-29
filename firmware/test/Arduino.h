@@ -60,6 +60,10 @@ class String {
     if ((size_t)to > s.size()) to = (int)s.size();
     return String(s.substr((size_t)from, (size_t)(to - from)));
   }
+  // Arduino's String::toInt stops at the first non-digit and yields 0 when there is
+  // nothing to read, which is what the register parser relies on for a short or
+  // empty field. strtol has exactly that behaviour.
+  long toInt() const { return strtol(s.c_str(), nullptr, 10); }
   bool startsWith(const char *p) const { return s.rfind(p, 0) == 0; }
   bool startsWith(const String &p) const { return s.rfind(p.s, 0) == 0; }
   void replace(const char *from, const char *to) {
