@@ -119,6 +119,26 @@ console.log('\nversion stamp');
   // PSRAM is off by default on this board; the scan hit list depends on it being on.
   const build = readSrc(join(here, '../build.sh'));
   ok(/PSRAM=opi/.test(build), 'build.sh asks for the board with PSRAM enabled');
+
+  // And CI must ask for the same board. It did not: ci/build.yml compiled
+  // esp32:esp32:XIAO_ESP32S3 with no PSRAM while build.sh compiled it with, so the
+  // artifact anyone downloaded from CI got the 400-entry heap fallback for the scan
+  // hit list instead of the 4000-entry PSRAM one. Nothing compared them, because
+  // nothing ran - the file is parked outside .github/workflows/. An artifact built
+  // for a different board configuration than the one developed against is worse
+  // than no artifact, so the two are pinned to each other here.
+  const ci = readSrc(join(here, '../../ci/build.yml'));
+  const bFqbn = (build.match(/FQBN="([^"]+)"/) || [, ''])[1];
+  const cFqbn = (ci.match(/--fqbn\s+(\S+)/) || [, ''])[1];
+  ok(bFqbn.length > 0, `build.sh names an FQBN (${bFqbn})`);
+  eq(cFqbn, bFqbn, 'ci/build.yml compiles the same board as build.sh');
+
+  // The frontend versions and deploys independently, which is precisely why its
+  // suite and its budget gate have to run here rather than only on a laptop.
+  ok(/npm --prefix web test/.test(ci), 'CI runs the frontend suite');
+  ok(/npm --prefix web run build/.test(ci), 'and the bundle budget gate');
+  ok(/'web\/\*\*'/.test(ci), 'and watches web/ for changes');
+  ok(/'contract\/\*\*'/.test(ci), 'and contract/, which both ends are checked against');
   ok(/FW_VERSION/.test(build) && /NexonOBD-v\$VERSION\.bin/.test(build),
      'build.sh names the image from the same FW_VERSION');
 }

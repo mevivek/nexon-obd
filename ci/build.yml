@@ -1,25 +1,44 @@
 name: Build firmware
 
-# Builds NexonOBD on every push and publishes the .bin as an artifact, so a new
+# Builds the firmware on every push and publishes the .bin as an artifact, so a new
 # image can be downloaded on a phone and pushed to the board at /update without
 # needing a development machine.
+#
+# NOT ENABLED. This file is parked in ci/ rather than .github/workflows/, because
+# pushing to that path needs the `workflow` OAuth scope. To turn it on:
+#
+#   gh auth refresh -h github.com -s workflow
+#   git mv ci/build.yml .github/workflows/build.yml
+#   git commit -m "Enable CI" && git push
+#
+# It is kept current in the meantime, and firmware/test/test_dashboard.mjs asserts
+# the parts of it that must agree with firmware/build.sh - which is how the FQBN
+# below came to be wrong for as long as it was: CI compiled the board WITHOUT
+# PSRAM while build.sh compiled it with, so the artifact anyone downloaded here got
+# the 400-entry heap fallback for the scan hit list rather than the 4000-entry
+# PSRAM one. Nothing compared the two, because nothing ran.
 
 on:
   push:
     branches: [main]
     paths:
       - 'firmware/**'
+      - 'web/**'
+      - 'contract/**'
       - 'tools/dashboard.html'
       - '.github/workflows/build.yml'
   pull_request:
     paths:
       - 'firmware/**'
+      - 'web/**'
+      - 'contract/**'
       - 'tools/dashboard.html'
   workflow_dispatch:
 
 jobs:
-  # Host-side tests for the ISO-TP layer and the dashboard's hold-last-value
-  # logic. Needs no ESP32 core, so it finishes in seconds and gates the build.
+  # Host-side tests for the ISO-TP layer, the battery floor and everything about the
+  # sketch that can be asserted from its source. Needs no ESP32 core, so it finishes
+  # in seconds and gates the build.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -27,8 +46,36 @@ jobs:
       - name: Run host tests
         run: firmware/test/run.sh
 
+  # The frontend deploys separately from the firmware, which is exactly why it needs
+  # to be here: a renamed /data field is a blank gauge in the car and a green bench,
+  # and contract/data.json is only load-bearing if both ends are actually checked
+  # against it on every change. The build step is also the budget gate - the bundle
+  # shares a 1.5 MB partition with the trip logs.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        run: npm --prefix web ci
+      - name: Test
+        run: npm --prefix web test
+      - name: Build, and enforce the bundle budget
+        run: npm --prefix web run build
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-bundle
+          path: web/dist/index.html.gz
+          if-no-files-found: error
+          retention-days: 90
+
   build:
-    needs: test
+    needs: [test, web]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,10 +91,13 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32
 
+      # The FQBN must match firmware/build.sh exactly, PSRAM included. A test
+      # asserts the two agree, because an artifact built for a different board
+      # configuration than the one developed against is worse than no artifact.
       - name: Compile
         run: |
           arduino-cli compile \
-            --fqbn esp32:esp32:XIAO_ESP32S3 \
+            --fqbn esp32:esp32:XIAO_ESP32S3:PSRAM=opi \
             --output-dir build \
             --warnings default \
             firmware/NexonOBD
@@ -59,10 +109,16 @@ jobs:
           ls -lh build/*.bin >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
-      - name: Upload firmware artifact
+      # Two images, and they are not interchangeable. The app image is what /update
+      # takes over Wi-Fi; the merged one is a full-flash image for USB recovery and
+      # feeding it to /update does not work. Both are published because both are
+      # wanted, named so they cannot be confused.
+      - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: NexonOBD-firmware
-          path: build/NexonOBD.ino.bin
+          name: firmware
+          path: |
+            build/NexonOBD.ino.bin
+            build/NexonOBD.ino.merged.bin
           if-no-files-found: error
           retention-days: 90
