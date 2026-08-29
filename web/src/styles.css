@@ -46,7 +46,22 @@ body{margin:0;padding:0 0 calc(92px + env(safe-area-inset-bottom,0px));
 background:var(--plane);color:var(--ink);
 -webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums;
 font:500 15px/1.45 "Space Grotesk",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-.wrap{max-width:1100px;margin:0 auto;padding:0 18px}
+/* The lit ground.
+   Two soft sources rather than a flat fill, and not decoration: every plate on
+   every page is translucent white, so with nothing behind them they read as grey
+   boxes and the whole layered surface falls flat. This is what they are layered
+   *on*.
+   Fixed to the viewport rather than painted into the document, so the light stays
+   where it is while a long page scrolls under it - and as a pseudo-element rather
+   than background-attachment:fixed, which iOS Safari either ignores or repaints on
+   every scroll frame. pointer-events:none so it can never swallow a tap. */
+body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+background:
+radial-gradient(70% 44% at 96% 2%,rgba(139,149,255,.20),rgba(139,149,255,0) 68%),
+radial-gradient(64% 40% at 2% 78%,rgba(95,227,192,.13),rgba(95,227,192,0) 68%)}
+/* Raised above the glow. The header and the tab bar already carry their own
+   stacking (5 and 6), so this is the only child that needs saying. */
+.wrap{position:relative;z-index:1;max-width:1100px;margin:0 auto;padding:0 18px}
 
 /* header ---------------------------------------------------------------- */
 header{position:sticky;top:0;z-index:5;margin-bottom:12px;padding:16px 18px 12px;
