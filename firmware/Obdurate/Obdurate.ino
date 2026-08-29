@@ -40,6 +40,7 @@
 #include <Update.h>
 #include "boot_html.h"
 #include "ui_html.h"
+#include "pwa.h"
 #include "ota_html.h"
 
 // Two ways to reach the car, picked at runtime:
@@ -780,6 +781,20 @@ static void scanLoadHits() {
 }
 
 static void scanBegin() {
+  // Before anything about resuming, and outside the NVS read entirely.
+  //
+  // This used to sit after the early return below, so hits came back from flash
+  // only while a sweep was mid-run. A sweep that finished - or was stopped, which
+  // is how most of them end - left its results on the filesystem with nothing ever
+  // reading them, and /watch offered an empty picker while /scanhits.csv sat there
+  // holding every identifier the sweep had found. The whole documented workflow,
+  // sweep then watch the hits to work out what they hold, was unreachable except in
+  // the one state where you would not want to start watching anyway.
+  //
+  // The file is the record of what this ECU answers to. That is worth having on
+  // every boot, whatever the sweep is or is not doing.
+  scanLoadHits();
+
   if (!scanPrefs.begin("nexonscan", true)) return;
   bool wasRunning = scanPrefs.getBool("run", false);
   scan.ecu       = scanPrefs.getUChar("ecu", 0);
@@ -794,7 +809,6 @@ static void scanBegin() {
   // Resume rather than wait to be asked. A sweep is started deliberately and takes
   // hours; having it silently abandon itself every time the car is switched off
   // would make finishing one impossible. The Live page shows it is running.
-  scanLoadHits();
   scan.running = true;
   scan.startedMs = millis();
   Serial.printf("[scan] resuming %s at %04X (%lu already tried)\n",
@@ -1725,6 +1739,24 @@ static void sendPage(const char *html) {
   server.send_P(200, "text/html", html);
 }
 
+// The manifest and the icon change only when the firmware does, and a launcher
+// re-reads them rarely, so they are cached hard behind the version-stamped ETag the
+// stylesheet already uses. Unlike the bundle, there is no reason to revalidate
+// these on every load.
+static void handlePwaManifest() {
+  server.sendHeader("ETag", UI_ETAG);
+  server.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
+  if (ifNoneMatch()) { server.send(304, "application/manifest+json", ""); return; }
+  server.send_P(200, "application/manifest+json", PWA_MANIFEST);
+}
+
+static void handlePwaIcon() {
+  server.sendHeader("ETag", UI_ETAG);
+  server.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
+  if (ifNoneMatch()) { server.send(304, "image/svg+xml", ""); return; }
+  server.send_P(200, "image/svg+xml", PWA_ICON_SVG);
+}
+
 static void handleUiCss() {
   server.sendHeader("ETag", UI_ETAG);
   server.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
@@ -1992,6 +2024,8 @@ void setup() {
       server.send(302, "text/plain", "");
     });
 
+  server.on("/manifest.webmanifest", handlePwaManifest);
+  server.on("/icon.svg",    handlePwaIcon);
   server.on("/ui",          []() { sendPage(UI_ADMIN_HTML); });
   server.on("/ui/manifest", handleUiManifest);
   server.on("/ui/clear",    handleUiClear);

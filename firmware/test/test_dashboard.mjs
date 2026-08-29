@@ -323,6 +323,106 @@ console.log('\ntrip totals');
      'but the interval clock is not, so a wake starts a fresh interval');
 }
 
+// ---------------------------------------------------------------- scan hits
+//
+// A sweep's results are the point of running one, and they outlive it: /watch offers
+// them as checkboxes so nobody has to copy hex between pages, and that is the whole
+// documented route from "this identifier answers" to "this identifier is coolant".
+//
+// scanLoadHits() used to sit AFTER scanBegin()'s early return, so hits came back from
+// flash only while a sweep was mid-run. A sweep that finished, or was stopped - which
+// is how most of them end - left /scanhits.csv on the filesystem with nothing ever
+// reading it, and the picker was empty on a board holding thousands of results.
+//
+// The same shape as the tripTick bug: reachable code on a path nobody takes.
+console.log('\nscan hits outlive the sweep');
+{
+  const ino = readSrc(join(here, '../Obdurate/Obdurate.ino'));
+  const fn = ino.slice(ino.indexOf('static void scanBegin()'));
+  const body = fn.slice(0, fn.indexOf('\n}\n'));
+  ok(body.length > 0 && body.length < ino.length, 'scanBegin body isolated');
+
+  const load = body.indexOf('scanLoadHits();');
+  const bail = body.search(/if \(!wasRunning\b/);
+  const prefs = body.indexOf('scanPrefs.begin(');
+
+  ok(load >= 0, 'scanBegin restores the hits');
+  ok(bail >= 0 && load < bail,
+     'and does it before the not-resuming early return, not after');
+  // Also before the NVS read, which has its own `return` when the namespace will
+  // not open - a second path that would silently skip the restore.
+  ok(prefs >= 0 && load < prefs,
+     'and before the NVS read, which can also return early');
+  eq((body.match(/scanLoadHits\(\)/g) || []).length, 1,
+     'restored exactly once, so resuming does not double-load the list');
+}
+
+// ---------------------------------------------------------------- home screen
+//
+// The manifest and icon are served from flash rather than shipped in the bundle, so
+// the board keeps a name and an icon with no bundle installed - and so the bundle
+// stays one file. That split means three separate things have to agree, and none of
+// them fails loudly: a launcher that cannot fetch the manifest just quietly makes an
+// ugly shortcut.
+console.log('\nhome-screen install');
+{
+  const ino = readSrc(join(here, '../Obdurate/Obdurate.ino'));
+  const pwa = readSrc(join(here, '../Obdurate/pwa.h'));
+  const paths = readSrc(join(here, '../Obdurate/ui_paths.h'));
+  const page = readFileSync(join(here, '../../web/index.html'), 'utf8');
+
+  // The manifest is JSON compiled into a raw string literal, and nothing in the
+  // build parses it - the same hole that shipped broken JavaScript before the
+  // frontend moved out. Parse it here.
+  const body = (pwa.match(/PWA_MANIFEST\[\] PROGMEM = R"JSON\(([\s\S]*?)\)JSON"/) || [, ''])[1];
+  let manifest = null;
+  try { manifest = JSON.parse(body); ok(true, 'the manifest is valid JSON'); }
+  catch (e) { ok(false, `the manifest is valid JSON (${e.message})`); }
+
+  if (manifest) {
+    eq(manifest.start_url, '/', 'it launches on the live gauges');
+    eq(manifest.display, 'standalone', 'without browser chrome');
+    // The colours are the page's own. A launcher paints the splash and the task
+    // switcher with these, and a mismatch reads as a different app.
+    const css = readSrc(join(here, '../Obdurate/ui_css.h'));
+    ok(css.includes(manifest.background_color), 'the splash colour is the page background');
+    ok(page.includes(`content="${manifest.theme_color}"`), 'and theme-color agrees with the document');
+
+    // Every icon has to be a path the firmware actually serves.
+    for (const i of manifest.icons || []) {
+      ok(new RegExp(`server\\.on\\("${i.src}"`).test(ino), `${i.src} is a route`);
+    }
+    // A maskable icon is cropped to a circle by some launchers; without one
+    // declared they letterbox the square instead.
+    ok((manifest.icons || []).some(i => (i.purpose || '').includes('maskable')),
+       'a maskable icon is declared');
+  }
+
+  ok(/<svg[\s\S]*<\/svg>/.test(pwa), 'the icon is an inline SVG');
+  ok(/server\.on\("\/manifest\.webmanifest"/.test(ino), 'the manifest is a route');
+  ok(/application\/manifest\+json/.test(ino), 'served with the manifest content type');
+  ok(/image\/svg\+xml/.test(ino), 'and the icon as SVG');
+
+  // Both are in API[], so a dropped handler 404s instead of answering a launcher
+  // with the bundle's HTML and a 200.
+  ok(/"\/manifest\.webmanifest"/.test(paths) && /"\/icon\.svg"/.test(paths),
+     'both are API paths, so neither can fall through to the SPA');
+
+  // iOS ignores the manifest for Add to Home Screen; these tags are the whole
+  // mechanism there, and they are the reason this works without HTTPS at all.
+  ok(/apple-mobile-web-app-capable"\s+content="yes"/.test(page), 'iOS launches standalone');
+  ok(/apple-touch-icon/.test(page), 'and has an icon to use');
+  ok(/viewport-fit=cover/.test(page) && /black-translucent/.test(page),
+     'the status bar overlay and the viewport agree');
+  ok(!/Nexon/.test(page), 'the document title survived the rename');
+
+  // No service worker anywhere: it cannot register over http on a private address,
+  // and shipping a registration that silently never runs would be worse than none.
+  const web = readdirSync(join(here, '../../web/src'));
+  ok(!web.some(f => /service-?worker|\bsw\.js/i.test(f)), 'no service worker is shipped');
+  ok(!/serviceWorker/.test(page), 'and none is registered');
+}
+
 // ---------------------------------------------------------------- web flasher
 //
 // docs/flash/ is the front door: a stranger with a XIAO and a USB cable flashes from
