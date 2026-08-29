@@ -25,14 +25,12 @@ on:
       - 'firmware/**'
       - 'web/**'
       - 'contract/**'
-      - 'tools/dashboard.html'
       - '.github/workflows/build.yml'
   pull_request:
     paths:
       - 'firmware/**'
       - 'web/**'
       - 'contract/**'
-      - 'tools/dashboard.html'
   workflow_dispatch:
 
 jobs:

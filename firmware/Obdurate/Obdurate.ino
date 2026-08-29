@@ -42,6 +42,7 @@
 #include <Update.h>
 #include "boot_html.h"
 #include "ui_html.h"
+#include "ui_bundle.h"
 #include "pwa.h"
 #include "ota_html.h"
 
@@ -2170,6 +2171,36 @@ static bool uiTrySend(const char *path) {
   return false;
 }
 
+
+// The dashboard compiled into flash, served when the filesystem has no bundle.
+//
+// The order matters and it is the opposite of what it used to be. A bundle
+// uploaded to LittleFS still wins, so web/deploy.sh keeps the no-reflash edit loop
+// that the v1.11.0 split existed to give. What changed is the floor underneath it:
+// where an absent or half-finished deploy used to fall back to a four-value stub,
+// it now falls back to the last full dashboard that was compiled in.
+//
+// That also makes flashing the whole install. Someone who flashes through
+// docs/flash/ has a working dashboard the moment the board boots, instead of
+// needing a laptop, the board's Wi-Fi and web/deploy.sh before seeing anything.
+//
+// Sent with Content-Encoding set by hand, because send_P is not streamFile and does
+// not add it - the opposite of the trap directly above, where setting it a second
+// time shipped a double header in 1.11.0.
+static void sendBuiltInUi() {
+  server.sendHeader("Content-Encoding", "gzip");
+  server.sendHeader("Cache-Control", "no-cache");
+  server.send_P(200, "text/html", (const char *)UI_BUNDLE_GZ, UI_BUNDLE_GZ_LEN);
+}
+
+// Whichever dashboard is available, best first. False only if neither exists,
+// which cannot happen in a normal build and is why BOOT_HTML is still behind it.
+static bool sendDashboard() {
+  if (uiInstalled() && uiTrySend("/index.html")) return true;
+  if (UI_BUNDLE_GZ_LEN) { sendBuiltInUi(); return true; }
+  return false;
+}
+
 static void handleUiManifest() {
   size_t total = LittleFS.totalBytes(), used = LittleFS.usedBytes();
   String s = "{\"installed\":";
@@ -2299,7 +2330,7 @@ static void handleNotFound() {
     return;
   }
   if (uiTrySend(uri.c_str())) return;
-  if (uiInstalled() && uiTrySend("/index.html")) return;
+  if (sendDashboard()) return;
   server.send(404, "text/plain", "not found");
 }
 
@@ -2367,7 +2398,7 @@ void setup() {
   // safety property: an interrupted deploy, a corrupt filesystem or a first flash
   // all leave the board showing a reading and a way forward, not nothing.
   server.on("/",            []() {
-    if (uiInstalled() && uiTrySend("/index.html")) return;
+    if (sendDashboard()) return;
     sendPage(BOOT_HTML);
   });
   server.on("/ui.css",      handleUiCss);
@@ -2388,7 +2419,9 @@ void setup() {
   // into flash points at them.
   for (const char *p : {"/monitors", "/trips", "/watch", "/scan"})
     server.on(p, [p]() {
-      String to = uiInstalled() ? String("/#") + p : String("/");
+      // Always into the app now: a dashboard is compiled in, so there is no
+      // case where these routes have nowhere to land.
+      String to = String("/#") + p;
       server.sendHeader("Location", to);
       server.send(302, "text/plain", "");
     });

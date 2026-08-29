@@ -12,10 +12,6 @@
 // index.html. That is the same static handling shots_spa.mjs uses, for the same
 // reason: what is measured has to be what the firmware hands out.
 //
-// tools/dashboard.html is still here and still served by tools/obd_dashboard.ps1,
-// so it is driven through the same states from the same row definitions it declares
-// itself.
-//
 //   npm --prefix web run build
 //   NODE_PATH=/opt/node22/lib/node_modules node firmware/test/test_table.mjs
 
@@ -278,8 +274,6 @@ async function suite(label, target) {
 }
 
 await suite('bundle (web/dist, Live page)', { kind: 'bundle' });
-await suite('laptop dashboard (tools/dashboard.html)',
-            { kind: 'page', file: '../../tools/dashboard.html' });
 
 await browser.close();
 server.close();

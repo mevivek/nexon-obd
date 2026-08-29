@@ -40,13 +40,17 @@ it says so.
 1. Flash the firmware (see [Building](#building)).
 2. Power the board — USB, or from the OBD port via a 12 V→5 V buck.
 3. Join Wi-Fi **`Obdurate`** / **`changeme1234`**.
-4. Install the frontend: **`web/deploy.sh`** (see [Frontend](#frontend)). Once only —
-   it lives on the board's filesystem and survives reflashing.
-5. Open **`http://192.168.4.1`**.
+4. Open **`http://192.168.4.1`**.
 
-Without step 4 the board still works: `/` falls back to a built-in page with speed,
-rpm, coolant and battery, and everything the board does on its own — trip logging,
-the DID sweep, the history buffer — keeps running regardless.
+That is the whole install. The dashboard is compiled into the firmware, so flashing
+is all it takes — there is no second step, no laptop at the car, and no state where
+the board is running but has no page to show.
+
+You can still deploy a bundle to the filesystem with **`web/deploy.sh`**, and it
+takes precedence when present. That is the edit loop: changing a line of CSS costs a
+22 KB upload rather than a 1.3 MB reflash. The compiled-in copy is the floor
+underneath it, so a failed or half-finished deploy falls back to the last dashboard
+that was built into the firmware rather than to a stub.
 
 | Page | What it does |
 |---|---|
@@ -466,12 +470,22 @@ npm --prefix web test          # 206 checks
 web/deploy.sh                  # build, then upload to 192.168.4.1
 ```
 
-It was compiled in until v1.11.0, as JavaScript inside C++ raw string literals. That
-cost a 1.3 MB reflash to change a line of CSS and ruled out every ordinary frontend
-tool — no bundler, no packages, no source maps, and nothing in the build that ever
-parsed the JavaScript, so a typo shipped and surfaced as a dead dashboard in the car.
-Splitting it out fixed all of that and returned 47 KB of flash. It was never about
-space: the whole UI was 4.6 % of the sketch, and the board had 2 MB of `app0` free.
+**It ships two ways, and the order matters.** The built bundle is compiled into the
+firmware, so flashing the board is the whole install. A bundle uploaded to LittleFS
+overrides it, which is what keeps the edit loop cheap: changing a line of CSS costs a
+27 KB upload, not a 1.3 MB reflash.
+
+That is not a return to what v1.11.0 removed. What went then was hand-written
+JavaScript inside C++ raw string literals — no bundler, no packages, no source maps,
+and nothing in the build that ever parsed it, so a typo shipped and surfaced as a
+dead dashboard in the car. All of that stays gone. `web/scripts/embed.mjs` reads the
+output of the ordinary Vite build, after the ordinary Vitest suite, and turns the
+finished gzipped bytes into a byte array. Nothing about how the frontend is written,
+bundled or tested changes — only where a copy of the result ends up.
+
+What it buys is that there is no state where the board runs and has no page. Someone
+who flashes through [`docs/flash/`](docs/flash/) has a working dashboard the moment
+it boots, rather than needing a laptop, the board's Wi-Fi and `web/deploy.sh` first.
 
 **Why the board and not a web host.** The access point has no internet, so a phone
 joined to it cannot load a page from anywhere else. Chrome 142 relaxed mixed-content
@@ -481,15 +495,16 @@ before you got in the car, and Android 17 adds a second prompt on top. Serving f
 the board has none of those conditions: no mixed content, no CORS, no permissions, no
 internet, any browser.
 
-**Deploying cannot brick it.** `/ui` is compiled into flash, so the page that fixes a
-bad deploy never depends on the deploy having worked. If no bundle is installed, or
-the upload was interrupted, `/` falls back to a built-in page showing speed, rpm,
-coolant and battery. Trip logging, the DID sweep and the history buffer are the
-board's work and run regardless of what the browser can see.
+**Deploying cannot brick it**, and the floor is higher than it was. `/ui` is compiled
+into flash, so the page that fixes a bad deploy never depends on the deploy having
+worked. If no bundle is installed, or the upload was interrupted, `/` falls back to
+the dashboard compiled into the firmware — the whole thing, not a four-value stub.
+Trip logging, the DID sweep and the history buffer are the board's work and run
+regardless of what the browser can see.
 
 | | |
 |---|---|
-| Bundle | 22 KB gzipped, **one file** |
+| Bundle | 27 KB gzipped, **one file**, compiled in and overridable |
 | Budget | 300 KB, capped in the build and enforced by the firmware on upload |
 | Shares with | trip logs — 300 KB is about 35 minutes of recording capacity |
 
@@ -647,8 +662,8 @@ harness structurally cannot check it: its fake DOM creates any element asked for
 id, so a table whose cells are built once and then addressed by id passes whether or
 not those ids line up with the rows — the whole suite goes green with every value
 shown against the wrong PID. `test_table.mjs` renders the built bundle and
-`tools/dashboard.html`, drives both through a full sample, a partial poll and a
-recovery, and asserts that row *i* shows the value of the PID row *i* names. It skips itself, without failing, where
+the built bundle, drives it through a full sample, a partial poll and a recovery,
+and asserts that row *i* shows the value of the PID row *i* names. It skips itself, without failing, where
 Playwright is not installed.
 
 To look at the pages without flashing anything:

@@ -17,7 +17,7 @@
 
 import { pageSource, scriptsOf, fwVersion, uiCss } from './pagesrc.mjs';
 import { unbalancedQuotes, firmwareSources } from './quotes.mjs';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -636,6 +636,55 @@ console.log('\nstored state survives the rename');
   }
 }
 
+// ---------------------------------------------------------------- built-in UI
+//
+// The dashboard is compiled into the firmware so that flashing is the whole
+// install. ui_bundle.h is generated from web/dist by web/scripts/embed.mjs and is
+// committed, because firmware/build.sh must work for someone who only wants to
+// flash - requiring npm to compile the firmware would put a Node toolchain between
+// a stranger and a working board.
+//
+// Committing a generated file earns exactly one obligation: it must not go stale.
+// A header left behind after a UI change would ship the previous dashboard inside
+// the new firmware, and the only symptom is a page that looks slightly old.
+console.log('\nbuilt-in dashboard');
+{
+  const bundle = readSrc(join(here, '../Obdurate/ui_bundle.h'));
+  const declared = Number((bundle.match(/UI_BUNDLE_GZ_LEN = (\d+);/) || [, 0])[1]);
+  ok(declared > 10000, `a dashboard is compiled in (${declared} B gzipped)`);
+
+  // The array has to match the length beside it, or send_P walks off the end of it.
+  const bytes = (bundle.match(/0x[0-9a-f]{2}/g) || []).length;
+  eq(bytes, declared, 'the byte array is exactly as long as it claims');
+
+  // Well inside app0. The point of this check is not the ceiling, it is noticing
+  // the day the bundle stops being small enough for this to be a free choice.
+  ok(declared < 200 * 1024, 'and small enough to compile in without thinking about it');
+
+  // Against the build output, when there is one. A header left stale after a UI
+  // change is the whole risk of committing a generated file.
+  const dist = join(here, '../../web/dist/index.html.gz');
+  if (existsSync(dist)) {
+    eq(declared, statSync(dist).size,
+       'ui_bundle.h matches the current web/dist - regenerate with npm --prefix web run build');
+  } else {
+    ok(true, 'no web/dist to compare against (skipped)');
+  }
+
+  // The order the firmware serves them in: an uploaded bundle wins, the compiled-in
+  // one is the floor. Reversing it would make web/deploy.sh silently do nothing.
+  const ino = readSrc(join(here, '../Obdurate/Obdurate.ino'));
+  const fn = ino.slice(ino.indexOf('static bool sendDashboard()'));
+  const body = fn.slice(0, fn.indexOf('\n}\n'));
+  ok(body.indexOf('uiTrySend') < body.indexOf('sendBuiltInUi'),
+     'an uploaded bundle takes precedence over the compiled-in one');
+
+  // send_P is not streamFile and does not add the encoding header itself - the
+  // mirror of the double-header trap in uiTrySend that shipped in 1.11.0.
+  const send = ino.slice(ino.indexOf('static void sendBuiltInUi()'));
+  ok(/Content-Encoding", "gzip"/.test(send.slice(0, 400)),
+     'the compiled-in copy is served with its encoding, since send_P adds none');
+}
 // ---------------------------------------------------------------- syntax lint
 //
 // Nothing in this suite parses the sketch as C++. extract.py pulls named functions
@@ -1035,7 +1084,7 @@ console.log('\npower');
 // the normal build ever parses them - a typo ships and shows up as a dead
 // dashboard on the car. Compile each page's script without running it.
 console.log('syntax');
-for (const f of [...FW_PAGES, '../../tools/dashboard.html']) {
+for (const f of FW_PAGES) {
   const blocks = scriptsOf(pageSource(f));
   ok(blocks.length > 0, `${f}: has a script block`);
   for (const js of blocks) {

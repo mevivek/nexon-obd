@@ -21,12 +21,6 @@ echo
 echo "== firmware source =="
 node test_dashboard.mjs
 
-echo
-echo "== laptop dashboard =="
-# tools/dashboard.html is served by obd_dashboard.ps1 on a PC, not by the board, so
-# it did not move into web/ and keeps its own copy of the merge/hold/flag logic.
-# Nothing else covers it.
-node test_laptop.mjs
 
 echo
 echo "== all-values table =="

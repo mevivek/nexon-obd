@@ -1,6 +1,6 @@
 {
   "name": "Obdurate",
-  "version": "1.14.1",
+  "version": "1.15.0",
   "funding_url": "https://github.com/mevivek/obdurate",
   "new_install_prompt_erase": true,
   "builds": [
