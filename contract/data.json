@@ -25,6 +25,29 @@
     "error": "why ok is false; absent when it is true"
   },
 
+  "_q_comment": [
+    "The sampling receipt, emitted on both the fresh and the stale path.",
+    "",
+    "A sibling of v, not a member of it. v is the car's readings; these are the",
+    "board's own account of how well it managed to read them, and mixing the two",
+    "would put a number the ECU never sent through the same staleness and warning",
+    "machinery as one it did.",
+    "",
+    "The point of publishing it: no consumer OBD tool shows the sample rate it is",
+    "actually achieving, so a logging interval set to 0.1 s and a value that moves",
+    "once a second look the same from the outside. Here the numbers already existed",
+    "and only went to the serial log."
+  ],
+
+  "q": {
+    "cycleMs": "measured duration of one full SAMPLE_ORDER pass",
+    "batchMs": "how long the last bus exchange took",
+    "staleMs": "the hold window derived from cycleMs - past this a batch is dropped",
+    "hz": "achieved published-sample rate; null until a pass has been timed",
+    "bAge": "per-batch age in ms, one per batch; null where a batch has never answered",
+    "share": "a scan is taking most of the bus, so the sampler is on its slow share"
+  },
+
   "scan": {
     "scan": "a DID sweep has the bus",
     "scanPct": "percent complete",

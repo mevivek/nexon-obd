@@ -1125,6 +1125,54 @@ static void jsonScan(String &s) {
   }
 }
 
+// The sampling receipt: what the board actually achieved, rather than what it was
+// asked for.
+//
+// Every number here already existed. sampCycleMs, sampBatchMs, sampStamp[] and
+// sampleStaleMs() are computed on every pass and printed to the serial log, where
+// nobody in a car can see them, and then thrown away. So the page has been drawing
+// values with no way to say how fast they really arrive or how old the oldest of
+// them is.
+//
+// That is the most under-reported number in this whole class of tool. The ELM327
+// request/response round trip puts a cheap clone somewhere around five PIDs a
+// second, and no consumer app shows the rate actually being achieved - so people set
+// a tenth-of-a-second logging interval, get values that change once a second, and
+// have no way to find out which one is the truth. Publishing it costs about sixty
+// bytes a poll.
+//
+// Emitted on both the fresh and the stale path, like jsonScan. How fast the sampler
+// is managing to go is exactly as interesting when nothing is coming back.
+static void jsonQuality(String &s) {
+  uint32_t now = millis();
+  s += ",\"q\":{\"cycleMs\":";
+  s += sampCycleMs;
+  s += ",\"batchMs\":";
+  s += sampBatchMs;
+  s += ",\"staleMs\":";
+  s += sampleStaleMs(sampCycleMs);
+  s += ",\"hz\":";
+  // Published samples per second. One is published per batch and a pass is
+  // SAMPLE_ORDER turns long, so the measured pass time divides by its own length.
+  // Null rather than zero until a full pass has been timed: the rate is not yet
+  // known, which is a different statement from the rate being nothing.
+  const uint8_t turns = sizeof(SAMPLE_ORDER) / sizeof(SAMPLE_ORDER[0]);
+  if (sampCycleMs) s += String(turns * 1000.0f / sampCycleMs, 2);
+  else             s += "null";
+  s += ",\"bAge\":[";
+  for (uint8_t i = 0; i < SAMPLE_BATCHES; i++) {
+    if (i) s += ',';
+    // A batch that has never answered is null, not an enormous age. "No reading yet"
+    // and "a very old reading" are different things and the page shows them
+    // differently - the same rule the values themselves follow.
+    if (sampStamp[i]) s += (now - sampStamp[i]);
+    else              s += "null";
+  }
+  s += "],\"share\":";
+  s += scan.running ? "true" : "false";
+  s += "}";
+}
+
 static void handleData() {
   String s = "{";
   bool fresh = g_seq && (millis() - g_liveMs < 4000);
@@ -1137,6 +1185,7 @@ static void handleData() {
                       : "no response from ECU (ignition off?)";
     s += "\"";
     jsonScan(s);
+    jsonQuality(s);
     s += "}";
     server.send(200, "application/json", s);
     return;
@@ -1152,6 +1201,7 @@ static void handleData() {
   s += ",\"epoch\":";
   s += (long long)clockNowMs();
   jsonScan(s);
+  jsonQuality(s);
   s += ",\"v\":{";
   jsonNum(s, "rpm", L.rpm, 0);        jsonNum(s, "speed", L.speed, 0);
   jsonNum(s, "map", L.map_, 0);       jsonNum(s, "baro", L.baro, 0);

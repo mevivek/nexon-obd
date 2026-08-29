@@ -13,7 +13,8 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { useShellStatus } from '../shell.jsx';
 import { createHold } from '../lib/hold.js';
-import { hz, pushSample } from '../lib/rate.js';
+import { hz, rateHz, pushSample } from '../lib/rate.js';
+import { qualityText, boardHz, pageIsBehind } from '../lib/quality.js';
 import { computeFlags } from '../lib/flags.js';
 import { computeMileage } from '../lib/mileage.js';
 import { DASH, n, round, signed, boostText, hhmmss } from '../lib/format.js';
@@ -126,7 +127,25 @@ export function Live() {
           patch.v = v;
           patch.q = q;
           patch.held = held;
-          patch.hzText = hz(rate);
+
+          // The board's own account of its sampling beats the page's wherever it is
+          // available. The page can only ever observe a rate at or below the one the
+          // board is publishing - its fetch loop is capped by POLL_MS and a
+          // backgrounded tab is throttled harder still - so quoting the page's would
+          // understate a healthy link while never catching a sick one. The page's
+          // measurement stays as the fallback for a board too old to send `q`.
+          const bHz = boardHz(j.q);
+          const qText = qualityText(j.q);
+          if (qText) {
+            const pHz = rateHz(rate);
+            // Only when the page is genuinely lagging what is being recorded. It is
+            // the one case where the two numbers disagree in a way worth acting on:
+            // the log has samples this screen is not showing.
+            patch.hzText = '· ' + qText +
+              (pageIsBehind(bHz, pHz) ? ' · page ' + pHz.toFixed(1) : '');
+          } else {
+            patch.hzText = hz(rate);
+          }
           const st = nextStatus(miss, { ok: true, scan: j.scan, held });
           miss = st.miss;
           apply(st, patch);

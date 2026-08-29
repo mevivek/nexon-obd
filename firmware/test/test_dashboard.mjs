@@ -558,6 +558,38 @@ console.log('\n/data contract');
   for (const k of Object.keys(contract.scan)) {
     ok(scanKeys.includes(k), `scan field ${k} is emitted`);
   }
+
+  // The quality block, checked in both directions like v rather than one like scan.
+  // It is new, it is the only place the board reports on itself, and a field that
+  // quietly stopped being sent would show up as a rate readout that is simply absent
+  // - which looks identical to a board that is not sampling.
+  const qFn = ino.slice(ino.indexOf('static void jsonQuality'));
+  const qKeys = [...qFn.slice(0, qFn.indexOf('\n}\n'))
+    .matchAll(/\\"([a-zA-Z]+)\\":/g)].map(m => m[1])
+    .filter(k => k !== 'q');            // the wrapper, not a field
+  const qDeclared = Object.keys(contract.q);
+
+  const qUndeclared = qKeys.filter(k => !qDeclared.includes(k));
+  const qUnsent = qDeclared.filter(k => !qKeys.includes(k));
+  ok(qUndeclared.length === 0,
+     `every q field is declared${qUndeclared.length
+        ? ` — undeclared: ${qUndeclared.join(', ')}` : ` (${qKeys.length} fields)`}`);
+  ok(qUnsent.length === 0,
+     `every declared q field is still sent${qUnsent.length
+        ? ` — no longer emitted: ${qUnsent.join(', ')}` : ''}`);
+  eq(new Set(qKeys).size, qKeys.length, 'no q field is emitted twice');
+
+  // q is a sibling of v, never a member of it: v is what the car reported, q is the
+  // board's account of how well it read it. A quality number inside v would go
+  // through the hold-last-value merge and the warning gating with the readings.
+  ok(!declared.some(f => qDeclared.includes(f)),
+     'q and v share no field names');
+  ok(/jsonScan\(s\);\s*\n\s*jsonQuality\(s\);/.test(fn),
+     'q is emitted on the fresh path, outside v');
+
+  const stale = ino.slice(ino.indexOf('static void handleData()'));
+  ok(/if \(!fresh\) \{[\s\S]*?jsonQuality\(s\);[\s\S]*?return;/.test(stale),
+     'and on the stale path, where the rate is just as interesting');
 }
 
 // ---------------------------------------------------------------- syntax
