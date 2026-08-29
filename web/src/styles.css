@@ -273,9 +273,30 @@ border-top:1px solid var(--grid)}
 /* Four short readings across one plate, divided rather than boxed separately. */
 .strip{display:flex;align-items:stretch;padding:13px 14px}
 .strip>div{flex:1;min-width:0;text-align:center}
-.strip>div b{display:block;font-size:17px;font-weight:700;letter-spacing:-.02em;
-margin-top:3px}
+.strip>div .label{margin-bottom:3px}
+.strip>div b{display:block;font-size:17px;font-weight:700;letter-spacing:-.02em}
 .strip>hr{width:1px;border:0;margin:0;background:var(--grid)}
+/* Every polled parameter, as a row list rather than a <table>.
+   The table had to scroll sideways at phone width, which put the one view that
+   exists for checking whether a value is missing or merely not displayed behind a
+   horizontal swipe. Four fixed columns in a flex row fit 390px outright.
+   The class names are deliberately not .nm/.sz/.unit: those are already taken by
+   the trip list and the tile unit, and a row here would have picked up monospace
+   from one of them. */
+.vt{padding:8px 16px 10px}
+.vt .hd,.vt .rw{display:flex;align-items:baseline;gap:8px}
+.vt .hd{padding:4px 0 7px;border-bottom:1px solid var(--ring)}
+.vt .hd span{font-size:10px;font-weight:600;letter-spacing:.12em;
+text-transform:uppercase;color:var(--muted)}
+.vt .rw{padding:7px 0;border-bottom:1px solid var(--grid)}
+.vt .rw:last-child{border-bottom:0}
+.vt .pid{width:34px;flex:none;
+font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;
+color:var(--muted)}
+.vt .par{flex:1;min-width:0;font-size:12px;color:var(--ink2);overflow:hidden;
+text-overflow:ellipsis;white-space:nowrap}
+.vt .rdg{font-size:13px;font-weight:600}
+.vt .uom{width:46px;flex:none;text-align:right;font-size:10px;color:var(--muted)}
 /* The mileage trace bleeds to the card's edges, not the tile's. */
 .card>.spark{width:calc(100% + 34px);margin:8px -17px -15px}
 

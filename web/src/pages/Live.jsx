@@ -485,70 +485,60 @@ export function Live() {
         </div>
       </div>
 
-      <details>
-        <summary>Secondary readings</summary>
-        <div class="tiles">
-          <div class="tile">
-            <div class="label">Ambient</div>
-            <div class="value">
-              <span class={dim(q.ambient)}>{round(v.ambient)}</span>
-              <span class="unit">°C</span>
-            </div>
-            <div class="note">echoes the intake sensor</div>
-          </div>
-
-          <div class="tile">
-            <div class="label">Barometric</div>
-            <div class="value">
-              <span class={dim(q.baro)}>{round(v.baro)}</span>
-              <span class="unit">kPa</span>
-            </div>
-          </div>
-
-          <div class="tile">
-            <div class="label">Fuel level</div>
-            <div class="value">
-              <span class={dim(q.fuel)}>{n(v.fuel)}</span>
-              <span class="unit">%</span>
-            </div>
-            <div class="note">not wired through on this car</div>
-          </div>
-
-          <div class="tile">
-            <div class="label">Run time</div>
-            <div class="value sm">
-              <span class={dim(q.runtime)}>{hhmmss(v.runtime)}</span>
-            </div>
-          </div>
+      {/* Two sections rather than two disclosures. They were folded away because
+          the firmware page was one long document and this is the diagnostic half of
+          it - but a fold you have to open every time is a fold you stop opening,
+          and the screen scrolls now. They read as sections, like Engine and Mixture
+          above them. */}
+      <h2 class="sec">Secondary readings</h2>
+      {/* Four short readings on one plate. As four tiles they took a full grid row
+          each to say one number apiece, which is most of a phone screen spent on
+          the least urgent values on the page. */}
+      <div class="card strip">
+        <div>
+          <div class="label">Ambient</div>
+          <b class={dim(q.ambient)}>{round(v.ambient)}</b>
         </div>
-      </details>
-
-      <details>
-        <summary>All values</summary>
-        <div class="tw">
-          <table>
-            <caption>Every polled parameter, current sample</caption>
-            <thead>
-              <tr>
-                <th>PID</th>
-                <th>Parameter</th>
-                <th style="text-align:right">Value</th>
-                <th>Unit</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.key}>
-                  <td>{r.pid}</td>
-                  <td>{r.name}</td>
-                  <td class={r.cls}>{r.text}</td>
-                  <td>{r.unit}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <hr />
+        <div>
+          <div class="label">Baro</div>
+          <b class={dim(q.baro)}>{round(v.baro)}</b>
         </div>
-      </details>
+        <hr />
+        <div>
+          <div class="label">Fuel</div>
+          <b class={dim(q.fuel)}>{n(v.fuel)}</b>
+        </div>
+        <hr />
+        <div>
+          <div class="label">Run time</div>
+          <b class={dim(q.runtime)} style="font-size:13px">{hhmmss(v.runtime)}</b>
+        </div>
+      </div>
+      <div class="hint">
+        Ambient echoes the intake sensor on this car; fuel level is not wired through.
+      </div>
+
+      <h2 class="sec">All values &mdash; current sample</h2>
+      {/* A row list, not a <table>. The table needed .tw to scroll sideways at phone
+          width, which put the one view that exists for checking a parameter behind a
+          horizontal swipe. Four fixed columns in a flex row fit 390px as they are. */}
+      <div class="card vt">
+        <div class="hd">
+          <span class="pid">PID</span>
+          <span class="par">Parameter</span>
+          <span class="uom">Unit</span>
+        </div>
+        {rows.map((r) => (
+          <div class="rw" key={r.key}>
+            <span class="pid">{r.pid}</span>
+            <span class="par">{r.name}</span>
+            {/* r.cls carries the held mark from rows.js, which is asserted there. */}
+            <span class={'rdg ' + r.cls}>{r.text}</span>
+            <span class="uom">{r.unit}</span>
+          </div>
+        ))}
+      </div>
     </>
   );
 }
