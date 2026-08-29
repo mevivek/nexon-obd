@@ -323,6 +323,51 @@ console.log('\ntrip totals');
      'but the interval clock is not, so a wake starts a fresh interval');
 }
 
+// ---------------------------------------------------------------- web flasher
+//
+// docs/flash/ is the front door: a stranger with a XIAO and a USB cable flashes from
+// Chrome without arduino-cli or a six-gigabyte core download. Everything about it is
+// a name that has to agree with something else - the asset build.sh writes, the
+// version in version.h, the chip the FQBN compiles for - and none of those agreements
+// is visible from the page, which just fails to flash and says nothing useful.
+console.log('\nweb flasher');
+{
+  const manifest = JSON.parse(readFileSync(join(here, '../../docs/flash/manifest.json'), 'utf8'));
+  const build = readSrc(join(here, '../build.sh'));
+  const page = readFileSync(join(here, '../../docs/flash/index.html'), 'utf8');
+
+  eq(manifest.version, fwVersion(), 'the manifest names the version in version.h');
+
+  const parts = (manifest.builds || []).flatMap(b => b.parts || []);
+  eq(parts.length, 1, 'one part: a merged image written at offset 0');
+  eq(parts[0].offset, 0, 'at offset 0, which is what a full-flash image needs');
+
+  // The manifest points at releases/latest/download/<asset> so the Install button
+  // keeps working across releases without a manifest bump. That only holds while the
+  // asset is named the same every time, which is build.sh's job.
+  const asset = parts[0].path.split('/').pop();
+  ok(build.includes(asset),
+     `build.sh produces the asset the manifest asks for (${asset})`);
+  ok(/releases\/latest\/download/.test(parts[0].path),
+     'and points at the latest release rather than a pinned one');
+
+  // The board is an ESP32-S3. A manifest naming a different family fails at the
+  // moment of flashing, on someone else's desk.
+  const fams = (manifest.builds || []).map(b => b.chipFamily);
+  ok(fams.includes('ESP32-S3'), `the manifest targets ESP32-S3 (${fams.join(', ')})`);
+  ok(/XIAO_ESP32S3/.test(build), 'which is the board build.sh compiles for');
+
+  // The page states the AP credentials. They are in the sketch, and a page that
+  // tells a stranger the wrong network name is a support request with no clue in it.
+  const ino = readSrc(join(here, '../Obdurate/Obdurate.ino'));
+  const ssid = (ino.match(/AP_SSID\s*=\s*"([^"]+)"/) || [, ''])[1];
+  const pass = (ino.match(/AP_PASS\s*=\s*"([^"]+)"/) || [, ''])[1];
+  ok(page.includes(ssid), `the page names the real AP SSID (${ssid})`);
+  ok(page.includes(pass), 'and the real placeholder password');
+  ok(pass.length >= 8, 'which is long enough for WPA2');
+  ok(/Change it/i.test(page), 'and tells them to change it');
+}
+
 // ---------------------------------------------------------------- stored state
 //
 // The NVS namespaces did not follow the rename to Obdurate, and must not. They are

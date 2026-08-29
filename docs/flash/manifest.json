@@ -1,0 +1,17 @@
+{
+  "name": "Obdurate",
+  "version": "1.12.0",
+  "funding_url": "https://github.com/mevivek/obdurate",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        {
+          "path": "https://github.com/mevivek/obdurate/releases/latest/download/Obdurate-merged.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

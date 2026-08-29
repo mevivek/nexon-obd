@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Flash Obdurate</title>
+<meta name="description" content="Install Obdurate on a XIAO ESP32S3 from your browser. A read-only black box for your car.">
+
+<!-- Palette lifted from the board's own stylesheet (firmware/Obdurate/ui_css.h), so
+     the install page and the thing it installs look like one product. -->
+<style>
+:root{
+--plane:#0b0b0c;--surface:#151517;--raised:#1d1d21;
+--ink:#f6f6f5;--ink2:#bab9b4;--muted:#86857f;
+--grid:#26262a;--ring:rgba(255,255,255,.08);
+--blue:#4b9bff;--good:#2fbf5f;--warning:#f5a623;--critical:#ef4b4b;
+color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;padding:0 0 64px;background:var(--plane);color:var(--ink);
+-webkit-font-smoothing:antialiased;
+font:400 16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:680px;margin:0 auto;padding:0 20px}
+header{padding:56px 0 8px}
+h1{margin:0;font-size:38px;font-weight:650;letter-spacing:-.02em}
+.def{margin:6px 0 0;color:var(--muted);font-size:14px;font-style:italic}
+.lede{margin:22px 0 0;font-size:19px;line-height:1.5;color:var(--ink)}
+.lede b{font-weight:650}
+h2{margin:40px 0 10px;font-size:12px;font-weight:650;text-transform:uppercase;
+letter-spacing:.09em;color:var(--muted)}
+p{margin:12px 0;color:var(--ink2)}
+a{color:var(--blue)}
+code{font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+background:var(--raised);border:1px solid var(--ring);border-radius:5px;padding:1px 5px}
+
+/* install ---------------------------------------------------------------- */
+.install{margin:32px 0 0;padding:24px;background:var(--surface);
+border:1px solid var(--ring);border-radius:14px}
+esp-web-install-button{--esp-tools-button-color:#0b0b0c;
+--esp-tools-button-text-color:#f6f6f5}
+.btn{display:inline-block;background:var(--blue);color:#06131f;font:650 16px/1 system-ui;
+border:0;border-radius:10px;padding:14px 22px;cursor:pointer}
+.unsupported{margin:0;color:var(--warning);font-size:14px}
+.after{margin:14px 0 0;font-size:14px;color:var(--muted)}
+
+/* facts ------------------------------------------------------------------ */
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+gap:10px;margin:28px 0 0;padding:0;list-style:none}
+.facts li{background:var(--surface);border:1px solid var(--ring);border-radius:12px;
+padding:13px 15px}
+.facts b{display:block;font-size:13px;color:var(--muted);font-weight:600;
+text-transform:uppercase;letter-spacing:.07em;margin-bottom:3px}
+.facts span{font-size:15px;color:var(--ink)}
+
+ol,ul{color:var(--ink2);padding-left:22px}
+li{margin:7px 0}
+
+.note{margin:28px 0 0;padding:15px 17px;background:var(--raised);
+border:1px solid var(--ring);border-left:3px solid var(--warning);border-radius:0 10px 10px 0;
+font-size:14px;color:var(--ink2)}
+.note b{color:var(--warning)}
+footer{margin:52px 0 0;padding-top:22px;border-top:1px solid var(--grid);
+font-size:14px;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Obdurate</h1>
+  <p class="def">ob·du·rate — adj. unyielding; refusing to be moved.</p>
+  <p class="lede">
+    <b>A read-only black box for your car.</b> It plugs into the OBD-II port and
+    stays there — recording every drive to onboard flash whether or not a phone is
+    connected, printing the sample rate it is actually achieving next to every
+    reading, and never writing anything back to the car.
+  </p>
+</header>
+
+<ul class="facts">
+  <li><b>Board</b><span>Seeed XIAO ESP32S3</span></li>
+  <li><b>Needs</b><span>A USB-C cable</span></li>
+  <li><b>Costs</b><span>Nothing. MIT licensed.</span></li>
+  <li><b>Sends home</b><span>Nothing. No account, no cloud.</span></li>
+</ul>
+
+<div class="install">
+  <esp-web-install-button manifest="manifest.json">
+    <button slot="activate" class="btn">Install Obdurate</button>
+    <p slot="unsupported" class="unsupported">
+      This browser cannot talk to serial ports. Use Chrome or Edge on a desktop —
+      Safari and Firefox have no Web Serial, and neither does any browser on iOS.
+    </p>
+    <p slot="not-allowed" class="unsupported">
+      Web Serial needs a secure page. Open this over <code>https://</code>.
+    </p>
+  </esp-web-install-button>
+  <p class="after">
+    Plug the board in first. If it does not appear, hold <b>BOOT</b>, tap
+    <b>RESET</b>, release <b>BOOT</b>, and try again.
+  </p>
+</div>
+
+<h2>Then</h2>
+<ol>
+  <li>Join the Wi-Fi network <code>Obdurate</code> — password <code>changeme1234</code>.
+      <b>Change it.</b> Anyone who can join can reflash the board.</li>
+  <li>Open <a href="http://192.168.4.1">http://192.168.4.1</a>.</li>
+  <li>Install the dashboard once with <code>web/deploy.sh</code>. Until you do, the
+      board serves a built-in fallback page with speed, rpm, coolant and battery —
+      and it records the drive either way.</li>
+</ol>
+
+<h2>What it does on its own</h2>
+<ul>
+  <li>Logs a CSV row a second to onboard flash, with empty cells where a value was
+      not read — so a gap stays a gap and never becomes a reading of nought.</li>
+  <li>Reads mode 06 on-board monitor results, which show how much room a monitor has
+      left rather than waiting for it to fail.</li>
+  <li>Sweeps UDS service <code>0x22</code> across the identifier space to find what
+      your ECU actually exposes. A full pass survives the ignition being switched
+      off and resumes where it stopped.</li>
+  <li>Shuts itself down below 11.8 V with the engine stopped, so it cannot flatten
+      the battery it is plugged into.</li>
+</ul>
+
+<h2>What it will not do</h2>
+<p>
+  It sends four services — <code>0x01</code>, <code>0x03</code>, <code>0x06</code>
+  and <code>0x22</code> — and every one of them is a read. Never
+  <code>0x2E</code> (write memory), <code>0x31</code> (run a routine),
+  <code>0x11</code> (reset an ECU), <code>0x10</code> (change session) or
+  <code>0x14</code> (clear the car's own record).
+</p>
+<p>
+  That is a test, not a promise. The build finds every request in the source, reads
+  its service byte, and fails if one is not on the list.
+</p>
+
+<div class="note">
+  <b>Developed against one car</b> — a 2022 Tata Nexon 1.2 petrol. The transports,
+  ISO-TP, the recorder and the scanner are generic; the PID list, ECU addresses and
+  warning thresholds are that car's, and on a different one some gauges will read
+  blank until they are changed in the source. Reading is safe regardless. If you try
+  it on another car, the measurements are the interesting part —
+  <a href="https://github.com/mevivek/obdurate/issues">open an issue</a>.
+</div>
+
+<div class="note">
+  <b>Flashing is destructive.</b> This writes a full image at offset 0 and erases
+  whatever was on the board, including any dashboard bundle already installed.
+</div>
+
+<footer>
+  <a href="https://github.com/mevivek/obdurate">Source, wiring and the full write-up on GitHub</a>
+  · MIT
+</footer>
+
+</div>
+
+<!-- esp-web-tools drives Web Serial and the ESP32 bootloader. Pinned to a major
+     version: this page is the first thing a stranger touches, and a silently
+     updated dependency that breaks flashing is invisible until someone reports it. -->
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+</body>
+</html>

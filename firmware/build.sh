@@ -77,6 +77,13 @@ echo "==> compiling v$VERSION"
 IMAGE="$OUT/Obdurate-v$VERSION.bin"
 cp "$OUT/Obdurate.ino.bin" "$IMAGE"
 
+# The full-flash image, under the stable name the web flasher's manifest asks for.
+# docs/flash/manifest.json points at a release asset rather than a versioned
+# filename, so the Install button keeps working across releases without the manifest
+# needing a bump - which means the asset has to be named the same every time.
+FULL="$OUT/Obdurate-merged.bin"
+cp "$OUT/Obdurate.ino.merged.bin" "$FULL"
+
 echo
 echo "OTA image: $IMAGE"
 ls -lh "$IMAGE"
@@ -87,6 +94,14 @@ echo "doubles as confirmation. The dashboard header shows the frontend bundle's 
 echo "version instead - the frontend split decoupled the two."
 echo "Obdurate.ino.merged.bin is a full-flash image for USB recovery - do NOT"
 echo "feed that one to /update, it is not an OTA app image."
+echo
+echo "For a release, attach BOTH, under exactly these names:"
+echo "  $IMAGE"
+echo "    the OTA app image - what /update takes over Wi-Fi"
+echo "  $FULL"
+echo "    the full-flash image - what docs/flash/ hands to a browser over USB."
+echo "    Its name is fixed because the flasher manifest points at"
+echo "    releases/latest/download/Obdurate-merged.bin and must not change per release."
 
 if [ "${1:-}" = "--upload" ]; then
   PORT="${PORT:-$(ls /dev/ttyACM* /dev/ttyUSB* /dev/cu.usbmodem* 2>/dev/null | head -1 || true)}"
