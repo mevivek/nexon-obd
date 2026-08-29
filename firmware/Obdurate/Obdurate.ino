@@ -38,6 +38,7 @@
 #include "ui_fs.h"
 #include "triplog.h"
 #include "didmap.h"
+#include "datafiles.h"
 #include <Update.h>
 #include "boot_html.h"
 #include "ui_html.h"
@@ -1499,6 +1500,169 @@ static void handleTime() {
 // live, and whether the car is actually talking. "Armed but the ECU is silent" is a
 // perfectly ordinary state - you start it on the driveway and it begins when you turn
 // the key - but it has to be distinguishable from working.
+// ---------------------------------------------------------------- data files
+//
+// A backup is assembled in the browser, not here. The board has one thread and is
+// polling a car while it serves you, and it already takes that position for the
+// DID export: the page fetches what it needs and does the work. So these three are
+// the smallest surface that lets a browser take everything off, put it back, and
+// clear it - a list, a reader, a writer.
+
+static void handleFileList() {
+  if (!tripFsUp) { server.send(503, "application/json", "{\"ok\":false}"); return; }
+  String s = "{\"ok\":true,\"files\":[";
+  File dir = LittleFS.open("/");
+  bool first = true;
+  if (dir && dir.isDirectory()) {
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+      if (f.isDirectory()) continue;
+      char full[40];
+      const char *nm = f.name();
+      snprintf(full, sizeof(full), "%s%s", (nm && nm[0] == 47) ? "" : "/", nm ? nm : "");
+      if (!dataIsFileName(full)) continue;
+      if (!first) s += ",";
+      first = false;
+      s += "{\"name\":\""; s += full;
+      s += "\",\"size\":"; s += f.size();
+      s += "}";
+    }
+    dir.close();
+  }
+  s += "],\"free\":";
+  s += (uint32_t)(LittleFS.totalBytes() - LittleFS.usedBytes());
+  s += ",\"total\":";
+  s += (uint32_t)LittleFS.totalBytes();
+  s += "}";
+  server.send(200, "application/json", s);
+}
+
+// Streamed, never read into a String: a trip log is tens of kilobytes against a
+// heap that has to keep a web server and a bus running.
+static void handleFileGet() {
+  String n = server.arg("f");
+  if (!dataIsFileName(n.c_str()) || !LittleFS.exists(n)) {
+    server.send(404, "text/plain", "no such file");
+    return;
+  }
+  File f = LittleFS.open(n, FILE_READ);
+  if (!f) { server.send(500, "text/plain", "open failed"); return; }
+  server.sendHeader("Content-Disposition",
+                    "attachment; filename=\"" + n.substring(1) + "\"");
+  server.streamFile(f, "text/csv");
+  f.close();
+}
+
+// Restore. One file per request, same as the bundle upload and for the same
+// reason: a single-threaded server and a modest heap are how a multi-file upload
+// fails halfway.
+static File dataUpFile;
+static bool dataUpOpen = false;
+static const char *dataUpErr = nullptr;
+static size_t dataUpWrote = 0;
+
+static void handleDataUpload() {
+  HTTPUpload &up = server.upload();
+
+  if (up.status == UPLOAD_FILE_START) {
+    dataUpOpen = false; dataUpWrote = 0; dataUpErr = nullptr;
+    String n = up.filename;
+    if (n.length() && n[0] != 47) n = "/" + n;
+    // The same allowlist a download obeys. A restore is a write, so it is the one
+    // place a bad name would do lasting damage rather than return a 404.
+    if (!dataIsFileName(n.c_str())) { dataUpErr = "not a data file"; return; }
+    if (!tripFsUp) { dataUpErr = "filesystem unavailable"; return; }
+    dataUpFile = LittleFS.open(n, FILE_WRITE);
+    if (!dataUpFile) { dataUpErr = "open failed"; return; }
+    dataUpOpen = true;
+    Serial.printf("[data] restoring %s\n", n.c_str());
+    return;
+  }
+
+  if (up.status == UPLOAD_FILE_WRITE && dataUpOpen) {
+    // A short write is the partition filling up mid-restore. Stop rather than
+    // leaving a file that is half of somebody else's backup.
+    if (dataUpFile.write(up.buf, up.currentSize) != up.currentSize) {
+      dataUpErr = "write failed - partition full?";
+      dataUpFile.close();
+      dataUpOpen = false;
+      return;
+    }
+    dataUpWrote += up.currentSize;
+    return;
+  }
+
+  if (up.status == UPLOAD_FILE_END && dataUpOpen) {
+    dataUpFile.close();
+    dataUpOpen = false;
+  }
+}
+
+static void handleDataUploadDone() {
+  String s = "{\"ok\":";
+  s += dataUpErr ? "false" : "true";
+  if (dataUpErr) { s += ",\"error\":\""; s += dataUpErr; s += "\""; }
+  s += ",\"wrote\":"; s += (uint32_t)dataUpWrote;
+  // A restored register and hit list are only in RAM after a reboot, so say so
+  // rather than letting the page show a stale in-memory copy as the new truth.
+  s += ",\"reboot\":true}";
+  server.send(dataUpErr ? 400 : 200, "application/json", s);
+}
+
+// Reset. Destructive, and the two scopes differ by whether the page that pressed
+// the button survives - see datafiles.h.
+static void handleReset() {
+  bool all = server.arg("scope") == "all";
+  if (server.arg("confirm") != "yes") {
+    server.send(400, "application/json",
+                "{\"ok\":false,\"error\":\"needs confirm=yes\"}");
+    return;
+  }
+
+  // Stop everything that writes before deleting what it writes to, or a running
+  // sweep re-creates the hit file a moment after it is removed.
+  triageSetOn(false);
+  scan.running = false;
+  tripClose();
+
+  uint16_t files = 0;
+  File dir = LittleFS.open("/");
+  String doomed[64];
+  uint8_t n = 0;
+  if (dir && dir.isDirectory()) {
+    for (File f = dir.openNextFile(); f && n < 64; f = dir.openNextFile()) {
+      if (f.isDirectory()) continue;
+      const char *nm = f.name();
+      char full[40];
+      snprintf(full, sizeof(full), "%s%s", (nm && nm[0] == 47) ? "" : "/", nm ? nm : "");
+      if (dataIsFileName(full)) doomed[n++] = String(full);
+    }
+    dir.close();
+  }
+  for (uint8_t i = 0; i < n; i++) if (LittleFS.remove(doomed[i])) files++;
+
+  for (uint8_t i = 0; i < RESET_NVS_N; i++) {
+    Preferences pr;
+    if (pr.begin(RESET_NVS[i], false)) { pr.clear(); pr.end(); }
+  }
+
+  if (all) uiClear();
+
+  Serial.printf("[reset] %u files, %u namespaces%s\n", files, RESET_NVS_N,
+                all ? ", and the dashboard bundle" : "");
+
+  String s = "{\"ok\":true,\"files\":";
+  s += files;
+  s += ",\"bundle\":";
+  s += all ? "true" : "false";
+  s += "}";
+  server.send(200, "application/json", s);
+
+  // Reboot rather than carry on with the register, hit list and history still in
+  // RAM describing files that no longer exist. The reply is already sent.
+  delay(250);
+  ESP.restart();
+}
+
 static void handleTriageStart() {
   if (!didMapN) {
     server.send(409, "application/json",
@@ -2236,6 +2400,10 @@ void setup() {
   server.on("/ui/clear",    handleUiClear);
   server.on("/ui/upload", HTTP_POST, handleUiUploadDone, handleUiUpload);
   server.onNotFound(handleNotFound);
+  server.on("/reset",  handleReset);
+  server.on("/file/put", HTTP_POST, handleDataUploadDone, handleDataUpload);
+  server.on("/files",  handleFileList);
+  server.on("/file",   handleFileGet);
   server.on("/triage/start", handleTriageStart);
   server.on("/triage/stop",  handleTriageStop);
   server.on("/didmap",       handleDidMap);
