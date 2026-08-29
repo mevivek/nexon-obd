@@ -22,10 +22,9 @@ table.files td:last-child{text-align:right;font-variant-numeric:tabular-nums}
 </style></head><body>
 
 <header>
-<div class="bar"><h1>Frontend</h1>
-<span class="sub">v)rawliteral" FW_VERSION R"rawliteral( &middot; bundle</span>
+<div class="bar"><div class="id"><h1>Frontend</h1>
+<span class="sub">v)rawliteral" FW_VERSION R"rawliteral( &middot; bundle</span></div>
 <div class="status"><span class="dot" id="dot"></span><span id="state">reading&hellip;</span></div></div>
-<nav><a href="/">Live</a><a href="/monitors">Monitors</a><a href="/trips">Trips</a><a href="/watch">Watch</a><a href="/scan">Scanner</a><a href="/update">Firmware</a></nav>
 </header>
 
 <div class="wrap">
@@ -65,6 +64,18 @@ built into the firmware, so this never leaves the board without a dashboard.</di
 </div>
 
 </div>
+
+<!-- The full six, in the order the bundle uses them. web/src/lib/routes.test.js
+     reads this block and asserts the labels and hrefs against ROUTES, so a tab
+     that moves here has to move there in the same change. -->
+<nav>
+<a href="/"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.2 17a9 9 0 1 1 15.6 0"/><path d="M12 13.5 16 9"/></svg><span>Live</span></a>
+<a href="/monitors"><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="3,13 7,13 9.5,6.5 14,18 16.5,13 21,13"/></svg><span>Monitors</span></a>
+<a href="/trips"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="6" r="2.4"/><path d="M8.4 18h5.1a4 4 0 0 0 0-8H10a4 4 0 0 1 0-8h.5"/></svg><span>Trips</span></a>
+<a href="/watch"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.4"/></svg><span>Watch</span></a>
+<a href="/scan"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M16.2 16.2 21 21"/></svg><span>Scanner</span></a>
+<a href="/update"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2.2"/><path d="M10 4v3M14 4v3M10 17v3M14 17v3M4 10h3M4 14h3M17 10h3M17 14h3"/></svg><span>Firmware</span></a>
+</nav>
 
 <script>
 const $=i=>document.getElementById(i);

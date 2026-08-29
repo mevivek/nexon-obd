@@ -64,6 +64,42 @@ export function tripDelHref(name) {
   return '/trips/del?f=' + encodeURIComponent(name);
 }
 
+/**
+ * Hash path for one trip's detail view.
+ *
+ * A sub-route of /trips rather than a seventh entry in ROUTES: the detail view is a
+ * screen you arrive at from the list, not a tab you switch to, and the tab bar is
+ * asserted to be exactly six wide. The name rides in a query string for the same
+ * reason it does on the two URLs above — it is a filename, and escaping it once,
+ * the same way, everywhere, is how it stays one thing.
+ */
+export const TRIP_DETAIL = '/trips/detail';
+
+export function tripDetailPath(name) {
+  return TRIP_DETAIL + '?f=' + encodeURIComponent(name);
+}
+
+/**
+ * The trip a detail path names, or null if the path is not one.
+ *
+ * Returns null rather than throwing on a malformed hash: these arrive from the
+ * address bar and from stale bookmarks as often as from the list, and an unreadable
+ * one should land you back on the trips list, not on a blank screen.
+ */
+export function tripFromPath(path) {
+  const s = String(path || '');
+  if (s !== TRIP_DETAIL && !s.startsWith(TRIP_DETAIL + '?')) return null;
+  const q = s.slice(TRIP_DETAIL.length + 1);
+  for (const part of q.split('&')) {
+    const eq = part.indexOf('=');
+    if (eq > 0 && part.slice(0, eq) === 'f') {
+      const name = decodeURIComponent(part.slice(eq + 1));
+      return name || null;
+    }
+  }
+  return null;
+}
+
 /** Deleting a drive is not undoable, and the prompt says which drive. */
 export function confirmText(name) {
   return 'Delete ' + tripLabel(name) + '? This cannot be undone.';

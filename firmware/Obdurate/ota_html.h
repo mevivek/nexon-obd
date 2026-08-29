@@ -13,23 +13,19 @@ R"rawliteral(<!doctype html>
 <title>Firmware Update</title>
 <link rel="stylesheet" href="/ui.css?v=)rawliteral" FW_VERSION R"rawliteral(">
 <style>
-#go{width:100%;margin-top:4px}
-.drop{border:1px dashed var(--base);border-radius:10px;padding:14px;text-align:center;
-color:var(--ink2);font-size:14px}
-.drop b{display:block;color:var(--ink);font-weight:650;margin-bottom:3px}
+#go{width:100%;margin-top:10px}
 </style></head><body>
 
 <header>
-<div class="bar"><h1>Firmware Update</h1>
-<span class="sub">running v)rawliteral" FW_VERSION R"rawliteral(</span></div>
-<nav><a href="/">Live</a><a href="/monitors">Monitors</a><a href="/trips">Trips</a><a href="/watch">Watch</a><a href="/scan">Scanner</a><a class="on" href="/update">Firmware</a></nav>
+<div class="bar"><div class="id"><h1>Firmware Update</h1>
+<span class="sub">running v)rawliteral" FW_VERSION R"rawliteral(</span></div></div>
 </header>
 
 <div class="wrap">
 
 <div class="card">
-<div class="drop"><b>Upload a compiled .bin</b>
-The board reboots automatically once the write verifies.</div>
+<div class="drop"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 20h16"/></svg>
+<div><b>Upload a compiled .bin</b>The board reboots automatically once the write verifies.</div></div>
 <input type="file" id="f" accept=".bin">
 <button id="go" disabled>Upload &amp; flash</button>
 <div class="bar2"><i id="p"></i></div>
@@ -44,14 +40,24 @@ then upload <code>firmware/build/Obdurate-v&lt;version&gt;.bin</code>.<br><br>
 That is the app image. <code>Obdurate.ino.merged.bin</code> sitting next to it is a
 full-flash image for USB recovery and will not work here.<br><br>
 The version above updates when the new image boots, so it doubles as confirmation
-that the flash took.<br><br>
-<b style="color:var(--ink2)">Do not close this page or leave the Wi-Fi network while it uploads.</b>
-A failed write leaves the previous firmware intact &mdash; the ESP32 only switches over
-after the new image verifies &mdash; but an interrupted upload means starting again.
+that the flash took.
 </div>
+<div class="caution"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+<div>Stay on this page and on the NexonOBD network until it finishes. A failed write
+leaves the previous firmware intact &mdash; the ESP32 only switches over after the new
+image verifies &mdash; but an interrupted upload means starting again.</div></div>
 </div>
 
 </div>
+
+<nav>
+<a href="/"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.2 17a9 9 0 1 1 15.6 0"/><path d="M12 13.5 16 9"/></svg><span>Live</span></a>
+<a href="/monitors"><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="3,13 7,13 9.5,6.5 14,18 16.5,13 21,13"/></svg><span>Monitors</span></a>
+<a href="/trips"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="6" r="2.4"/><path d="M8.4 18h5.1a4 4 0 0 0 0-8H10a4 4 0 0 1 0-8h.5"/></svg><span>Trips</span></a>
+<a href="/watch"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.4"/></svg><span>Watch</span></a>
+<a href="/scan"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M16.2 16.2 21 21"/></svg><span>Scanner</span></a>
+<a class="on" href="/update"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2.2"/><path d="M10 4v3M14 4v3M10 17v3M14 17v3M4 10h3M4 14h3M17 10h3M17 14h3"/></svg><span>Firmware</span></a>
+</nav>
 
 <script>
 // The board has no clock of its own. Whichever page you open hands over the

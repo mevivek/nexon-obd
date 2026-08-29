@@ -21,7 +21,8 @@ import { DASH, n, round, signed, boostText, hhmmss } from '../lib/format.js';
 import { boost as deriveBoost, torqueNm } from '../lib/derive.js';
 
 import { Spark } from './live/Spark.jsx';
-import { dialPaths, rpmFraction } from './live/dial.js';
+import { dialPaths, rpmFraction, VIEW } from './live/dial.js';
+import { boostBar, ZERO_AT } from './live/zero.js';
 import { rowCells } from './live/rows.js';
 import { emptyHistory, seedHistory, pushHist, isFreshSlot } from './live/hist.js';
 import { nextStatus, scanInfo, POLL_MS, DATA_URL, HISTORY_URL } from './live/status.js';
@@ -211,6 +212,8 @@ export function Live() {
   const flags = computeFlags(v, q);
   const mil = computeMileage(v, q);
   const dial = dialPaths(rpmFraction(v.rpm));
+  // null rather than a zero-width bar when boost is missing - see zero.js.
+  const bar = boostBar(v.boost);
   const rows = rowCells(v, q);
   const h = hist.current;
 
@@ -241,30 +244,43 @@ export function Live() {
         </div>
       )}
 
-      <div class="glance">
-        <div class="tile hero">
-          <div class="label">Vehicle speed</div>
-          <div class="value">
-            <span class={dim(q.speed)}>{round(v.speed)}</span>
-            <span class="unit">km/h</span>
-          </div>
-          <Spark data={h.speed} color="var(--aqua)" zero label="Vehicle speed, recent history" />
-        </div>
-
-        <div class="tile">
-          <div class="label">Engine speed</div>
-          <div class="dial">
-            <svg width="116" height="116" viewBox="0 0 128 128" aria-hidden="true">
-              <path d={dial.track} fill="none" stroke="var(--base)" stroke-width="9" stroke-linecap="round" />
-              <path d={dial.value} fill="none" stroke="var(--blue)" stroke-width="9" stroke-linecap="round" />
-            </svg>
-            <div class="gv">
-              <span class={dim(q.rpm)}>{round(v.rpm)}</span>
-              <span class="unit">rpm</span>
+      {/* The instrument. One gauge instead of two: rpm sweeps the arc, speed is the
+          figure it arcs over. The numeral sits low inside the sweep, where the inner
+          circle is widest — pinned near the crown it grazes the stroke at any speed
+          needing three digits. */}
+      <div class="tile">
+        <div class="sweep">
+          <svg viewBox={`0 0 ${VIEW.w} ${VIEW.h}`} aria-hidden="true">
+            <path d={dial.track} fill="none" stroke="var(--base)" stroke-width="13" stroke-linecap="round" />
+            {/* Under the value and over the track: the band says where the reading is
+                heading, and the reading covers it once it gets there. */}
+            <path d={dial.redline} fill="none" stroke="rgba(255,93,108,.45)" stroke-width="13" stroke-linecap="round" />
+            <path d={dial.value} fill="none" stroke="var(--blue)" stroke-width="13" stroke-linecap="round" />
+          </svg>
+          <div class="gv">
+            <div class="kmh">
+              <b class={dim(q.speed)}>{round(v.speed)}</b>
+              <span>km/h</span>
+            </div>
+            <div class="rev">
+              <em class={dim(q.rpm)} style="font-style:normal">{round(v.rpm)}</em>
+              <span>rpm</span>
             </div>
           </div>
-          <Flag f={flags.rpm} />
-          <Spark data={h.rpm} color="var(--blue)" zero label="Engine speed, recent history" />
+        </div>
+        <Flag f={flags.rpm} />
+        {/* Both traces keep a home. They share the foot of the plate rather than
+            each taking a tile of their own, which is what the old two-up glance
+            spent most of the screen on. */}
+        <div class="feet">
+          <div>
+            <div class="label">Speed</div>
+            <Spark data={h.speed} color="var(--aqua)" zero label="Vehicle speed, recent history" />
+          </div>
+          <div>
+            <div class="label">Engine speed</div>
+            <Spark data={h.rpm} color="var(--blue)" zero label="Engine speed, recent history" />
+          </div>
         </div>
       </div>
 
@@ -275,7 +291,17 @@ export function Live() {
             <span class={dim(q.boost)}>{boostText(v.boost)}</span>
             <span class="unit">bar</span>
           </div>
-          <div class="note">MAP <span class={dim(q.map)}>{round(v.map)}</span> kPa</div>
+          {/* Centre-zero: which side of atmospheric you are on is the only thing
+              the number is for, and a bare figure does not say. */}
+          <div class="zero">
+            {bar ? <u style={`left:${bar.left}%;width:${bar.width}%`} /> : null}
+            <i style={`left:${ZERO_AT * 100}%`} />
+          </div>
+          <div class="ends">
+            <span>vac</span>
+            <span>MAP <span class={dim(q.map)}>{round(v.map)}</span> kPa</span>
+            <span>boost</span>
+          </div>
           <Spark data={h.boost} color="var(--orange)" label="Boost, recent history" />
         </div>
 

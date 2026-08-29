@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   hms, ratePerSec, rateText, etaText, percent, progressText, scanStatus, spacedHex,
-  hitsCsv, CSV_NAME,
+  hitsCsv, CSV_NAME, ECUS,
 } from './scan.js';
 import { parseCsv } from '../watch/hits.js';
 import { DASH } from '../../lib/format.js';
@@ -152,5 +152,23 @@ describe('did_hits.csv', () => {
   it('is a header and nothing else when there is nothing to export', () => {
     expect(hitsCsv([])).toBe('ecu,did,len,hex,ascii');
     expect(parseCsv(hitsCsv([]))).toEqual([]);
+  });
+});
+
+describe('the ECU table', () => {
+  it('keeps the ids the firmware indexes by', () => {
+    // ?ecu= is an index into the firmware's own request/response address pairs, so
+    // the position is the protocol, not a label. Swapped, a sweep would read the
+    // transmission while the page said engine — and every identifier it found would
+    // be filed against the wrong module.
+    expect(ECUS.map((e) => e.id)).toEqual(['0', '1']);
+    expect(ECUS.map((e) => e.name)).toEqual(['ECM', 'TCM']);
+  });
+
+  it('names the addresses each one answers on', () => {
+    // The thing you check before starting a sweep, and the reason both are on
+    // screen at once rather than one behind a dropdown.
+    expect(ECUS[0].addr).toBe('7E0 / 7E8');
+    expect(ECUS[1].addr).toBe('7E1 / 7E9');
   });
 });

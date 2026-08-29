@@ -11,6 +11,7 @@
 import { useState, useRef, useEffect } from 'preact/hooks';
 import { useClockSync } from './useClockSync.js';
 import { useShellStatus } from '../shell.jsx';
+import { IconUpload, IconAlert } from '../icons.jsx';
 import { OTA_MSG, otaFailText, otaOk, progressPct, uploadingText } from './firmware/ota.js';
 
 export function Firmware() {
@@ -101,8 +102,11 @@ export function Firmware() {
     <>
       <div class="card">
         <div class="drop">
-          <b>Upload a compiled .bin</b>
-          The board reboots automatically once the write verifies.
+          <IconUpload />
+          <div>
+            <b>Upload a compiled .bin</b>
+            The board reboots automatically once the write verifies.
+          </div>
         </div>
         <input type="file" accept=".bin" onChange={pick} />
         <button id="go" disabled={!file || phase !== 'idle'} onClick={upload}>
@@ -120,11 +124,19 @@ export function Firmware() {
           That is the app image. <code>Obdurate.ino.merged.bin</code> sitting next to
           it is a full-flash image for USB recovery and will not work here.<br /><br />
           The version above updates when the new image boots, so it doubles as
-          confirmation that the flash took.<br /><br />
-          <b style="color:var(--ink2)">Do not close this page or leave the Wi-Fi network while it uploads.</b>{' '}
-          A failed write leaves the previous firmware intact &mdash; the ESP32 only
-          switches over after the new image verifies &mdash; but an interrupted upload
-          means starting again.
+          confirmation that the flash took.
+        </div>
+        {/* Out of the hint block and into its own plate. This was the last sentence
+            of a grey paragraph — which is where it was least likely to be read, and
+            it is the one instruction on the page that cannot be undone by waiting. */}
+        <div class="caution">
+          <IconAlert />
+          <div>
+            Stay on this page and on the NexonOBD network until it finishes. A failed
+            write leaves the previous firmware intact &mdash; the ESP32 only switches
+            over after the new image verifies &mdash; but an interrupted upload means
+            starting again.
+          </div>
         </div>
       </div>
     </>

@@ -17,7 +17,7 @@ import { useShellStatus } from '../shell.jsx';
 import { DASH } from '../lib/format.js';
 import {
   ratePerSec, rateText, etaText, percent, progressText, scanStatus, spacedHex,
-  hitsCsv, CSV_NAME,
+  hitsCsv, CSV_NAME, ECUS,
 } from './scanner/scan.js';
 
 // A running sweep is watched; an idle board is left alone. The interval used to be
@@ -102,15 +102,22 @@ export function Scanner() {
   return (
     <>
       <div class="card scan">
-        <div class="row">
-          <div>
-            <label for="ecu">ECU</label>
-            <select id="ecu" value={ecu} disabled={running}
-                    onChange={(e) => setEcu(e.currentTarget.value)}>
-              <option value="0">ECM &mdash; engine (7E0/7E8)</option>
-              <option value="1">TCM &mdash; transmission (7E1/7E9)</option>
-            </select>
-          </div>
+        {/* There are two ECUs, so a dropdown is the wrong control: it hides one of
+            the two choices behind a tap and brings the platform's own chrome with
+            it. Both are shown, with the addresses they answer on — which is the
+            part you actually check before starting a sweep. */}
+        <label>ECU</label>
+        <div class="seg">
+          {ECUS.map((e) => (
+            <button key={e.id} type="button" class={ecu === e.id ? 'on' : ''}
+                    disabled={running} aria-pressed={ecu === e.id}
+                    onClick={() => setEcu(e.id)}>
+              {e.name}<small>{e.addr}</small>
+            </button>
+          ))}
+        </div>
+
+        <div class="row" style="margin-top:10px">
           <div>
             <label for="from">From</label>
             <input type="text" id="from" value={from} disabled={running}

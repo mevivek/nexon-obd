@@ -8,8 +8,9 @@ import { describe, it, expect } from 'vitest';
 import { DASH } from '../../lib/format.js';
 import {
   confirmText, kb, sortTrips, storageText, tripDelHref, tripHref, tripLabel,
-  tripStatus, usedPct, TRIP_POLL_MS,
+  tripStatus, usedPct, TRIP_POLL_MS, TRIP_DETAIL, tripDetailPath, tripFromPath,
 } from './trips.js';
+import { ROUTES } from '../../routes.js';
 
 describe('byte counts', () => {
   it('shows files in KB and the partition in MB', () => {
@@ -119,5 +120,40 @@ describe('status line', () => {
 describe('polling', () => {
   it('re-reads on the firmware page\'s interval', () => {
     expect(TRIP_POLL_MS).toBe(4000);
+  });
+});
+
+describe('the detail sub-route', () => {
+  it('round-trips a filename through the hash', () => {
+    expect(tripFromPath(tripDetailPath('/t0029.csv'))).toBe('/t0029.csv');
+  });
+
+  it('escapes the name exactly as the download URL does', () => {
+    // One filename, one escaping. If these ever disagree, a trip you can open is a
+    // trip you cannot download, and the mismatch shows up only on the odd name.
+    const name = '/t 29&30.csv';
+    expect(tripDetailPath(name)).toContain(encodeURIComponent(name));
+    expect(tripHref(name)).toContain(encodeURIComponent(name));
+  });
+
+  it('is not a tab', () => {
+    // ROUTES stays six wide; the detail view hangs off /trips instead. If this ever
+    // becomes a route, the nav assertion above starts failing, which is the point.
+    expect(ROUTES.some((r) => r.path === TRIP_DETAIL)).toBe(false);
+    expect(TRIP_DETAIL.startsWith('/trips')).toBe(true);
+  });
+
+  it('reads nothing out of a path that is not a detail path', () => {
+    for (const p of ['/trips', '/', '/trips/other?f=x', '', null, undefined]) {
+      expect(tripFromPath(p)).toBe(null);
+    }
+  });
+
+  it('returns null for a malformed or empty name rather than throwing', () => {
+    // These arrive from the address bar and from stale bookmarks, not only from the
+    // list. An unreadable one has to land somewhere, and a blank screen is not it.
+    expect(tripFromPath('/trips/detail')).toBe(null);
+    expect(tripFromPath('/trips/detail?f=')).toBe(null);
+    expect(tripFromPath('/trips/detail?g=x')).toBe(null);
   });
 });

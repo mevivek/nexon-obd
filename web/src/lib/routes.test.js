@@ -9,6 +9,14 @@
 // This reads the firmware page rather than a copy of it, the same way
 // firmware/test/test_dashboard.mjs asserts against page source. It skips itself,
 // without failing, if web/ is ever built outside the firmware repo.
+//
+// It used to read dashboard_html.h, which was deleted when the SPA replaced the
+// compiled pages — so existsSync was false, the comparison below returned without
+// comparing anything, and the check silently stopped running. It now reads the nav
+// that is actually still shipped in flash, in ui_html.h. The escape hatch stays,
+// but it is for a standalone checkout, not for a file that is simply gone: if the
+// path stops resolving inside this repo the check has to be repointed again, not
+// left to skip.
 
 import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
@@ -17,7 +25,7 @@ import { dirname, join } from 'node:path';
 import { ROUTES } from '../routes.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const DASHBOARD = join(here, '../../../firmware/Obdurate/dashboard_html.h');
+const FW_PAGE = join(here, '../../../firmware/Obdurate/ui_html.h');
 
 describe('nav', () => {
   it('has the six tabs in order', () => {
@@ -25,15 +33,21 @@ describe('nav', () => {
       ['Live', 'Monitors', 'Trips', 'Watch', 'Scanner', 'Firmware']);
   });
 
-  it('matches the firmware dashboard\'s nav', () => {
-    if (!existsSync(DASHBOARD)) {
+  it('matches the nav still shipped in flash', () => {
+    if (!existsSync(FW_PAGE)) {
       // Built standalone; the check above still pins the list.
       return;
     }
-    const src = readFileSync(DASHBOARD, 'utf8');
+    const src = readFileSync(FW_PAGE, 'utf8');
     const nav = (src.match(/<nav>([\s\S]*?)<\/nav>/) || [, ''])[1];
-    const tabs = [...nav.matchAll(/href="([^"]*)"[^>]*>([^<]*)</g)]
-      .map(([, href, label]) => ({ href, label }));
+    // Each tab is an icon and a label now, not a bare text node, so the label is
+    // read out of its <span> rather than off the front of the anchor. Matching the
+    // whole anchor first keeps one tab's href from pairing with the next one's
+    // label if a page ever ships a nav item without a label at all.
+    const tabs = [...nav.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/g)].map(([, attrs, inner]) => ({
+      href: (attrs.match(/href="([^"]*)"/) || [, ''])[1],
+      label: (inner.match(/<span>([^<]*)<\/span>/) || [, ''])[1],
+    }));
 
     expect(tabs.length, 'the firmware nav was parsed').toBe(6);
     expect(tabs.map((t) => t.label)).toEqual(ROUTES.map((r) => r.label));

@@ -12,6 +12,20 @@ import { DASH } from '../../lib/format.js';
 export const CSV_NAME = 'did_hits.csv';
 
 /**
+ * The ECUs a sweep can be pointed at.
+ *
+ * `id` is what goes into `?ecu=` and is the firmware's index into its own request/
+ * response address pair, so these are not labels that can be reordered freely — the
+ * position is the protocol. Named here rather than inline in the page so the ids
+ * can be asserted, because getting them the wrong way round would sweep the
+ * transmission while telling you it was sweeping the engine.
+ */
+export const ECUS = [
+  { id: '0', name: 'ECM', addr: '7E0 / 7E8', of: 'engine' },
+  { id: '1', name: 'TCM', addr: '7E1 / 7E9', of: 'transmission' },
+];
+
+/**
  * Coarse duration, ported verbatim from `hms()`.
  *
  * Deliberately one unit past the first: a sweep that has 14 hours left is 14 hours

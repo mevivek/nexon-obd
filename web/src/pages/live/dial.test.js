@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { arc, dialPaths, rpmFraction, DIAL, RPM_FULL } from './dial.js';
+import { arc, dialPaths, rpmFraction, DIAL, VIEW, RPM_FULL, REDLINE_FRACTION } from './dial.js';
+import { T } from '../../lib/flags.js';
 
 const nums = (d) => d.match(/-?\d+(\.\d+)?/g).map(Number);
 
@@ -48,19 +49,50 @@ describe('rpm dial', () => {
     expect(long.split(' ')[7]).toBe('1');
   });
 
-  it('starts at the bottom left of the box', () => {
-    const [x0, y0] = nums(arc(64, 64, 52, DIAL.start, DIAL.start + DIAL.sweep));
-    expect(x0).toBeLessThan(64);
-    expect(y0).toBeGreaterThan(64);
+  it('starts due left of the centre and ends due right of it', () => {
+    // The 270° dial started below the centre, at bottom-left. The sweep is a half
+    // turn, so both ends sit on the centre line with the arc over the top — and the
+    // whole gauge lives in the top half of its box, which is what lets the speed
+    // numeral sit inside it without fouling the stroke.
+    const n = nums(arc(DIAL.cx, DIAL.cy, DIAL.r, DIAL.start, DIAL.start + DIAL.sweep));
+    const [x0, y0] = [n[0], n[1]];
+    const [x1, y1] = [n[n.length - 2], n[n.length - 1]];
+    expect(x0).toBeCloseTo(DIAL.cx - DIAL.r, 1);
+    expect(y0).toBeCloseTo(DIAL.cy, 1);
+    expect(x1).toBeCloseTo(DIAL.cx + DIAL.r, 1);
+    expect(y1).toBeCloseTo(DIAL.cy, 1);
   });
 
-  it('half scale ends at the top of the dial', () => {
-    // 135° + 135° = 270°, straight up in SVG's y-down space.
+  it('fits the viewBox it is drawn for', () => {
+    // The arc's top is cy - r; anything above the box would be clipped, and any
+    // slack below the ends is dead space under the numeral.
+    expect(DIAL.cy - DIAL.r).toBeGreaterThanOrEqual(0);
+    expect(DIAL.cx + DIAL.r).toBeLessThanOrEqual(VIEW.w);
+    expect(DIAL.cy).toBeLessThanOrEqual(VIEW.h);
+  });
+
+  it('half scale ends at the top of the gauge', () => {
+    // 180° + 90° = 270°, straight up in SVG's y-down space.
     const p = dialPaths(0.5).value;
     const n = nums(p);
     const [x1, y1] = [n[n.length - 2], n[n.length - 1]];
     expect(x1).toBeCloseTo(DIAL.cx, 1);
     expect(y1).toBeCloseTo(DIAL.cy - DIAL.r, 1);
+  });
+
+  it('the redline band covers exactly the top of the range', () => {
+    // It has to start where flags.js starts warning, or the band and the warning
+    // disagree about where the redline is — and the band is the one you see first.
+    expect(REDLINE_FRACTION).toBeCloseTo(T.RPM_REDLINE / RPM_FULL, 6);
+    const band = dialPaths(0).redline;
+    const full = dialPaths(1);
+    const bn = nums(band), fn = nums(full.value);
+    // Ends with the track, starts short of it.
+    expect(bn[bn.length - 2]).toBeCloseTo(fn[fn.length - 2], 1);
+    expect(bn[bn.length - 1]).toBeCloseTo(fn[fn.length - 1], 1);
+    expect(bn[0]).toBeGreaterThan(DIAL.cx);
+    // Drawn whatever the reading is, including none: it is the scale, not a value.
+    expect(dialPaths(null).redline).toBe(band);
   });
 
   it('full scale is above the redline flag', () => {

@@ -13,23 +13,35 @@ import { useClockSync } from './useClockSync.js';
 import { useShellStatus } from '../shell.jsx';
 import {
   TRIP_POLL_MS, confirmText, kb, sortTrips, storageText,
-  tripDelHref, tripHref, tripLabel, tripStatus, usedPct,
+  tripDelHref, tripHref, tripLabel, tripStatus, usedPct, tripDetailPath,
 } from './trips/trips.js';
+import { IconDownload, IconTrash } from '../icons.jsx';
 
 function Trip({ f, live, onDelete }) {
+  const label = tripLabel(f.name);
   return (
     <div class="card">
       <div class="row2">
-        <div class="grow">
+        {/* The name is the way in to the drive itself. Download and delete stay as
+            their own targets so opening a trip and destroying one are never the
+            same gesture with a different aim. */}
+        <a class="grow" href={'#' + tripDetailPath(f.name)}>
           <div class="nm">
-            {tripLabel(f.name)}
+            {label}
             {f.name === live && <span class="live"> &middot; recording</span>}
           </div>
           <div class="sz">{kb(f.size)}</div>
-        </div>
+        </a>
         <div class="act">
-          <a href={tripHref(f.name)}>Download</a>
-          <button class="ghost" onClick={() => onDelete(f.name)}>Delete</button>
+          {/* Icons, so both fit beside a filename at phone width — and 44px each,
+              because these are reached for with the car in the way. */}
+          <a href={tripHref(f.name)} title={'Download ' + label} aria-label={'Download ' + label}>
+            <IconDownload />
+          </a>
+          <button class="ghost" onClick={() => onDelete(f.name)}
+                  title={'Delete ' + label} aria-label={'Delete ' + label}>
+            <IconTrash />
+          </button>
         </div>
       </div>
     </div>
