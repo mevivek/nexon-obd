@@ -118,7 +118,8 @@ static bool uiIsApiPath(const char *p) {
   // up as a home-screen icon that is silently wrong rather than as an error.
   static const char *API[] = {"/data", "/dtc", "/history", "/mon", "/time",
                               "/trips", "/scan", "/watch", "/update", "/ui",
-                              "/manifest.webmanifest", "/icon.svg"};
+                              "/manifest.webmanifest", "/icon.svg",
+                              "/triage", "/didmap"};
   for (size_t i = 0; i < sizeof(API) / sizeof(API[0]); i++) {
     size_t n = strlen(API[i]);
     if (strncmp(p, API[i], n) == 0 && (p[n] == 0 || p[n] == '/' || p[n] == '?'))

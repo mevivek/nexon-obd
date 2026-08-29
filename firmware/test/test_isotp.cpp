@@ -11,6 +11,7 @@
 #include "../Obdurate/didwatch.h"
 #include "../Obdurate/trip_names.h"
 #include "../Obdurate/ui_paths.h"
+#include "didmap_extract.h"
 
 #include <cstdio>
 
@@ -135,6 +136,121 @@ static void test_can_still_sends_a_full_single_frame() {
   rx(0x7E8, {0x03, 0x41, 0x0C, 0x1A});
   eq(canIsoTp(0x7E0, 0x7E8, req, 7, out, sizeof(out), 400), 3, "still exchanges");
   ok(g_tx.size() == 1 && g_tx[0].data[0] == 0x07, "and the PCI byte says seven");
+}
+
+// ------------------------------------------------------------------ did register
+//
+// Triage decides which of a sweep's hits are worth a watch slot. The verdict is a
+// pure function of what was observed, so the rules can be tested rather than driven
+// at a car for six minutes a round.
+//
+// The rule that matters most: "constant" is provisional and "varies" is not. One
+// observed change is proof; any number of unchanged reads is only absence of proof.
+
+static DidRec mk(uint8_t b0) {
+  DidRec r = {};
+  r.did = 0x1002; r.ecu = 0; r.len = 1; r.first[0] = b0; r.last[0] = b0;
+  return r;
+}
+
+static void test_did_unknown_until_enough_reads() {
+  printf("didmap: no verdict before there is evidence\n");
+  DidRec r = mk(0x10);
+  for (int i = 0; i < DIDMAP_CONST_READS - 1; i++) {
+    uint8_t v = 0x10;
+    didObserve(r, &v, 1);
+  }
+  eq(r.state, DID_UNKNOWN, "still unknown one read short");
+  uint8_t v = 0x10;
+  didObserve(r, &v, 1);
+  eq(r.state, DID_CONSTANT, "and constant on the last one");
+}
+
+static void test_did_one_change_is_proof() {
+  printf("didmap: a single change settles it\n");
+  DidRec r = mk(0x10);
+  uint8_t a = 0x10, b = 0x11;
+  didObserve(r, &a, 1);            // baseline read
+  didObserve(r, &b, 1);            // changed
+  eq(r.state, DID_VARIES, "varies after one change");
+  eq((int)r.changes, 1, "and counts it");
+  // And it does not decay: a hundred unchanged reads afterwards do not make a
+  // value that demonstrably moved into a constant one.
+  for (int i = 0; i < 100; i++) didObserve(r, &b, 1);
+  eq(r.state, DID_VARIES, "and never reverts to constant");
+}
+
+static void test_did_sweep_value_is_a_baseline_not_a_read() {
+  printf("didmap: the sweep's value is a baseline, not an observation\n");
+  // A record seeded from the sweep has reads == 0. The first triage read must
+  // establish the comparison rather than count as a change against a value that was
+  // recorded under different conditions and possibly a different truncation.
+  DidRec r = mk(0x10);
+  eq((int)r.reads, 0, "seeded with no reads");
+  uint8_t v = 0x99;
+  didObserve(r, &v, 1);
+  eq((int)r.changes, 0, "the first read is not a change");
+  eq((int)r.reads, 1, "but it is a read");
+}
+
+static void test_did_length_change_is_a_change() {
+  printf("didmap: a different length is a different value\n");
+  DidRec r = mk(0x10);
+  uint8_t one = 0x10;
+  didObserve(r, &one, 1);
+  uint8_t two[2] = {0x10, 0x00};
+  didObserve(r, two, 2);
+  eq(r.state, DID_VARIES, "one byte becoming two counts");
+}
+
+static void test_did_identification_outranks_the_machine() {
+  printf("didmap: a human identification is not overwritten\n");
+  // Somebody has said what this is. Re-reading it must not quietly relabel it, or
+  // a triage run started later would erase the findings it exists to accumulate.
+  DidRec r = mk(0x10);
+  r.state = DID_IDENTIFIED;
+  uint8_t a = 0x10, b = 0x22;
+  didObserve(r, &a, 1);
+  didObserve(r, &b, 1);
+  eq(r.state, DID_IDENTIFIED, "still identified after a change");
+  eq((int)r.changes, 1, "though the change is still recorded");
+}
+
+static void test_did_verdict_is_pure() {
+  printf("didmap: the verdict rules, directly\n");
+  eq(didVerdict(DID_UNKNOWN, 0, 0), DID_UNKNOWN, "nothing observed");
+  eq(didVerdict(DID_UNKNOWN, DIDMAP_CONST_READS, 0), DID_CONSTANT, "enough quiet reads");
+  eq(didVerdict(DID_UNKNOWN, 1, 1), DID_VARIES, "one change, however few reads");
+  eq(didVerdict(DID_CONSTANT, 999, 1), DID_VARIES, "a change overrides a constant verdict");
+  eq(didVerdict(DID_IDENTIFIED, 999, 999), DID_IDENTIFIED, "identification is final");
+}
+
+static void test_did_hex_round_trip() {
+  printf("didmap: hex encoding round-trips\n");
+  uint8_t in[4] = {0x00, 0x1F, 0xA3, 0xFF}, out[4] = {0};
+  char hex[16];
+  didHex(hex, sizeof(hex), in, 4);
+  ok(strcmp(hex, "001FA3FF") == 0, "encodes uppercase, zero padded");
+  eq(didUnhex(hex, out, 4), 4, "decodes the same count");
+  ok(memcmp(in, out, 4) == 0, "and the same bytes");
+  // A truncated field must not invent a byte from one nibble.
+  eq(didUnhex("A", out, 4), 0, "a lone nibble decodes to nothing");
+}
+
+static void test_did_state_names_round_trip() {
+  printf("didmap: state names are the file format\n");
+  // These strings are the on-disk format and the JSON the page reads. A rename
+  // here silently turns every stored record back into "unknown" on the next load,
+  // which would erase a register built up over weeks.
+  ok(strcmp(didStateName(DID_UNKNOWN),    "unknown")    == 0, "unknown");
+  ok(strcmp(didStateName(DID_CONSTANT),   "constant")   == 0, "constant");
+  ok(strcmp(didStateName(DID_VARIES),     "varies")     == 0, "varies");
+  ok(strcmp(didStateName(DID_IDENTIFIED), "identified") == 0, "identified");
+  // Anything unrecognised reads back as unknown rather than as a neighbouring
+  // state - a corrupt byte must not promote a record to identified.
+  ok(strcmp(didStateName(99), "unknown") == 0, "an unknown byte is not a verdict");
+  ok(strcmp(DIDMAP_FILE, "/didmap.csv") == 0, "the register has its own file");
+  ok(strcmp(DIDMAP_FILE, "/scanhits.csv") != 0, "and never the sweep's own record");
 }
 
 // ------------------------------------------------------------------ battery floor
@@ -1186,6 +1302,15 @@ int main() {
   test_trip_skips_intervals_it_knows_nothing_about();
   test_trip_needs_both_inputs();
   test_trip_totals_only_grow();
+
+  test_did_unknown_until_enough_reads();
+  test_did_one_change_is_proof();
+  test_did_sweep_value_is_a_baseline_not_a_read();
+  test_did_length_change_is_a_change();
+  test_did_identification_outranks_the_machine();
+  test_did_verdict_is_pure();
+  test_did_hex_round_trip();
+  test_did_state_names_round_trip();
 
   test_batt_ignores_absent_readings();
   test_batt_never_while_the_engine_runs();

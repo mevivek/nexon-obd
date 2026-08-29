@@ -37,6 +37,7 @@
 #include "ui_paths.h"
 #include "ui_fs.h"
 #include "triplog.h"
+#include "didmap.h"
 #include <Update.h>
 #include "boot_html.h"
 #include "ui_html.h"
@@ -921,8 +922,16 @@ static void watchLoad() {
 //
 // Paused entirely while a sweep runs. A sweep is already hours long and shares the
 // bus with the sampler; adding a third claimant would do both jobs badly.
+// Declared here rather than beside the rest of the triage state below, because
+// watchStep stands down for it and a static has to exist before the first
+// function that names it.
+static bool triageOn = false;
+
 static void watchStep() {
-  if (!watchN || scan.running) return;
+  // Triage takes the bus in 250 ms bites and finishes in minutes; watching is
+  // open-ended. Two claimants would halve both, so watching stands down for it -
+  // the same rule it already follows for a sweep.
+  if (!watchN || scan.running || triageOn) return;
   if (millis() - watchLastMs < watchPeriodMs) return;
   watchLastMs = millis();
 
@@ -979,6 +988,66 @@ static void monStore(uint8_t mid, const MonRec *recs, uint8_t n) {
     if (monRec[i].mid != mid) monRec[w++] = monRec[i];
   monCount = w;
   for (uint8_t i = 0; i < n && monCount < MON_MAX; i++) monRec[monCount++] = recs[i];
+}
+
+// ---------------------------------------------------------------- triage
+//
+// Re-read the identifiers a sweep found, to find out which of them actually move.
+//
+// This is the step that makes watching affordable. A sweep on this car found 214
+// identifiers and the board watches eight, so working through them a drive at a time
+// is 27 drives - and most of those would be spent on values that never change.
+// Re-reading all 214 costs about 36 seconds over BLE, so ten passes is six minutes,
+// and what survives is the handful worth a watch slot.
+//
+// Time-boxed per turn rather than counted, for the reason scanStep is: a fixed
+// identifier count behaves completely differently on the two transports, and the
+// board looks hung while it works through one.
+static const uint32_t TRIAGE_BUDGET_MS = 250;
+
+static uint16_t triageTurn   = 0;
+static uint16_t triagePasses = 0;
+static uint16_t triageReads  = 0;
+
+static void triageStep() {
+  if (!triageOn || !didMapN) return;
+  // A sweep is hours of work and owns the bus; triage is minutes and can wait.
+  if (scan.running || activeTransport == TR_NONE) return;
+
+  uint32_t until = millis() + TRIAGE_BUDGET_MS;
+  while (triageOn && (int32_t)(until - millis()) > 0) {
+    if (triageTurn >= didMapN) {
+      // A pass finished. Save here rather than per record: the file is rewritten
+      // whole, and rewriting 10 KB once per identifier would be 214 writes a pass
+      // for a verdict that moves a few hundred times in the life of a car.
+      triageTurn = 0;
+      triagePasses++;
+      if (didMapDirty) didMapSave();
+      Serial.printf("[triage] pass %u done, %u reads, %u/%u still unknown\n",
+                    triagePasses, triageReads,
+                    didMapTally().unknown, didMapN);
+      return;
+    }
+
+    DidRec &r = didMap[triageTurn++];
+    uint32_t reqId = r.ecu ? ID_TCM_REQ : ID_ECM_REQ;
+    uint32_t rspId = r.ecu ? ID_TCM_RSP : ID_ECM_RSP;
+    uint8_t req[3] = {0x22, (uint8_t)(r.did >> 8), (uint8_t)(r.did & 0xFF)};
+    uint8_t buf[40];
+    int len = obdIsoTp(reqId, rspId, req, 3, buf, sizeof(buf),
+                       activeTransport == TR_BLE ? 550 : 25);
+
+    // Silence is not an observation. This adapter drops replies - three sweeps of
+    // the same range returned three different subsets - so a missed answer says
+    // nothing about whether the value moved, and counting it as an unchanged read
+    // would walk an identifier toward "constant" on the strength of the adapter
+    // being unreliable. Skip it; it comes round again next pass.
+    if (len < 4 || buf[0] != 0x62) continue;
+    if ((((uint16_t)buf[1] << 8) | buf[2]) != r.did) continue;   // demuxed badly
+
+    triageReads++;
+    if (didObserve(r, &buf[3], (uint8_t)(len - 3))) didMapDirty = true;
+  }
 }
 
 static void monStep() {
@@ -1398,6 +1467,62 @@ static void handleTime() {
   s += (long long)clockNowMs();
   s += "}";
   server.send(200, "application/json", s);
+}
+
+static void handleTriageStart() {
+  if (!didMapN) { server.send(409, "application/json", "{\"ok\":false,\"error\":\"no identifiers - run a sweep first\"}"); return; }
+  triageOn = true;
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+static void handleTriageStop() {
+  triageOn = false;
+  if (didMapDirty) didMapSave();
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+// The register, streamed. 214 records is well past what fits in one String on a
+// board with 320 KB of heap, so this chunks like handleScanStatus.
+static void handleDidMap() {
+  DidTally t = didMapTally();
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json", "");
+
+  String head = "{\"on\":";
+  head += triageOn ? "true" : "false";
+  head += ",\"passes\":";  head += triagePasses;
+  head += ",\"reads\":";   head += triageReads;
+  head += ",\"turn\":";    head += triageTurn;
+  head += ",\"needed\":";  head += DIDMAP_CONST_READS;
+  head += ",\"total\":";      head += t.total;
+  head += ",\"unknown\":";    head += t.unknown;
+  head += ",\"constant\":";   head += t.constant;
+  head += ",\"varies\":";     head += t.varies;
+  head += ",\"identified\":"; head += t.identified;
+  head += ",\"dids\":[";
+  server.sendContent(head);
+
+  String chunk;
+  char hex[24];
+  for (uint16_t i = 0; i < didMapN; i++) {
+    const DidRec &r = didMap[i];
+    if (i) chunk += ",";
+    snprintf(hex, sizeof(hex), "%04X", r.did);
+    chunk += "{\"did\":\""; chunk += hex;
+    chunk += "\",\"ecu\":\""; chunk += (r.ecu ? "TCM" : "ECM");
+    chunk += "\",\"state\":\""; chunk += didStateName(r.state);
+    chunk += "\",\"reads\":"; chunk += r.reads;
+    chunk += ",\"changes\":";  chunk += r.changes;
+    didHex(hex, sizeof(hex), r.first, r.len);
+    chunk += ",\"first\":\""; chunk += hex;
+    didHex(hex, sizeof(hex), r.last, r.len);
+    chunk += "\",\"last\":\""; chunk += hex;
+    chunk += "\"}";
+    if (chunk.length() > 1024) { server.sendContent(chunk); chunk = ""; }
+  }
+  chunk += "]}";
+  server.sendContent(chunk);
+  server.sendContent("");
 }
 
 static void handleScanStart() {
@@ -2056,6 +2181,9 @@ void setup() {
   server.on("/ui/clear",    handleUiClear);
   server.on("/ui/upload", HTTP_POST, handleUiUploadDone, handleUiUpload);
   server.onNotFound(handleNotFound);
+  server.on("/triage/start", handleTriageStart);
+  server.on("/triage/stop",  handleTriageStop);
+  server.on("/didmap",       handleDidMap);
   server.on("/scan/start",  handleScanStart);
   server.on("/scan/stop",   handleScanStop);
   server.on("/scan/status", handleScanStatus);
@@ -2073,6 +2201,16 @@ void setup() {
   tripIntBegin();       // before tripBegin: the totals are columns on the first row
   tripBegin();
   scanBegin();          // resumes an interrupted sweep, needs the filesystem up
+  // After scanBegin, which is what restores the hits the register is seeded from.
+  didMapBegin(scanHitCap);
+  didMapSeed(scanHits, scanHitN);
+  // Write it now rather than waiting for the first triage pass to finish. Otherwise
+  // the register exists only in RAM until somebody runs one, so a board that is
+  // swept and then left alone re-seeds from scratch on every boot and /didmap.csv
+  // never appears - which also means there is nothing to inspect or export.
+  // Costs one 10 KB write on the first boot after a sweep and nothing after that,
+  // because the load below then finds every record and seeds nothing new.
+  if (didMapDirty) didMapSave();
   histBegin();
   lastEcuOkMs = millis();
   chooseTransport();
@@ -2105,6 +2243,7 @@ void loop() {
   samplerStep();          // the bus waits inside here serve HTTP too - bus_yield.h
   watchStep();            // one watched identifier per period, paused during a scan
   monStep();              // only does anything while the monitors page is open
+  triageStep();           // only while a triage run is armed
   heartbeat(millis() - lastEcuOkMs < 3000, scan.running);
 
   if (scan.running) {

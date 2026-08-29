@@ -250,8 +250,12 @@ console.log('\nDID watch');
 
   // A sweep is already hours long and shares the bus with the sampler; a third
   // claimant would do both jobs badly, so the watch stands down while one runs.
-  ok(/if \(!watchN \|\| scan\.running\) return;/.test(ino),
-     'watching pauses while a sweep has the bus');
+  //
+  // Triage joins that list for the same reason and a stronger one: it takes the bus
+  // in 250 ms bites and is over in minutes, while watching is open-ended. Whichever
+  // finishes is the one worth letting finish.
+  ok(/if \(!watchN \|\| scan\.running \|\| triageOn\) return;/.test(ino),
+     'watching pauses while a sweep or a triage run has the bus');
 
   // Filing bytes under the wrong identifier would poison a correlation without ever
   // looking wrong, which is the worst way for this to fail.
@@ -323,6 +327,74 @@ console.log('\ntrip totals');
      'but the interval clock is not, so a wake starts a fresh interval');
 }
 
+// ---------------------------------------------------------------- triage
+//
+// Triage is what makes watching affordable: 214 identifiers against eight watch
+// slots is 27 drives, and most of those would be spent on values that never move.
+// Re-reading the lot is about 36 seconds over BLE, so it partitions the list before
+// a single slot is spent. The verdict rules are host-tested against the extracted
+// source; these pin the wiring, which is where the last three bugs lived.
+console.log('\ntriage and the DID register');
+{
+  const ino = readSrc(join(here, '../Obdurate/Obdurate.ino'));
+  const map = readSrc(join(here, '../Obdurate/didmap.h'));
+  const paths = readSrc(join(here, '../Obdurate/ui_paths.h'));
+
+  const fn = ino.slice(ino.indexOf('static void triageStep()'));
+  const body = fn.slice(0, fn.indexOf('\n}\n'));
+  ok(body.length > 0 && body.length < ino.length, 'triageStep body isolated');
+
+  // A sweep is hours and owns the bus; triage is minutes and can wait for it.
+  ok(/scan\.running \|\| activeTransport == TR_NONE/.test(body),
+     'triage stands down for a sweep and for a dead transport');
+  // And watching stands down for triage, or the two halve each other.
+  ok(/!watchN \|\| scan\.running \|\| triageOn/.test(ino),
+     'watching stands down for triage');
+
+  // The one that would quietly corrupt the result: this adapter drops replies, so
+  // counting silence as an unchanged read walks an identifier toward `constant` on
+  // the strength of the adapter being unreliable.
+  const skip = body.indexOf('continue;');
+  const observe = body.indexOf('didObserve');
+  ok(skip >= 0 && observe > skip, 'a missed reply is skipped, never observed');
+  ok(/if \(len < 4 \|\| buf\[0\] != 0x62\) continue;/.test(body),
+     'only a positive 0x62 reply counts');
+  ok(/!= r\.did\) continue;/.test(body),
+     'and only one about the identifier that was asked for');
+
+  // Time-boxed, not counted - the reason scanStep is. A fixed count behaves
+  // completely differently on the two transports.
+  ok(/TRIAGE_BUDGET_MS/.test(ino) && /until - millis\(\)/.test(body),
+     'the turn is time-boxed, so the board never looks hung');
+
+  // Saving once per pass, not once per record: the file is rewritten whole.
+  ok(/didMapDirty\) didMapSave\(\);/.test(body), 'saved when a verdict moved');
+  ok((body.match(/didMapSave\(\)/g) || []).length === 1,
+     'once per pass, not once per identifier');
+
+  // Its own file. /scanhits.csv is the sweep's record, its reader is deliberately
+  // loose, and it is the one thing here that cannot be regenerated without hours
+  // of bus time - so the register must not share it.
+  ok(/DIDMAP_FILE = "\/didmap\.csv"/.test(map), 'the register has its own file');
+  // Checked against the string literal, not the prose: the header comment explains
+  // at length why the sweep's record is left alone, and matching that would be a
+  // check that fails on its own explanation.
+  ok(!/"\/scanhits/.test(map), "and never opens the sweep's own record");
+
+  // Seeded after scanBegin, which is what restores the hits it is seeded from.
+  const setup = ino.slice(ino.indexOf('void setup()'));
+  const sb = setup.indexOf('scanBegin();');
+  const db = setup.indexOf('didMapBegin(');
+  const ds = setup.indexOf('didMapSeed(');
+  ok(sb >= 0 && db > sb && ds > db,
+     'the register is built and seeded after the hits are restored');
+
+  for (const r of ['/triage/start', '/triage/stop', '/didmap']) {
+    ok(ino.includes(`server.on("${r}"`), `${r} is a route`);
+  }
+  ok(/"\/triage"/.test(paths) && /"\/didmap"/.test(paths),
+     'both are API paths, so a typo 404s rather than returning the SPA');
+}
 // ---------------------------------------------------------------- mode 06
 //
 // A timeout and a refusal mean opposite things. The sweep has always known that -
