@@ -13,6 +13,13 @@ import { useClockSync } from './useClockSync.js';
 import { useShellStatus } from '../shell.jsx';
 import { IconUpload, IconAlert } from '../icons.jsx';
 import { OTA_MSG, otaFailText, otaOk, progressPct, uploadingText } from './firmware/ota.js';
+import { VehicleCard } from './board/VehicleCard.jsx';
+import { discoveryStatus } from './board/vehicle.js';
+import { DataCard } from './board/DataCard.jsx';
+
+// The web bundle's own version, for the backup manifest. Vite inlines it from
+// package.json, the same define App.jsx reads for the header.
+const WEB_VERSION = __WEB_VERSION__;
 
 export function Firmware() {
   useClockSync();
@@ -94,13 +101,32 @@ export function Firmware() {
     x.send(fd);
   }
 
-  // No pill: ota_html.h is the one page with nothing to say about the connection.
-  // Only the subtitle detail, which is the running firmware version.
-  useShellStatus({ sub: fw ? 'running v' + fw : undefined });
+  // The page gained two more cards than ota_html.h ever had, and one of them - the
+  // discovery walk - is a live thing with something to say. So the pill it reports
+  // is this page's pill, and the subtitle detail stays what it was: the running
+  // firmware version, which the hint below leans on.
+  //
+  // Kept here rather than in VehicleCard so there is one owner of the header on
+  // this page, the way there is on every other.
+  //
+  // VehicleCard does the polling and hands its payload up here, because the backup
+  // keys on the same identity the card displays and one reader of /vehicle is
+  // enough for both.
+  const [veh, setVeh] = useState(null);
+  const [vehErr, setVehErr] = useState(null);
+  const onVehicle = (j, e) => { setVeh(j); setVehErr(e); };
+  useShellStatus({
+    sub: fw ? 'running v' + fw : undefined,
+    ...discoveryStatus(veh, vehErr),
+  });
 
   return (
     <>
+      <VehicleCard onVehicle={onVehicle} />
+      <DataCard veh={veh} fw={fw} web={WEB_VERSION} />
+
       <div class="card">
+        <h2 class="sec">Firmware</h2>
         <div class="drop">
           <IconUpload />
           <div>
@@ -132,7 +158,7 @@ export function Firmware() {
         <div class="caution">
           <IconAlert />
           <div>
-            Stay on this page and on the NexonOBD network until it finishes. A failed
+            Stay on this page and on the Obdurate network until it finishes. A failed
             write leaves the previous firmware intact &mdash; the ESP32 only switches
             over after the new image verifies &mdash; but an interrupted upload means
             starting again.

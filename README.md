@@ -62,6 +62,10 @@ that was built into the firmware rather than to a stub.
 | `/data` | Current sample as JSON, plus firmware version and active transport |
 | `/trips` | Per-drive CSV logs — list, download, delete |
 | `/history` | The stored trend buffer as JSON |
+| `/vehicle` | What this car is and which readings it supports, as JSON |
+| `/files` | What data is on the filesystem — the list a backup is built from |
+| `/file` | One data file, streamed |
+| `/reset` | Erase the data, or the data and the dashboard bundle |
 
 The header shows the running firmware version and which transport is actually live
 (`can` or `ble`), so a flashed image can be confirmed at a glance.
@@ -417,6 +421,59 @@ the interval that way would have burned through NVS endurance in a couple of yea
 Chunked, ten times the flush rate still churns less flash than the old
 sixty-second full-buffer write did.
 
+### What car is this
+
+Every other part of this firmware is written against one vehicle. The PID batches
+are the set a Nexon replies to, the DID register is 214 verdicts about a Nexon's
+ECU, and the dashboard draws tiles for readings that car publishes. Plugged into
+anything else, none of that announces itself — the tiles that cannot be filled read
+blank, which is indistinguishable from a car that is simply not answering yet.
+
+So the board asks, once per boot: the mode 01 support bitmaps block by block, then
+mode 09 for the VIN, the calibration id and its checksum, then one probe at the
+transmission's responder id. `/vehicle` reports the answers, including which of the
+PIDs the sampler actually polls this car supports.
+
+This is **discovery, not adaptation**. The sampler still asks for the same PID set
+and an unsupported reading still comes back absent — it is now labelled
+absent-because-unsupported rather than absent-because-silent, which is the whole
+difference between a dashboard that is broken and one that is honest. Adapting the
+batches at runtime needs a vehicle-profile format, and designing that against a
+sample of one car would be designing it blind.
+
+Three states throughout, never two. A support block whose bitmap never arrived reads
+*unknown*, not *no*; a mode 09 refusal is a fact about the car, a timeout is a fact
+about the last few seconds. Nothing answering at the second responder id is reported
+as exactly that, never as "no second ECU" — a module that is not fitted and one that
+is not awake produce the same nothing on a CAN bus.
+
+### Backup, restore, and the check in between
+
+A sweep is over half an hour on CAN and the better part of a day over BLE, the
+register behind it takes drives to build, and the trip logs are the drives
+themselves. All of it lives on a 1.5 MB partition inside a device that gets
+unplugged, reflashed and left in a hot car.
+
+The Board page takes the lot off as a ZIP, puts it back, and clears it. The archive
+is assembled **in the browser** — the board has one core and a car to poll while it
+serves you, so it offers a list (`/files`), a reader (`/file`) and a writer
+(`/file/put`) and the page does the work. Entries are STORED, never deflated, so the
+file opens with any unzip tool and the reader that puts it back is a header walk
+rather than an inflater shipped into a 300 KB budget.
+
+The reason any of this needs the section above: `didmap.csv` is 214 verdicts about
+one specific engine and nothing inside it says which. Restored onto a different car
+it would not fail — it would attach, silently, and every conclusion drawn from it
+afterwards would be about the wrong engine. So a backup carries a manifest holding a
+hash of the VIN and calibration id, and a restore compares it. A mismatch is refused
+outright with no way past it. A backup or a board with no identity at all is the
+ordinary state of a car that has not been driven yet, and that is put to the person
+as a question rather than answered on their behalf.
+
+The manifest carries the hash, not the VIN. It answers the only question the archive
+is asked exactly as well, and a backup is a file that gets copied to a phone and a
+laptop.
+
 ### Being left in the car
 
 The board deep-sleeps after ten minutes with no ECU response. That timer answers
@@ -650,7 +707,7 @@ can be asked about without a board — the `/data` contract, the routing, the ca
 headers, the DID watch wiring, the trip columns, the history constants — is asserted
 against the source under node.
 
-The frontend has its own suite, `npm --prefix web test`: 206 checks over the
+The frontend has its own suite, `npm --prefix web test`: 341 checks over the
 hold-last-value merge, the warning-flag gating, the rate tracker, the mileage
 readouts and each page's logic, run against the modules that implement them. That is
 the point of the split — those used to be JavaScript inside C++ raw string literals,

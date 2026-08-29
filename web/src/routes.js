@@ -19,5 +19,5 @@ export const ROUTES = [
   { path: '/trips', label: 'Trips', fw: '/trips', title: 'Trips', sub: 'CSV logs' },
   { path: '/watch', label: 'Watch', fw: '/watch', title: 'DID Watch', sub: 'service 0x22' },
   { path: '/scan', label: 'Scanner', fw: '/scan', title: 'DID Scanner', sub: 'service 0x22' },
-  { path: '/update', label: 'Firmware', fw: '/update', title: 'Firmware Update' },
+  { path: '/update', label: 'Firmware', fw: '/update', title: 'Board' },
 ];
