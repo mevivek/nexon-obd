@@ -99,7 +99,13 @@ nav{position:fixed;left:0;right:0;bottom:0;z-index:6;
 display:flex;gap:2px;padding:6px;margin:0 14px calc(16px + env(safe-area-inset-bottom,0px));
 background:rgba(18,18,24,.86);border:1px solid var(--ring);border-radius:28px;
 box-shadow:0 16px 36px rgba(0,0,0,.5)}
-@supports (backdrop-filter:blur(1px)){nav{backdrop-filter:blur(14px)}}
+/* Same reasoning as the header, and the same shape: translucent only where there
+   is a blur to carry the legibility. The other light source is centred at the
+   lower left, directly behind this bar, so an opaque fill here hid the second of
+   the two. The blur is heavier than the header's because content scrolls directly
+   under this one and the labels are 8.5px. */
+@supports (backdrop-filter:blur(1px)){nav{background:rgba(18,18,24,.62);
+backdrop-filter:blur(18px)}}
 @media(min-width:760px){nav{max-width:620px;margin-left:auto;margin-right:auto}}
 /* 52px, because a moving car is the worst possible place to miss a target. */
 nav a{flex:1;min-width:0;min-height:52px;
