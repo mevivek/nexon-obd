@@ -18,6 +18,7 @@ import { Scanner } from './pages/Scanner.jsx';
 import { Firmware } from './pages/Firmware.jsx';
 import { TripDetail } from './pages/TripDetail.jsx';
 import { tripFromPath } from './pages/trips/trips.js';
+import { CarBanner } from './pages/board/CarBanner.jsx';
 import {
   IconGauge, IconPulse, IconRoute, IconTarget, IconSearch, IconChip,
 } from './icons.jsx';
@@ -134,6 +135,12 @@ export function App() {
         <Bar route={route} />
       </header>
       <div class="wrap">
+        {/* Above the page, on every page. A board in a car it is not bound to looks
+            completely normal - live values, no errors - while it writes nothing
+            down, so the choice has to follow you rather than wait on a settings
+            screen nobody opens until a drive has gone missing. It renders nothing
+            at all unless there is a proven mismatch. */}
+        <CarBanner />
         {trip ? <TripDetail name={trip} /> : <Page />}
       </div>
       <Nav active={route.path} />

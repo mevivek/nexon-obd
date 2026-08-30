@@ -19,8 +19,8 @@ npm --prefix web run build      # frontend build + 300 KB budget gate
 web/deploy.sh                   # build, then upload the bundle to 192.168.4.1
 ```
 
-Expected as of v1.16.0: **393** host C++ checks, **256** firmware-source checks,
-**341** frontend checks. All must be 0 failed. (The laptop-dashboard suite was
+Expected as of v1.17.0: **473** host C++ checks, **285** firmware-source checks,
+**371** frontend checks. All must be 0 failed. (The laptop-dashboard suite was
 retired with `tools/dashboard.html` in v1.15.0.)
 
 `npm --prefix web run build` also regenerates `firmware/Obdurate/ui_bundle.h` — the
@@ -64,7 +64,7 @@ Start-Sleep 8; $sp.ReadExisting(); $sp.Close()
 A healthy boot with no car attached:
 
 ```
-[fw] Obdurate 1.16.0
+[fw] Obdurate 1.17.0
 [can] TWAI up @500k
 [ap] Obdurate -> http://192.168.4.1
 [boot] reset=usb wakes=0
@@ -135,6 +135,14 @@ fails only at `arduino-cli`, which is the slowest place in this project to find 
 typo. Pinned by a check in `test_dashboard.mjs`. The same trap exists for `DEC`,
 `OCT`, `BIN`, `B1`..`B11111111` and `min`/`max`.
 
+**One board, one car - and absence is not a mismatch.** `carbind.h` stops every
+recorder when the discovered `vehKey()` differs from the bound one, because two cars'
+hits in one `scanhits.csv` produce no detectable error, only a file that is quietly
+wrong forever. The trap is the other direction: reading "no key" as "wrong car" would
+switch off recording on every ECU that declines mode 09, and the symptom - a board
+that runs, shows live data and never writes a trip log - is one nobody would
+diagnose. Only `CAR_FOREIGN` blocks. Pinned by checks in both suites.
+
 **Never act on absent data.** `NAN`/`null` must break a rule, not satisfy it. The frontend
 learned this when `null < 12.2` reported healthy charging systems as broken; the firmware's
 battery cutoff follows the same rule, where the equivalent mistake switches the board off
@@ -181,13 +189,38 @@ claims are labelled.
 - **No backup has been restored onto a board.** The ZIP is checked against the
   format's own bytes rather than only round-tripped, but `/file/put` has never
   been fed one.
+- **The autopilot has never completed a phase.** The transitions are a pure function
+  with 20 host checks and the wiring has 14 source checks, but no sweep has been
+  started by it, no phase has advanced on a real bus, and no watch set has rotated
+  at a real `tripBegin()`. The whole pipeline is days of driving, so the first real
+  test is a long one.
+- **No correlation has ever been computed from a car.** `corrTick` has never had a
+  fresh sample; every r in the suite comes from a synthetic straight line. In
+  particular it is unknown whether a drive produces enough paired samples past
+  `CORR_MIN_N` for the watched identifiers, or whether the 5-minute commit interval
+  is the right trade against flash churn.
+- **The one-car rule has never seen two cars.** `carBindState` is tested exhaustively
+  as a pure function, but no board has been moved between vehicles, so the path where
+  a real mismatch stops the recorders has never run.
 
 ---
 
-## Where things stand (v1.16.0)
+## Where things stand (v1.17.0)
 
 Recent work, newest first. `git log` has the reasoning; this is the map.
 
+- **Autopilot** (`autopilot.h`, `/auto`, the Scanner page's top card) - sweep,
+  triage and watch chained, advancing on their own, surviving the ignition in NVS.
+  The watch set rotates eight at a time at `tripBegin()` - never mid-drive, because
+  that bumps `watchGen` and rotates the trip CSV.
+- **On-board correlation** (`correlate.h`) - running Pearson of each watched
+  identifier against rpm, coolant, speed, load, throttle and volts. The best fit
+  lands in the register as three new CSV columns (`tracks,r,samples`), appended so
+  an older `didmap.csv` still loads. It is "tracks", never "is": oil temperature
+  tracks coolant almost perfectly, and r is blind to offset and scale.
+- **One car per board** (`carbind.h`, `/car`, the banner in `App.jsx`) - a foreign
+  car gets live readings and records nothing, with a choice of adopting it (erases
+  the previous car) or keeping the old binding.
 - **Vehicle discovery** (`vehicle.h`, `/vehicle`, the Board page's top card) —
   the mode 01 support bitmaps, mode 09 VIN/calibration/CVN, and one probe at the
   transmission's responder id, walked once per boot while the ECU is answering.
@@ -221,7 +254,7 @@ discovery - all landed in v1.16.0. What is left is what was deliberately deferre
    vehicle-profile format, and `PID_B1..B4` are compiled verbatim into the host
    tests. Designing that against a sample of one car would be designing it blind -
    wait for a second car.
-2. **Nothing in v1.16.0 has been near a car.** See below.
+2. **Nothing in v1.16.0 or v1.17.0 has been near a car.** See below.
 
 ### What the car actually said
 

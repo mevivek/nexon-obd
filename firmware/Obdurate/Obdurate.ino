@@ -39,6 +39,9 @@
 #include "triplog.h"
 #include "didmap.h"
 #include "vehicle.h"
+#include "carbind.h"
+#include "correlate.h"
+#include "autopilot.h"
 #include "datafiles.h"
 #include <Update.h>
 #include "boot_html.h"
@@ -53,6 +56,19 @@
 //            Slower, but needs no extra hardware at all.
 enum Transport { TR_NONE, TR_CAN, TR_BLE };
 static Transport activeTransport = TR_NONE;
+
+// May the board write anything down right now? See carbind.h for the rule.
+//
+// A plain flag this far up rather than a call, because every recorder is defined
+// above the code that works the answer out - the sweep, triage and the trip log all
+// come before discovery does - and a forward declaration per recorder would put the
+// one condition they share in five places. carRefresh() owns it; everything else
+// reads it.
+//
+// It starts TRUE. A board that has not identified a car yet must record: that is
+// the state of every board out of the box, and of every car whose ECU declines
+// mode 09. Only a positive mismatch clears it.
+static bool g_mayRecord = true;
 
 // ---------------------------------------------------------------- config
 
@@ -824,6 +840,9 @@ static void scanBegin() {
 // but roughly 22 s over BLE, during which nothing answers the web server and the
 // board looks hung. A millisecond budget behaves the same on both.
 static void scanStep(uint32_t budgetMs) {
+  // A sweep in the wrong car appends that car's identifier space to this one's
+  // record, and a hit carries no vehicle to tell them apart afterwards.
+  if (!g_mayRecord) return;
   uint32_t reqId = scan.ecu ? ID_TCM_REQ : ID_ECM_REQ;
   uint32_t rspId = scan.ecu ? ID_TCM_RSP : ID_ECM_RSP;
   uint32_t started = millis();
@@ -1037,6 +1056,9 @@ static void triageSetOn(bool on) {
 
 static void triageStep() {
   if (!triageOn || !didMapN) return;
+  // Re-reading another car's ECU at the same identifiers produces changes that are
+  // real, and verdicts about this car's register that are nonsense.
+  if (!g_mayRecord) return;
   // A sweep is hours of work and owns the bus; triage is minutes and can wait.
   if (scan.running || activeTransport == TR_NONE) return;
 
@@ -1434,6 +1456,276 @@ static void vehicleStep() {
   }
 }
 
+// ---------------------------------------------------------------- car binding
+//
+// Which car this board belongs to, and therefore whether it may write anything
+// down. The rule and the reasoning are in carbind.h; this is the state and the
+// place it is recomputed.
+
+static char     g_carBound[9] = {0};    // the key of the car this board is bound to
+static uint8_t  g_carState    = CAR_NEW;
+
+// Recomputed rather than cached at boot, because discovery finishes some seconds
+// after the board comes up: a state decided before the walk ran would say CAR_NEW
+// on a bound board for the first ten seconds of every drive, and everything gated
+// on it would record into whatever was there.
+static void carRefresh() {
+  char seen[9];
+  vehKey(g_veh, seen, sizeof(seen));
+  const uint8_t was = g_carState;
+  g_carState = carBindState(g_carBound, seen);
+  g_mayRecord = carMayRecord(g_carState);
+  if (was != g_carState)
+    Serial.printf("[car] %s -> %s (bound=%s seen=%s)\n", carBindName(was),
+                  carBindName(g_carState), g_carBound[0] ? g_carBound : "-",
+                  seen[0] ? seen : "-");
+}
+
+static bool carMayRecordNow() { return g_mayRecord; }
+
+static void carLoad() {
+  Preferences p;
+  if (!p.begin("nexonveh", true)) return;
+  p.getString("bound", g_carBound, sizeof(g_carBound));
+  p.end();
+}
+
+static void carBindTo(const char *key) {
+  strncpy(g_carBound, key ? key : "", sizeof(g_carBound) - 1);
+  g_carBound[sizeof(g_carBound) - 1] = 0;
+  Preferences p;
+  if (p.begin("nexonveh", false)) { p.putString("bound", g_carBound); p.end(); }
+  carRefresh();
+  Serial.printf("[car] bound to %s\n", g_carBound[0] ? g_carBound : "(nothing)");
+}
+
+// ---------------------------------------------------------------- correlation
+//
+// One accumulator per watched identifier per reference signal. The arithmetic and
+// the caveats are in correlate.h.
+
+static Corr     g_corr[WATCH_MAX][CORR_REFS];
+static uint32_t g_corrGen = 0;          // the watch generation these belong to
+
+// Throw the sums away when the watch set changes. Slot 3 meaning a different
+// identifier than it did a minute ago and the sums carrying on regardless would
+// produce a fit made of two identifiers, which is worse than no fit: it would look
+// exactly like a real one.
+static void corrResetAll() {
+  for (uint8_t i = 0; i < WATCH_MAX; i++)
+    for (uint8_t k = 0; k < CORR_REFS; k++) corrReset(g_corr[i][k]);
+  g_corrGen = watchGen;
+}
+
+// Fold one published sample in, pairing each watched value with each reference.
+//
+// Called from samplerStep()'s if (any) branch, beside tripTick and for the same
+// reason: this is the only place a fresh sample exists. From loop() it would pair
+// carried-forward values with carried-forward values for as long as the car was
+// silent, and a correlation between two frozen numbers is 0/0 at best and a
+// fabricated 1.0 at worst.
+static void corrTick(const Live &L) {
+  if (!carMayRecordNow()) return;
+  if (watchGen != g_corrGen) corrResetAll();
+
+  const uint32_t now = millis();
+  for (uint8_t i = 0; i < watchN && i < WATCH_MAX; i++) {
+    // A stale reading is the last good one held, not a measurement taken now. The
+    // watch page is allowed to show it; a fit is not allowed to count it.
+    if (!watchFresh(watch[i], now)) continue;
+    const float v = (float)watchValue(watch[i]);
+    for (uint8_t k = 0; k < CORR_REFS; k++) corrAdd(g_corr[i][k], v, corrRefValue(L, k));
+  }
+}
+
+// Write what has been fitted into the register, and say how much it rests on.
+//
+// Called when the set is about to rotate and when a run is stopped - the two
+// moments the sums are complete. Returns how many records gained a fit.
+static uint16_t corrCommit() {
+  uint16_t wrote = 0;
+  for (uint8_t i = 0; i < watchN && i < WATCH_MAX; i++) {
+    uint8_t ref = CORR_REFS;
+    const float r = corrBest(g_corr[i], &ref);
+    if (ref >= CORR_REFS) continue;               // nothing reached CORR_MIN_N
+
+    DidRec *rec = didFind(watch[i].ecu, watch[i].did);
+    if (!rec) continue;
+    bool ok = false;
+    const int8_t stored = corrToStored(r, &ok);
+    if (!ok) continue;
+
+    // Only when the answer actually moved. This is called every few minutes so a
+    // drive's work is not lost to the ignition, and rewriting a 10 KB file to
+    // change nothing would put that churn on a filesystem shared with trip logs
+    // for the rest of the drive. Two hundredths of r is below what the page shows.
+    const int delta = (int)stored - (int)rec->corrR100;
+    if (rec->corrRef == ref && delta > -2 && delta < 2) continue;
+
+    rec->corrRef  = ref;
+    rec->corrR100 = stored;
+    rec->corrN    = (uint16_t)(g_corr[i][ref].n > 0xFFFF ? 0xFFFF : g_corr[i][ref].n);
+    didMapDirty = true;
+    wrote++;
+    Serial.printf("[corr] %04X tracks %s r=%.2f over %u samples\n", watch[i].did,
+                  corrRefName(ref), (double)r, rec->corrN);
+  }
+  if (wrote) didMapSave();
+  return wrote;
+}
+
+// ---------------------------------------------------------------- autopilot
+//
+// The phases and the reasoning are in autopilot.h; this is the machinery that
+// carries them out and the state that survives the ignition.
+
+static uint8_t  g_autoPhase = AUTO_OFF;
+static uint32_t g_autoSince = 0;         // millis() this phase began, for the page
+static bool     g_autoSwept = false;     // this run started a sweep
+static uint16_t g_autoRounds = 0;        // watch rotations completed
+static Preferences autoPrefs;
+
+static void autoSave() {
+  if (!autoPrefs.begin("nexonauto", false)) return;
+  autoPrefs.putUChar("phase", g_autoPhase);
+  autoPrefs.putUShort("rounds", g_autoRounds);
+  autoPrefs.end();
+}
+
+static void autoLoad() {
+  if (!autoPrefs.begin("nexonauto", true)) return;
+  g_autoPhase  = autoPrefs.getUChar("phase", AUTO_OFF);
+  g_autoRounds = autoPrefs.getUShort("rounds", 0);
+  autoPrefs.end();
+  if (g_autoPhase > AUTO_DONE) g_autoPhase = AUTO_OFF;
+}
+
+static AutoFacts autoGather() {
+  const DidTally t = didMapTally();
+  AutoFacts f;
+  // Not arithmetic on scan.cur against scan.to: the range is inclusive and ends at
+  // 0xFFFF, so "past the end" is a wrap and every expression of it is off by one in
+  // some case. The sweep sets running false when it finishes; this run knows it
+  // started one, and the two together are unambiguous.
+  f.sweepDone = g_autoSwept && !scan.running;
+  f.records   = t.total;
+  f.triaged   = t.triaged;
+  f.varying   = t.varies;
+  f.fitted    = t.fitted;
+  f.mayRecord = carMayRecordNow();
+  return f;
+}
+
+// Choose the next batch of identifiers to watch.
+//
+// Only ones that vary and have not been fitted - see autoWantsWatch(). Lowest
+// identifier first, which is arbitrary but stable: a rotation that picked
+// differently on each boot could revisit the same eight forever while others were
+// never chosen.
+static void autoRotate() {
+  WatchDid next[WATCH_MAX];
+  uint8_t n = 0;
+  for (uint16_t i = 0; i < didMapN && n < WATCH_MAX; i++) {
+    if (!autoWantsWatch(didMap[i])) continue;
+    next[n].did = didMap[i].did;
+    next[n].ecu = didMap[i].ecu;
+    n++;
+  }
+  if (!n) return;
+  if (watchApply(next, n, watchPeriodMs)) watchSave();
+  corrResetAll();
+  g_autoRounds++;
+  Serial.printf("[auto] round %u watching %u identifiers\n", g_autoRounds, n);
+}
+
+// What happens on the way into a phase. Every one of these is something a person
+// would otherwise have pressed.
+static void autoEnter(uint8_t phase) {
+  Serial.printf("[auto] -> %s\n", autoPhaseName(phase));
+  switch (phase) {
+    case AUTO_SWEEP:
+      triageSetOn(false);
+      scan.ecu = 0;                    // the engine ECU; see the note on /auto/start
+      scan.from = 0x0000; scan.to = 0xFFFF; scan.cur = 0;
+      scan.tried = 0; scan.negatives = 0; scan.stalled = false;
+      scanSilent = 0;
+      scanHitN = 0;
+      if (tripFsUp) LittleFS.remove(SCAN_HITS_FILE);
+      scan.startedMs = millis();
+      scan.running = true;
+      g_autoSwept = true;
+      scanSaveState();
+      break;
+
+    case AUTO_TRIAGE:
+      scan.running = false;
+      scanSaveState();
+      triageSetOn(true);
+      break;
+
+    case AUTO_WATCH:
+      triageSetOn(false);
+      if (didMapDirty) didMapSave();
+      autoRotate();
+      break;
+
+    case AUTO_DONE:
+      triageSetOn(false);
+      scan.running = false;
+      corrCommit();
+      break;
+
+    default:
+      break;
+  }
+}
+
+// One turn of the pipeline. Once a second is far more often than a phase can
+// change, and cheap: the tally is a walk over a few hundred records.
+static void autoStep() {
+  if (g_autoPhase == AUTO_OFF) return;
+
+  static uint32_t last = 0;
+  if (millis() - last < 1000) return;
+  last = millis();
+
+  const AutoFacts f = autoGather();
+  const uint8_t next = autoNext(g_autoPhase, f);
+  if (next != g_autoPhase) {
+    g_autoPhase = next;
+    g_autoSince = millis();
+    autoEnter(next);
+    autoSave();
+  }
+
+  // Write the fits down periodically rather than only when the set rotates. The
+  // ignition going off is an abrupt power cut, not a shutdown, so anything held
+  // only in RAM at that moment is a drive's work thrown away. corrCommit() only
+  // rewrites the file when a fit actually moved, so a converged set costs nothing.
+  if (g_autoPhase == AUTO_WATCH) {
+    static uint32_t lastCommit = 0;
+    if (millis() - lastCommit > 300000UL) { lastCommit = millis(); corrCommit(); }
+  }
+}
+
+static void autoStart() {
+  g_autoPhase = AUTO_SWEEP;
+  g_autoSince = millis();
+  g_autoSwept = false;
+  autoEnter(AUTO_SWEEP);
+  autoSave();
+}
+
+static void autoStop() {
+  corrCommit();
+  triageSetOn(false);
+  scan.running = false;
+  scanSaveState();
+  g_autoPhase = AUTO_OFF;
+  autoSave();
+  Serial.println("[auto] stopped");
+}
+
 // One cached reply per batch, with the moment it arrived.
 static uint8_t  sampBuf[4][40];
 static uint8_t  sampLen[4]   = {0, 0, 0, 0};
@@ -1507,7 +1799,10 @@ static void samplerStep() {
     g_seq++;
     lastEcuOkMs = millis();
     everSawEcu  = true;
-    histTick(g_live);
+    // Both of these write this car's history to flash. In a car the board is not
+    // bound to they would overwrite a trend and a drive belonging to another one -
+    // so the live values still publish, and nothing is kept. See carbind.h.
+    if (g_mayRecord) histTick(g_live);
     // Beside histTick, and for the same reason: both record a published sample, and
     // this branch is the only place one exists. Not from loop() - g_live keeps its
     // last good sample with ok still set once the ECU stops answering, so a caller
@@ -1515,7 +1810,10 @@ static void samplerStep() {
     // the car was silent, which is the one thing the trip log must never do. Each
     // owns its own period gate, so being called per sample rather than per second
     // costs a comparison.
-    tripTick(g_live);
+    if (g_mayRecord) tripTick(g_live);
+    // The fit is a conclusion about the bound car, and it gates itself for the same
+    // reason. Beside the other two because it needs the same fresh sample.
+    corrTick(g_live);
   }
 }
 
@@ -1917,6 +2215,189 @@ static void handleVehicle() {
   }
   s += "]}";
   server.send(200, "application/json", s);
+}
+
+// ---------------------------------------------------------------- car binding
+//
+// One board, one car. The rule is in carbind.h; these are the two things somebody
+// can do about it when the board finds itself in a different one.
+
+static void handleCar() {
+  char seen[9];
+  vehKey(g_veh, seen, sizeof(seen));
+  const DidTally t = didMapTally();
+
+  String s = "{\"ok\":true,\"state\":\"";
+  s += carBindName(g_carState);
+  s += "\",\"bound\":\"";
+  s += g_carBound;
+  s += "\",\"seen\":\"";
+  s += seen;
+  s += "\",\"recording\":";
+  s += g_mayRecord ? "true" : "false";
+  s += ",\"why\":\"";
+  s += carBindWhy(g_carState);
+  // What adopting this car would cost, so the choice is made against a number
+  // rather than against the word "erase".
+  s += "\",\"holds\":{\"records\":";
+  s += t.total;
+  s += ",\"varies\":";
+  s += t.varies;
+  s += ",\"fitted\":";
+  s += t.fitted;
+  s += ",\"hits\":";
+  s += scanHitN;
+  s += ",\"trips\":";
+  s += (uint16_t)tripCount();
+  s += "}}";
+  server.send(200, "application/json", s);
+}
+
+// Adopt: this board now belongs to the car in front of it, and everything it held
+// about the last one goes.
+//
+// Destructive and deliberately so - keeping both would be the corruption this whole
+// rule exists to prevent, and a 1.5 MB partition has no room for two cars' sweeps
+// anyway. It reboots for the same reason /reset does: the register, the hit list
+// and the trend are in RAM describing files that no longer exist.
+static void handleCarAdopt() {
+  char seen[9];
+  vehKey(g_veh, seen, sizeof(seen));
+  if (!seen[0]) {
+    server.send(409, "application/json",
+                "{\"ok\":false,\"error\":\"this car has not identified itself yet - "
+                "start the engine and wait for discovery to finish\"}");
+    return;
+  }
+  if (server.arg("confirm") != "yes") {
+    server.send(400, "application/json",
+                "{\"ok\":false,\"error\":\"needs confirm=yes\"}");
+    return;
+  }
+
+  triageSetOn(false);
+  scan.running = false;
+  tripClose();
+
+  uint16_t files = 0;
+  File dir = LittleFS.open("/");
+  String doomed[64];
+  uint8_t n = 0;
+  if (dir && dir.isDirectory()) {
+    for (File f = dir.openNextFile(); f && n < 64; f = dir.openNextFile()) {
+      if (f.isDirectory()) continue;
+      const char *nm = f.name();
+      char full[40];
+      snprintf(full, sizeof(full), "%s%s", (nm && nm[0] == 47) ? "" : "/", nm ? nm : "");
+      if (dataIsFileName(full)) doomed[n++] = String(full);
+    }
+    dir.close();
+  }
+  for (uint8_t i = 0; i < n; i++) if (LittleFS.remove(doomed[i])) files++;
+
+  for (uint8_t i = 0; i < RESET_NVS_N; i++) {
+    Preferences pr;
+    if (pr.begin(RESET_NVS[i], false)) { pr.clear(); pr.end(); }
+  }
+  { Preferences pr; if (pr.begin("nexonauto", false)) { pr.clear(); pr.end(); } }
+
+  // After the wipe, not before: RESET_NVS clears nexonveh, and the identity in RAM
+  // is the NEW car's - which is exactly what should be written back.
+  vehSave();
+  carBindTo(seen);
+
+  // Start the pipeline on the next boot rather than here. Everything it touches is
+  // about to be reinitialised by a restart, and a sweep begun against state that is
+  // seconds from being thrown away is a sweep that resumes from a position that no
+  // longer means anything.
+  const bool go = server.arg("start") != "no";
+  if (go) { Preferences pr; if (pr.begin("nexonauto", false)) { pr.putBool("pending", true); pr.end(); } }
+
+  Serial.printf("[car] adopted %s, cleared %u files%s\n", seen, files,
+                go ? ", autopilot armed for next boot" : "");
+
+  String s = "{\"ok\":true,\"bound\":\"";
+  s += seen;
+  s += "\",\"files\":";
+  s += files;
+  s += ",\"autopilot\":";
+  s += go ? "true" : "false";
+  s += "}";
+  server.send(200, "application/json", s);
+
+  delay(250);
+  ESP.restart();
+}
+
+// Keep: stay bound to the car whose data this board holds.
+//
+// Nothing to do but say so - the binding is already what it is, and the recorders
+// are already gated. This exists so the page has something to close the prompt
+// with, and so the log records that somebody chose rather than ignored it.
+static void handleCarKeep() {
+  Serial.printf("[car] keeping %s - live only in this one\n",
+                g_carBound[0] ? g_carBound : "(nothing)");
+  String s = "{\"ok\":true,\"state\":\"";
+  s += carBindName(g_carState);
+  s += "\",\"recording\":";
+  s += g_mayRecord ? "true" : "false";
+  s += "}";
+  server.send(200, "application/json", s);
+}
+
+// ---------------------------------------------------------------- autopilot
+
+static void handleAuto() {
+  const AutoFacts f = autoGather();
+  uint32_t pct = 0;
+  if (scan.to >= scan.from) {
+    const uint32_t span = scan.to - scan.from + 1;
+    pct = span ? (uint32_t)((uint64_t)scan.tried * 100 / span) : 0;
+  }
+
+  String s = "{\"ok\":true,\"phase\":\"";
+  s += autoPhaseName(g_autoPhase);
+  s += "\",\"pct\":";
+  s += autoProgress(g_autoPhase, f, (uint8_t)(pct > 100 ? 100 : pct));
+  s += ",\"since\":";
+  s += (uint32_t)((millis() - g_autoSince) / 1000);
+  s += ",\"rounds\":";
+  s += g_autoRounds;
+  s += ",\"records\":";
+  s += f.records;
+  s += ",\"triaged\":";
+  s += f.triaged;
+  s += ",\"varying\":";
+  s += f.varying;
+  s += ",\"fitted\":";
+  s += f.fitted;
+  s += ",\"watching\":";
+  s += watchN;
+  // Why nothing is happening, when nothing is happening. A pipeline measured in
+  // drives looks identical to a broken one unless it says which it is.
+  s += ",\"held\":\"";
+  if (!f.mayRecord)                       s += "a different car - nothing is being recorded";
+  else if (g_autoPhase == AUTO_OFF)       s += "";
+  else if (activeTransport == TR_NONE)    s += "no transport - nothing to talk to";
+  else if (millis() - lastEcuOkMs > 3000) s += "the ECU is not answering - waiting for the ignition";
+  else                                    s += "";
+  s += "\"}";
+  server.send(200, "application/json", s);
+}
+
+static void handleAutoStart() {
+  if (!g_mayRecord) {
+    server.send(409, "application/json",
+                "{\"ok\":false,\"error\":\"this is not the car this board is bound to\"}");
+    return;
+  }
+  autoStart();
+  server.send(200, "application/json", "{\"ok\":true,\"phase\":\"sweep\"}");
+}
+
+static void handleAutoStop() {
+  autoStop();
+  server.send(200, "application/json", "{\"ok\":true}");
 }
 
 static void handleTriageStart() {
@@ -2696,6 +3177,12 @@ void setup() {
   server.on("/triage/stop",  handleTriageStop);
   server.on("/didmap",       handleDidMap);
   server.on("/vehicle",      handleVehicle);
+  server.on("/car",          handleCar);
+  server.on("/car/adopt",    handleCarAdopt);
+  server.on("/car/keep",     handleCarKeep);
+  server.on("/auto",         handleAuto);
+  server.on("/auto/start",   handleAutoStart);
+  server.on("/auto/stop",    handleAutoStop);
   server.on("/scan/start",  handleScanStart);
   server.on("/scan/stop",   handleScanStop);
   server.on("/scan/status", handleScanStatus);
@@ -2710,6 +3197,8 @@ void setup() {
 
   scanHitsBegin();
   vehLoad();            // the identity a backup keys on, if a drive has found it
+  carLoad();            // and which car this board is bound to, before anything records
+  autoLoad();           // a run in progress survives the ignition; that is the point
   watchLoad();          // before tripBegin: the watch set decides the CSV columns
   tripIntBegin();       // before tripBegin: the totals are columns on the first row
   tripBegin();
@@ -2724,6 +3213,32 @@ void setup() {
   // Costs one 10 KB write on the first boot after a sweep and nothing after that,
   // because the load below then finds every record and seeds nothing new.
   if (didMapDirty) didMapSave();
+
+  // The autopilot, picked up where the ignition left it.
+  //
+  // Adopting a car arms a run rather than starting one, because everything a sweep
+  // touches was about to be reinitialised by the restart that follows the wipe.
+  {
+    bool pending = false;
+    Preferences pr;
+    if (pr.begin("nexonauto", false)) {
+      pending = pr.getBool("pending", false);
+      if (pending) pr.putBool("pending", false);
+      pr.end();
+    }
+    if (pending) {
+      Serial.println("[auto] armed by an adoption - starting");
+      autoStart();
+    } else if (g_autoPhase == AUTO_WATCH) {
+      // One boot is one drive: the board loses power with the ignition. So this is
+      // where the set moves on to the next eight, and it is the only place it can
+      // be - rotating mid-drive bumps watchGen, which rotates the trip log, and a
+      // drive would become a pile of short files. Fits from the last drive were
+      // committed as they converged, so nothing is lost by rotating here.
+      g_autoSince = millis();
+      autoRotate();
+    }
+  }
 
   // Resume a run the ignition interrupted. Only when there is something to triage:
   // a board with an empty register has nothing to resume into.
@@ -2769,6 +3284,13 @@ void loop() {
   monStep();              // only does anything while the monitors page is open
   triageStep();           // only while a triage run is armed
   vehicleStep();          // twelve questions, once, while the ECU is answering
+  // Once a second, not every turn: discovery finishes seconds after boot and the
+  // answer cannot change faster than that, but it must not be decided once at boot
+  // either - the binding would then say "new car" for the first ten seconds of
+  // every drive, with every recorder ungated behind it.
+  static uint32_t carAt = 0;
+  if (millis() - carAt > 1000) { carAt = millis(); carRefresh(); }
+  autoStep();             // only does anything once a run has been started
   heartbeat(millis() - lastEcuOkMs < 3000, scan.running);
 
   if (scan.running) {

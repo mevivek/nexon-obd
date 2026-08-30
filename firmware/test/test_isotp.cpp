@@ -12,7 +12,15 @@
 #include "../Obdurate/trip_names.h"
 #include "../Obdurate/ui_paths.h"
 #include "../Obdurate/vehicle.h"
+#include "../Obdurate/carbind.h"
+// Before didmap_extract.h: extract.py strips the #includes out of didmap.h's pure
+// half, and the register now carries a correlation result, so the types it names
+// have to already be visible. The extractor cannot supply them - it deliberately
+// takes the file verbatim minus its includes, which is what keeps the host testing
+// the real rules rather than a copy.
+#include "../Obdurate/correlate.h"
 #include "didmap_extract.h"
+#include "../Obdurate/autopilot.h"
 
 #include <cstdio>
 
@@ -28,6 +36,16 @@ static void eq(int got, int want, const char *what) {
   g_ran++;
   if (got != want) { g_fail++; printf("  FAIL  %s (got %d, want %d)\n", what, got, want); }
   else             { printf("  ok    %s\n", what); }
+}
+
+static void streq(const char *got, const char *want, const char *what) {
+  g_ran++;
+  if (strcmp(got, want) != 0) {
+    g_fail++;
+    printf("  FAIL  %s (got \"%s\", want \"%s\")\n", what, got, want);
+  } else {
+    printf("  ok    %s\n", what);
+  }
 }
 
 // ------------------------------------------------------------------ canIsoTp
@@ -1261,17 +1279,301 @@ static void test_watch_parse_list() {
      WATCH_MAX, "and the set cannot exceed the cap");
 }
 
-// ------------------------------------------------------------------ vehicle
+// -------------------------------------------------- the register carries a fit
 
-static void streq(const char *got, const char *want, const char *what) {
-  g_ran++;
-  if (strcmp(got, want) != 0) {
-    g_fail++;
-    printf("  FAIL  %s (got \"%s\", want \"%s\")\n", what, got, want);
-  } else {
-    printf("  ok    %s\n", what);
-  }
+static DidRec fittedRec() {
+  DidRec r = DidRec();
+  r.did = 0x1002; r.ecu = 0; r.state = DID_VARIES;
+  r.reads = 42; r.changes = 7; r.len = 2;
+  r.first[0] = 0x00; r.first[1] = 0xA1;
+  r.last[0]  = 0x00; r.last[1]  = 0xB4;
+  r.corrRef = CORR_COOLANT; r.corrR100 = 97; r.corrN = 4200;
+  return r;
 }
+
+static void test_did_line_carries_a_fit() {
+  printf("register: the fitting round-trips\n");
+  char line[128];
+  didFormatLine(line, sizeof(line), fittedRec());
+  DidRec back;
+  ok(didParseLine(String(line), back), "a fitted record parses");
+  eq((int)back.corrRef, (int)CORR_COOLANT, "the reference survives");
+  eq((int)back.corrR100, 97, "and r");
+  eq((int)back.corrN, 4200, "and how much it rests on");
+  eq((int)back.reads, 42, "without disturbing what was already there");
+}
+
+static void test_did_line_still_reads_an_older_register() {
+  printf("register: a file written before the fitting existed\n");
+  // /didmap.csv is what a restore puts back. A format that rejected last month's
+  // backup would throw away hours of bus time to gain a column.
+  DidRec back;
+  ok(didParseLine(String("E,1002,varies,42,7,00A1,00B4,"), back),
+     "the eight-field form still loads");
+  eq((int)back.reads, 42, "with its counts intact");
+  eq((int)back.corrRef, (int)CORR_REFS, "and no fit, which is not a fit of zero");
+  eq((int)back.corrR100, 0, "nothing is invented for it");
+
+  ok(didParseLine(String("E,1002,varies,42,7,00A1,00B4"), back),
+     "and so does the seven-field form, without the trailing note");
+  eq((int)back.corrRef, (int)CORR_REFS, "still no fit");
+}
+
+static void test_did_line_refuses_an_impossible_fit() {
+  printf("register: a fit a file should not be able to claim\n");
+  // The same discipline as the changes-versus-reads invariant. r lives in [-1, 1]
+  // by construction, so a file outside it was written or parsed wrongly - and the
+  // last time a parser trusted a corrupted field, it reported 140 varying
+  // identifiers that did not exist.
+  DidRec back;
+  didParseLine(String("E,1002,varies,42,7,00A1,00B4,,coolant,340,4200"), back);
+  eq((int)back.corrRef, (int)CORR_REFS, "an r outside [-1, 1] is discarded, not clamped");
+
+  didParseLine(String("E,1002,varies,42,7,00A1,00B4,,coolant,97,3"), back);
+  eq((int)back.corrRef, (int)CORR_REFS,
+     "and a fit resting on fewer samples than one is allowed to need is not a fit");
+
+  didParseLine(String("E,1002,varies,42,7,00A1,00B4,,banana,97,4200"), back);
+  eq((int)back.corrRef, (int)CORR_REFS, "a reference this build does not know is not one");
+}
+
+// ------------------------------------------------------------------ car binding
+
+static void test_car_bind_four_answers() {
+  printf("car: which car is this\n");
+  eq(carBindState("", ""),                 CAR_NEW,     "nothing bound, nothing seen");
+  eq(carBindState("", "1f3c9a20"),         CAR_NEW,     "nothing bound is new whatever is seen");
+  eq(carBindState("1f3c9a20", "1f3c9a20"), CAR_MATCH,   "same key is the same car");
+  eq(carBindState("1f3c9a20", "deadbeef"), CAR_FOREIGN, "a different key is a different car");
+  eq(carBindState("1f3c9a20", ""),         CAR_UNKNOWN, "bound, but nothing identified itself");
+  eq(carBindState("1f3c9a20", nullptr),    CAR_UNKNOWN, "and a null is an absence, not a mismatch");
+}
+
+static void test_car_absence_never_stops_recording() {
+  printf("car: only a positive mismatch stops recording\n");
+  // The failure this exists to prevent is not the obvious one. Reading "no key" as
+  // "wrong car" would silently switch off every recording path on any car whose ECU
+  // declines mode 09 - and the symptom is a board that runs, shows live data and
+  // quietly never writes a trip log, which nobody would diagnose.
+  ok(carMayRecord(CAR_NEW),     "a board out of the box records");
+  ok(carMayRecord(CAR_UNKNOWN), "a car that will not identify itself records");
+  ok(carMayRecord(CAR_MATCH),   "its own car records");
+  ok(!carMayRecord(CAR_FOREIGN), "and only a car it can prove is different does not");
+}
+
+static void test_car_says_which_it_is() {
+  printf("car: the page is told why\n");
+  ok(strstr(carBindWhy(CAR_FOREIGN), "different car") != nullptr,
+     "a foreign car is named as one");
+  ok(strstr(carBindWhy(CAR_UNKNOWN), "Recording continues") != nullptr,
+     "and an unidentified one says recording continues, so nobody hunts a fault");
+  eq((int)(strcmp(carBindName(CAR_FOREIGN), "foreign") == 0), 1, "names round-trip");
+}
+
+// ------------------------------------------------------------------ correlate
+
+/** Feed a straight line: y = a + b*x. r must be exactly +/-1 whatever a and b are. */
+static Corr straightLine(double a, double b, uint32_t n) {
+  Corr c;
+  for (uint32_t i = 0; i < n; i++) corrAdd(c, (float)i, (float)(a + b * (double)i));
+  return c;
+}
+
+static void test_corr_perfect_relationships() {
+  printf("correlate: a straight line is r = 1\n");
+  Corr up = straightLine(10.0, 2.0, 400);
+  ok(fabsf(corrR(up) - 1.0f) < 0.001f, "rising together is +1");
+
+  Corr down = straightLine(500.0, -3.0, 400);
+  ok(fabsf(corrR(down) + 1.0f) < 0.001f, "falling as the other rises is -1");
+
+  // Offset and scale are exactly what r cannot see, which is why a correlation is
+  // never an identification: a perfect fit still leaves the units unknown.
+  Corr scaled = straightLine(-273.0, 0.1, 400);
+  ok(fabsf(corrR(scaled) - 1.0f) < 0.001f, "and offset and scale do not change it");
+  ok(corrR(up) <= 1.0f && corrR(down) >= -1.0f, "never leaves [-1, 1]");
+}
+
+static void test_corr_says_nothing_before_it_can() {
+  printf("correlate: too little to say\n");
+  Corr few = straightLine(0.0, 1.0, CORR_MIN_N - 1);
+  ok(isnan(corrR(few)), "under the minimum sample count there is no answer");
+  Corr enough = straightLine(0.0, 1.0, CORR_MIN_N);
+  ok(!isnan(corrR(enough)), "at the minimum there is");
+}
+
+static void test_corr_constant_is_not_uncorrelated() {
+  printf("correlate: a column that never moved\n");
+  // Zero variance makes r a 0/0. Reporting that as 0.00 would be a claim that the
+  // two are definitely unrelated, which is a much stronger statement than the data
+  // supports - and it is the state of every identifier triage called constant.
+  Corr flat;
+  for (uint32_t i = 0; i < 400; i++) corrAdd(flat, 42.0f, (float)i);
+  ok(isnan(corrR(flat)), "a constant identifier reports nothing, not zero");
+
+  Corr flatRef;
+  for (uint32_t i = 0; i < 400; i++) corrAdd(flatRef, (float)i, 42.0f);
+  ok(isnan(corrR(flatRef)), "and so does a reference that never moved");
+}
+
+static void test_corr_ignores_absent_data() {
+  printf("correlate: a gap is not a zero\n");
+  // This adapter drops roughly half of what it is asked. Folding a missing reply in
+  // as zero would fit the dropout pattern rather than the car, and would do it
+  // convincingly.
+  Corr c;
+  for (uint32_t i = 0; i < 100; i++) {
+    corrAdd(c, NAN, (float)i);
+    corrAdd(c, (float)i, NAN);
+    corrAdd(c, NAN, NAN);
+  }
+  eq((int)c.n, 0, "no pair is formed when either side is absent");
+
+  Corr mixed = straightLine(0.0, 1.0, 200);
+  const uint32_t before = mixed.n;
+  corrAdd(mixed, INFINITY, 1.0f);
+  corrAdd(mixed, 1.0f, -INFINITY);
+  eq((int)(mixed.n - before), 0, "and an infinity is absent too");
+}
+
+static void test_corr_reads_the_references_it_names() {
+  printf("correlate: the reference signals\n");
+  Live L;
+  L.rpm = 850; L.coolant = 88; L.speed = 0; L.load = 22; L.throttle = 14; L.volt = 14.2f;
+  ok(corrRefValue(L, CORR_RPM) == 850, "rpm");
+  ok(corrRefValue(L, CORR_COOLANT) == 88, "coolant");
+  ok(corrRefValue(L, CORR_VOLT) > 14.1f, "volt");
+  ok(isnan(corrRefValue(L, CORR_REFS)), "and an index that is not a reference is absent");
+
+  // A PID the car does not report is NAN in Live, and corrAdd drops the pair - so
+  // an unsupported reference simply never accumulates rather than reading as zero.
+  Live gaps;
+  ok(isnan(corrRefValue(gaps, CORR_SPEED)), "an unreported reading stays absent");
+
+  streq(corrRefName(CORR_THROTTLE), "throttle", "references are named");
+  streq(corrRefName(CORR_REFS), "none", "and the absence of one is named too");
+
+  Corr c = straightLine(0.0, 1.0, 200);
+  ok(!isnan(corrR(c)), "an accumulator with data reports");
+  corrReset(c);
+  eq((int)c.n, 0, "and reset empties it");
+  ok(isnan(corrR(c)), "so it reports nothing again - the watch set changed under it");
+}
+
+static void test_corr_best_keeps_the_sign() {
+  printf("correlate: choosing the strongest reference\n");
+  Corr row[CORR_REFS];
+  for (uint32_t i = 0; i < 300; i++) {
+    corrAdd(row[CORR_RPM],     (float)i, (float)(i % 7));          // weak
+    corrAdd(row[CORR_COOLANT], (float)i, (float)(1000 - 3 * i));   // perfect, negative
+  }
+  uint8_t ref = 99;
+  const float r = corrBest(row, &ref);
+  eq((int)ref, (int)CORR_COOLANT, "the strongest wins on absolute r");
+  ok(r < 0, "and its sign survives - falling as the other rises is still identified");
+
+  // Nothing fitted is not a reference of zero.
+  Corr empty[CORR_REFS];
+  ref = 99;
+  ok(isnan(corrBest(empty, &ref)), "nothing to fit reports nothing");
+  eq((int)ref, (int)CORR_REFS, "and names no reference");
+}
+
+static void test_corr_stored_form() {
+  printf("correlate: what the register keeps\n");
+  bool ok1 = false;
+  eq((int)corrToStored(0.9712f, &ok1), 97, "r is stored as hundredths");
+  ok(ok1, "and reported as present");
+  bool ok2 = true;
+  eq((int)corrToStored(NAN, &ok2), 0, "an absent fit stores nothing");
+  ok(!ok2, "and says so rather than storing a zero that reads as a finding");
+  bool ok3 = false;
+  eq((int)corrToStored(-1.0f, &ok3), -100, "the negative end");
+  eq((int)corrToStored(1.4f, &ok3), 100, "and rounding cannot push it out of range");
+}
+
+// ------------------------------------------------------------------ autopilot
+
+static AutoFacts facts(bool swept, uint16_t rec, uint16_t tri, uint16_t var, uint16_t fit) {
+  AutoFacts f;
+  f.sweepDone = swept; f.records = rec; f.triaged = tri;
+  f.varying = var; f.fitted = fit; f.mayRecord = true;
+  return f;
+}
+
+static void test_auto_walks_the_pipeline() {
+  printf("autopilot: the phases\n");
+  streq(autoPhaseName(AUTO_SWEEP), "sweep", "phases are named");
+  streq(autoPhaseName(AUTO_DONE),  "done",  "including the last one");
+  streq(autoPhaseName(AUTO_OFF),   "off",   "and the one that is not running");
+  eq(autoNext(AUTO_SWEEP,  facts(false, 0, 0, 0, 0)),      AUTO_SWEEP,
+     "a sweep in progress stays a sweep");
+  eq(autoNext(AUTO_SWEEP,  facts(true, 214, 0, 0, 0)),     AUTO_TRIAGE,
+     "a finished sweep with hits moves to triage");
+  eq(autoNext(AUTO_TRIAGE, facts(true, 214, 214, 66, 0)),  AUTO_WATCH,
+     "a fully triaged register moves to watching");
+  eq(autoNext(AUTO_WATCH,  facts(true, 214, 214, 66, 66)), AUTO_DONE,
+     "and every varying identifier fitted is done");
+}
+
+static void test_auto_needs_every_record_triaged() {
+  printf("autopilot: triage finishes before a slot is spent\n");
+  // Moving on early would choose eight identifiers out of a partial list, and the
+  // ones still without a verdict are exactly the ones nothing is known about.
+  eq(autoNext(AUTO_TRIAGE, facts(true, 214, 213, 66, 0)), AUTO_TRIAGE,
+     "one record short is not finished");
+  eq(autoNext(AUTO_TRIAGE, facts(true, 214, 214, 0, 0)),  AUTO_DONE,
+     "but a register where nothing varies has nothing to watch");
+}
+
+static void test_auto_silence_is_not_a_reason_to_restart() {
+  printf("autopilot: a sweep that found nothing\n");
+  // Zero hits after a full pass IS an answer - this ECU does not answer service
+  // 0x22 - and looping on it would re-ask that question for the life of the car.
+  eq(autoNext(AUTO_SWEEP, facts(true, 0, 0, 0, 0)), AUTO_DONE,
+     "an empty register after a full sweep is a conclusion, not a retry");
+}
+
+static void test_auto_foreign_car_holds() {
+  printf("autopilot: a car this board is not bound to\n");
+  AutoFacts f = facts(true, 214, 214, 66, 0);
+  f.mayRecord = false;
+  eq(autoNext(AUTO_TRIAGE, f), AUTO_TRIAGE, "the pipeline holds rather than advancing");
+  // Holding, not stopping: the run belongs to the bound car, and throwing it away
+  // because the board was borrowed for an afternoon would cost the drives spent.
+  eq(autoNext(AUTO_WATCH, f), AUTO_WATCH, "at every phase");
+  f.mayRecord = true;
+  eq(autoNext(AUTO_TRIAGE, f), AUTO_WATCH, "and resumes when the right car is back");
+}
+
+static void test_auto_off_and_done_are_final() {
+  printf("autopilot: the two states nothing moves out of\n");
+  eq(autoNext(AUTO_OFF,  facts(true, 214, 214, 66, 66)), AUTO_OFF,
+     "a board nobody started stays stopped");
+  eq(autoNext(AUTO_DONE, facts(true, 214, 214, 66, 0)),  AUTO_DONE,
+     "and a finished run does not restart itself");
+}
+
+static void test_auto_progress_and_selection() {
+  printf("autopilot: progress, and what earns a slot\n");
+  eq(autoProgress(AUTO_SWEEP,  facts(false, 0, 0, 0, 0), 42), 42, "the sweep reports its own");
+  eq(autoProgress(AUTO_TRIAGE, facts(true, 200, 100, 0, 0), 0), 50, "triage is records read");
+  eq(autoProgress(AUTO_WATCH,  facts(true, 200, 200, 60, 15), 0), 25, "watching is fits made");
+  eq(autoProgress(AUTO_DONE,   facts(true, 1, 1, 1, 1), 0), 100, "done is done");
+  // No division by zero on an empty register, which is the state before a sweep.
+  eq(autoProgress(AUTO_TRIAGE, facts(true, 0, 0, 0, 0), 0), 0, "an empty register is 0, not a crash");
+
+  DidRec r = DidRec();
+  r.state = DID_VARIES;
+  ok(autoWantsWatch(r), "an unfitted varying identifier wants a slot");
+  r.corrRef = CORR_COOLANT;
+  ok(!autoWantsWatch(r), "one already fitted does not");
+  DidRec c = DidRec();
+  c.state = DID_CONSTANT;
+  ok(!autoWantsWatch(c), "and a constant cannot correlate with anything, so never does");
+}
+
+// ------------------------------------------------------------------ vehicle
 
 // A real mode 01 PID 00 reply, off this car. 0xBE = 1011 1110: PID 01 supported,
 // 02 not, 03 04 05 supported, and so on.
@@ -1609,6 +1911,29 @@ int main() {
   test_veh_vin_rejects_what_is_not_a_vin();
   test_veh_cvn_is_hex_not_text();
   test_veh_key_identifies_a_car();
+
+  test_car_bind_four_answers();
+  test_car_absence_never_stops_recording();
+  test_car_says_which_it_is();
+
+  test_corr_perfect_relationships();
+  test_corr_says_nothing_before_it_can();
+  test_corr_constant_is_not_uncorrelated();
+  test_corr_ignores_absent_data();
+  test_corr_reads_the_references_it_names();
+  test_corr_best_keeps_the_sign();
+  test_corr_stored_form();
+
+  test_auto_walks_the_pipeline();
+  test_auto_needs_every_record_triaged();
+  test_auto_silence_is_not_a_reason_to_restart();
+  test_auto_foreign_car_holds();
+  test_auto_off_and_done_are_final();
+  test_auto_progress_and_selection();
+
+  test_did_line_carries_a_fit();
+  test_did_line_still_reads_an_older_register();
+  test_did_line_refuses_an_impossible_fit();
 
   printf("\n%d checks, %d failed\n", g_ran, g_fail);
   return g_fail ? 1 : 0;

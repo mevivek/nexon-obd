@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 #include "obd_types.h"
+#include "correlate.h"
 
 // What is known about each identifier a sweep found.
 //
@@ -73,6 +74,20 @@ struct DidRec {
   uint8_t  len;
   uint8_t  first[8];
   uint8_t  last[8];
+
+  // What a drive's worth of watching found this identifier tracking, if anything.
+  //
+  // Kept on the record rather than in a table of its own because it is the same
+  // kind of fact as the verdict above - something established once and then not
+  // worked out again - and because the register is what survives, gets exported and
+  // gets restored. A correlation held anywhere else would be recomputed every time
+  // the watch set came back round to this identifier.
+  //
+  // `corrRef` is CORR_REFS when nothing has been fitted, which is not the same as
+  // an r of zero. See correlate.h for why this is "tracks" and never "is".
+  uint8_t  corrRef  = CORR_REFS;
+  int8_t   corrR100 = 0;        // r x 100, so the file stays one line of text
+  uint16_t corrN    = 0;        // paired samples behind it, for judging the fit
 };
 
 // The verdict, as a pure function of what was observed, so it can be tested rather
@@ -139,13 +154,23 @@ static uint8_t didUnhex(const char *s, uint8_t *out, uint8_t cap) {
 // only out of reach of the host suite because it sat inside a function that opens
 // one. Anything that can be tested without a board belongs on this side of the line.
 //
-// Fields: ecu,did,state,reads,changes,first,last,note
+// Fields: ecu,did,state,reads,changes,first,last,note,tracks,r,samples
+//
+// The last three were added when the board started doing its own fitting. They go
+// on the END, after the note, so a register written by an older firmware still
+// loads: the parser needs seven fields and treats everything after as optional.
+// That matters more than tidiness - /didmap.csv is the file a restore puts back,
+// and a format that rejected last month's backup would throw away hours of bus time
+// to gain a column.
 static void didFormatLine(char *out, size_t cap, const DidRec &r) {
   char a[24], b[24];
   didHex(a, sizeof(a), r.first, r.len);
   didHex(b, sizeof(b), r.last, r.len);
-  snprintf(out, cap, "%c,%04X,%s,%u,%u,%s,%s,", r.ecu ? 'T' : 'E', r.did,
-           didStateName(r.state), r.reads, r.changes, a, b);
+  const bool fitted = r.corrRef < CORR_REFS;
+  snprintf(out, cap, "%c,%04X,%s,%u,%u,%s,%s,,%s,%d,%u", r.ecu ? 'T' : 'E', r.did,
+           didStateName(r.state), r.reads, r.changes, a, b,
+           fitted ? corrRefName(r.corrRef) : "", fitted ? r.corrR100 : 0,
+           fitted ? r.corrN : 0);
 }
 
 static bool didParseLine(const String &line, DidRec &r) {
@@ -157,10 +182,13 @@ static bool didParseLine(const String &line, DidRec &r) {
   // the left. Every record then reloaded as `unknown` with `changes` holding
   // whatever the first data byte happened to parse to as decimal, which turned a
   // whole block of status flags storing 01 into "varies" before a single read.
-  String f[8];
+  // Eleven now, because the fitting added three on the end. Seven is still all that
+  // is REQUIRED: a register written before those existed has to keep loading, or a
+  // firmware update would silently discard a file that took hours of bus time.
+  String f[11];
   uint8_t nf = 0;
   int from = 0;
-  while (nf < 8) {
+  while (nf < 11) {
     int c = line.indexOf(',', from);
     if (c < 0) { f[nf++] = line.substring(from); break; }
     f[nf++] = line.substring(from, c);
@@ -184,6 +212,25 @@ static bool didParseLine(const String &line, DidRec &r) {
   // reports the corruption as a finding about the car - which is exactly what
   // happened. Drop them and let triage rebuild from observation.
   if (r.reads && r.changes >= r.reads) { r.reads = 0; r.changes = 0; r.state = DID_UNKNOWN; }
+
+  // The fitting, if this file carries it. Absent fields are absent, never zero: an
+  // r of 0.00 is a claim that an identifier is definitely unrelated to everything,
+  // and an old file makes no such claim.
+  if (nf >= 11 && f[8].length()) {
+    for (uint8_t i = 0; i < CORR_REFS; i++)
+      if (f[8] == corrRefName(i)) { r.corrRef = i; break; }
+    if (r.corrRef < CORR_REFS) {
+      int v = f[9].toInt();
+      // Same discipline as the changes-versus-reads invariant above. r lives in
+      // [-1, 1] by construction, so a file outside it was written or parsed
+      // wrongly, and a fabricated 3.4 correlation presented as a finding about the
+      // car is exactly the failure that invariant was added for.
+      if (v < -100 || v > 100) r.corrRef = CORR_REFS;
+      else { r.corrR100 = (int8_t)v; r.corrN = (uint16_t)f[10].toInt(); }
+    }
+    // A fit with fewer paired samples than one is allowed to need is not a fit.
+    if (r.corrN < CORR_MIN_N) { r.corrRef = CORR_REFS; r.corrR100 = 0; r.corrN = 0; }
+  }
   return true;
 }
 
@@ -215,7 +262,7 @@ static DidRec *didFind(uint8_t ecu, uint16_t did) {
 }
 
 
-static const char *DIDMAP_HEADER = "ecu,did,state,reads,changes,first,last,note";
+static const char *DIDMAP_HEADER = "ecu,did,state,reads,changes,first,last,note,tracks,r,samples";
 
 static bool didMapSave() {
   if (!didMap || !tripFsUp) return false;
@@ -287,7 +334,7 @@ static void didMapBegin(uint16_t cap) {
 
 // Counts for the status endpoint and the page. Cheap enough to recompute per request
 // rather than kept in sync, which is one fewer thing that can drift.
-struct DidTally { uint16_t total, unknown, constant, varies, identified; };
+struct DidTally { uint16_t total, unknown, constant, varies, identified, triaged, fitted; };
 
 static DidTally didMapTally() {
   DidTally t = {};
@@ -299,6 +346,10 @@ static DidTally didMapTally() {
       case DID_IDENTIFIED: t.identified++; break;
       default:             t.unknown++;    break;
     }
+    // Both are what the autopilot advances on, so they are counted here rather
+    // than walked again by the caller - one pass, one definition of each.
+    if (didMap[i].reads >= DIDMAP_CONST_READS) t.triaged++;
+    if (didMap[i].state == DID_VARIES && didMap[i].corrRef < CORR_REFS) t.fitted++;
   }
   return t;
 }

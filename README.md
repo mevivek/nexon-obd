@@ -63,6 +63,8 @@ that was built into the firmware rather than to a stub.
 | `/trips` | Per-drive CSV logs — list, download, delete |
 | `/history` | The stored trend buffer as JSON |
 | `/vehicle` | What this car is and which readings it supports, as JSON |
+| `/car` | Which car this board is bound to, and whether it is recording |
+| `/auto` | The autopilot's phase and progress |
 | `/files` | What data is on the filesystem — the list a backup is built from |
 | `/file` | One data file, streamed |
 | `/reset` | Erase the data, or the data and the dashboard bundle |
@@ -474,6 +476,87 @@ The manifest carries the hash, not the VIN. It answers the only question the arc
 is asked exactly as well, and a backup is a file that gets copied to a phone and a
 laptop.
 
+### One board, one car
+
+Everything this board accumulates is about a particular vehicle — the sweep's hits
+are that car's identifier space, the register is verdicts about that car's ECU, the
+trip logs are that car's drives. None of it carries a vehicle in the record itself,
+so mixing two cars does not produce a detectable error. It produces a file that is
+quietly wrong forever.
+
+So the binding is explicit. The board stores the key of the car it belongs to, and
+in a car that is **provably** a different one it records nothing: no sweep, no
+triage, no trip log, no correlation. The live dashboard keeps working, because it
+reads what the car is doing now and persists none of it — and a board showing a
+blank screen in the wrong car would be useless at exactly the moment somebody wants
+to glance at a temperature. It also bounds the filesystem, which is the other half
+of the reason: a 1.5 MB partition holding one car's data is comfortable and two
+cars' is not.
+
+A banner then offers the only choice that is anyone's to make: **onboard this car**,
+which erases the previous one's data and starts again, or **keep the other car**,
+which leaves the binding alone and gives this one live readings only.
+
+Three answers, not two, and the middle one is the important one. A key exists only
+once mode 09 has answered, so "the keys differ" and "there is no key" are completely
+different facts and only the first stops anything. Reading absence as a mismatch
+would silently disable recording on every car that declines mode 09, and the
+symptom — a board that runs, shows live data and never writes a trip log — is one
+nobody would diagnose.
+
+### The autopilot
+
+The investigation used to be four phases and three decisions, hours apart, with the
+last step done by hand in a spreadsheet. Nobody chooses differently at any of those
+points, which is what makes it automatable — and the phases outlast anyone's
+attention, so a prompt between them is one that gets missed.
+
+Started once, the board sweeps the identifier space, triages the hits to find which
+move, then watches the ones that move eight at a time, fitting each against the live
+readings. It advances on its own and keeps its phase in NVS, because the ignition
+going off is a power cut and this pipeline is measured in drives:
+
+- **Sweep** — about 30 minutes on CAN, the better part of a day over BLE.
+- **Triage** — about an hour of engine-on. This adapter answers roughly half of what
+  it is asked, so ten clean reads of every hit needs about twenty passes.
+- **Watch** — one drive per eight identifiers, so eight or nine drives for a
+  register the size of this car's.
+
+The watch set rotates between drives and never during one: changing it bumps the
+watch generation, which rotates the trip CSV, and rotating mid-drive would turn one
+drive into a pile of short files.
+
+Two things it will not do. A sweep that finds nothing is a **conclusion** — this ECU
+does not answer service 0x22 — not a reason to sweep again. And a car the board is
+not bound to **holds** the pipeline rather than ending it, so an afternoon in
+somebody else's car does not cost the drives already spent.
+
+### The board does the fitting now
+
+Watching logs an identifier beside rpm and coolant; something then has to fit one
+against the other. That was the only step still done by a person, it is the same
+arithmetic every time, and it is why a board that had collected everything needed to
+answer "what is 1002" still could not say anything about it.
+
+A Pearson correlation is six running sums. Eight watched identifiers against six
+reference signals is forty-eight of them, which is nothing on an ESP32, and the best
+fit goes into the register as three new columns — so `/didmap.csv` now carries
+`tracks,r,samples` on the end. They are appended rather than inserted so a register
+written by an older firmware still loads; that file is what a restore puts back, and
+a format that rejected last month's backup would throw away hours of bus time to
+gain a column.
+
+**It says "tracks", never "is".** Everything under a bonnet correlates with
+everything else — oil temperature tracks coolant almost perfectly, and both track
+runtime after a cold start — so a strong fit narrows the field rather than settling
+it. r is also unchanged by offset and scale, so a perfect correlation still leaves
+the units unknown. Naming an identifier stays a human act, which is why
+`DID_IDENTIFIED` outranks every machine verdict.
+
+A pair is only counted when **both** sides are present. This adapter drops roughly
+half of what it is asked, and folding a missing reply in as a zero would fit the
+dropout pattern rather than the car — convincingly.
+
 ### Being left in the car
 
 The board deep-sleeps after ten minutes with no ECU response. That timer answers
@@ -707,7 +790,7 @@ can be asked about without a board — the `/data` contract, the routing, the ca
 headers, the DID watch wiring, the trip columns, the history constants — is asserted
 against the source under node.
 
-The frontend has its own suite, `npm --prefix web test`: 341 checks over the
+The frontend has its own suite, `npm --prefix web test`: 371 checks over the
 hold-last-value merge, the warning-flag gating, the rate tracker, the mileage
 readouts and each page's logic, run against the modules that implement them. That is
 the point of the split — those used to be JavaScript inside C++ raw string literals,

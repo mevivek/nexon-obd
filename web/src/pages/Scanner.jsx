@@ -22,6 +22,7 @@ import {
 import {
   readRate, readProgress, readsEta, tallyText, CONDITIONS_NOTE,
 } from './scanner/triage.js';
+import { AutoCard } from './scanner/AutoCard.jsx';
 
 // A running sweep is watched; an idle board is left alone. The interval used to be
 // created only inside the firmware's Start handler, so opening the page mid-sweep
@@ -137,6 +138,7 @@ export function Scanner() {
 
   return (
     <>
+      <AutoCard />
       <div class="card scan">
         {/* There are two ECUs, so a dropdown is the wrong control: it hides one of
             the two choices behind a tap and brings the platform's own chrome with

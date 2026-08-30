@@ -529,6 +529,107 @@ console.log('\nvehicle discovery is honest about what it did not learn');
      'no local named HEX - the Arduino core has already taken that name');
 }
 
+// ---------------------------------------------------------------- one car
+//
+// The rule: this board belongs to one vehicle, and in any other one it records
+// nothing. Mixing two cars' data produces no detectable error - a hit is a DID and
+// some bytes, with no vehicle in the record - so the only place this can be
+// enforced is at the moment of writing, and it has to be enforced at EVERY such
+// moment. One ungated recorder is the whole rule gone.
+console.log('\nnothing is recorded in a car this board is not bound to');
+{
+  const ino = readSrc(join(here, '../Obdurate/Obdurate.ino'));
+  const bind = readSrc(join(here, '../Obdurate/carbind.h'));
+
+  // Every path that writes a conclusion or a sample to flash, named rather than
+  // inferred: a recorder added later without a gate is the failure this catches.
+  for (const [what, re] of [
+    ['the trend ring',  /if \(g_mayRecord\) histTick\(/],
+    ['the trip log',    /if \(g_mayRecord\) tripTick\(/],
+    ['the sweep',       /static void scanStep\(uint32_t budgetMs\) \{[\s\S]{0,300}?if \(!g_mayRecord\) return;/],
+    ['triage',          /static void triageStep\(\) \{[\s\S]{0,300}?if \(!g_mayRecord\) return;/],
+    ['the fitting',     /static void corrTick\(const Live &L\) \{\s*\n\s*if \(!carMayRecordNow\(\)\) return;/],
+  ]) ok(re.test(ino), `${what} is gated on the binding`);
+
+  // And the live path is NOT. A board showing a blank screen in the wrong car
+  // would be worse than useless at the moment somebody wants a temperature.
+  const pub = ino.slice(ino.indexOf('  if (any) {'));
+  const body = pub.slice(0, pub.indexOf('\n}\n'));
+  ok(/g_live\s+= pub;/.test(body) && !/if \(g_mayRecord\)[\s\S]{0,40}g_live\s+= pub;/.test(body),
+     'publishing the live sample is not gated - the dashboard works in any car');
+
+  // The one that would be invisible: deciding the binding once at boot. Discovery
+  // finishes seconds after startup, so a state settled before it ran says "new
+  // car" for the first ten seconds of every drive with every recorder open behind
+  // it.
+  ok(/millis\(\) - carAt > 1000\) \{ carAt = millis\(\); carRefresh\(\); \}/.test(ino),
+     'the binding is recomputed while running, not decided once at boot');
+
+  // Absence must never read as a mismatch. This is the direction that fails
+  // silently: it would switch off recording on every car that declines mode 09,
+  // and the symptom is a board that runs and quietly never writes a trip log.
+  ok(/if \(!haveSeen\)\s+return CAR_UNKNOWN;/.test(bind),
+     'no key seen is unknown, never foreign');
+  ok(/return state != CAR_FOREIGN;/.test(bind),
+     'and only a proven mismatch stops recording');
+
+  // Adopting is destructive and must not be a bare GET that a link preloader or a
+  // second tap can fire.
+  const ad = ino.slice(ino.indexOf('static void handleCarAdopt()'));
+  const adopt = ad.slice(0, ad.indexOf('\n}\n'));
+  ok(/server\.arg\("confirm"\) != "yes"/.test(adopt), 'adopting a car needs a confirmation');
+  ok(/if \(!seen\[0\]\)/.test(adopt),
+     'and refuses before the new car has identified itself, or it would bind to nothing');
+  ok(adopt.indexOf('vehSave();') > adopt.indexOf('RESET_NVS'),
+     'the new identity is written after the wipe, not before it');
+}
+
+// ---------------------------------------------------------------- autopilot
+//
+// A pipeline measured in drives. The failure modes are all "looks stuck": a phase
+// that cannot advance, a rotation that never happens, a fit lost to the ignition.
+console.log('\nthe autopilot survives the ignition');
+{
+  const ino = readSrc(join(here, '../Obdurate/Obdurate.ino'));
+  const auto = readSrc(join(here, '../Obdurate/autopilot.h'));
+
+  ok(/autoPrefs\.putUChar\("phase"/.test(ino), 'the phase is kept in NVS');
+  ok(/g_autoPhase\s+= autoPrefs\.getUChar\("phase"/.test(ino), 'and read back on boot');
+  ok(/if \(g_autoPhase > AUTO_DONE\) g_autoPhase = AUTO_OFF;/.test(ino),
+     'a phase NVS does not recognise falls back to off rather than to an index');
+
+  // Rotation at boot and nowhere else. Mid-drive it would bump watchGen, which
+  // rotates the trip log, and one drive would become a pile of short files.
+  const rot = [...ino.matchAll(/autoRotate\(\)/g)].length;
+  ok(rot >= 2, 'autoRotate has a call site');
+  ok(!/void loop\(\)[\s\S]*autoRotate\(\)/.test(ino),
+     'and it is never called from loop() - that would rotate the trip log mid-drive');
+
+  // A drive's fits must not live only in RAM: the ignition is a power cut, not a
+  // shutdown.
+  ok(/millis\(\) - lastCommit > 300000UL/.test(ino),
+     'fits are committed periodically, not only when the set rotates');
+  ok(/const int delta = \(int\)stored - \(int\)rec->corrR100;/.test(ino),
+     'and only when the answer actually moved, so a converged set stops writing');
+
+  // The two conclusions that must not become loops.
+  ok(/return f\.records \? AUTO_TRIAGE : AUTO_DONE;/.test(auto),
+     'a sweep that found nothing is a conclusion, not a retry');
+  ok(/if \(!f\.mayRecord\) return phase;/.test(auto),
+     'a foreign car holds the pipeline rather than ending it');
+  ok(/if \(phase == AUTO_OFF \|\| phase == AUTO_DONE\) return phase;/.test(auto),
+     'and neither off nor done restarts itself');
+
+  // A correlation is not an identification, and nothing may present it as one.
+  const corr = readSrc(join(here, '../Obdurate/correlate.h'));
+  ok(/tracks/.test(corr) && /never/.test(corr),
+     'correlate.h states the tracks-not-is rule');
+  ok(/if \(isnan\(x\) \|\| isnan\(y\)/.test(corr),
+     'an absent reading forms no pair - a gap is not a zero');
+  ok(/if \(vx <= 0 \|\| vy <= 0\) return NAN;/.test(corr),
+     'a column that never moved reports nothing, not an r of zero');
+}
+
 // ---------------------------------------------------------------- scan hits
 //
 // A sweep's results are the point of running one, and they outlive it: /watch offers
