@@ -1497,7 +1497,7 @@ static void test_corr_stored_form() {
 static AutoFacts facts(bool swept, uint16_t rec, uint16_t tri, uint16_t var, uint16_t fit) {
   AutoFacts f;
   f.sweepDone = swept; f.records = rec; f.triaged = tri;
-  f.varying = var; f.fitted = fit; f.mayRecord = true;
+  f.varying = var; f.fitted = fit; f.mayRecord = true; f.tcm = false;
   return f;
 }
 
@@ -1509,11 +1509,39 @@ static void test_auto_walks_the_pipeline() {
   eq(autoNext(AUTO_SWEEP,  facts(false, 0, 0, 0, 0)),      AUTO_SWEEP,
      "a sweep in progress stays a sweep");
   eq(autoNext(AUTO_SWEEP,  facts(true, 214, 0, 0, 0)),     AUTO_TRIAGE,
-     "a finished sweep with hits moves to triage");
+     "a finished sweep with hits moves to triage when there is one ECU");
   eq(autoNext(AUTO_TRIAGE, facts(true, 214, 214, 66, 0)),  AUTO_WATCH,
      "a fully triaged register moves to watching");
   eq(autoNext(AUTO_WATCH,  facts(true, 214, 214, 66, 66)), AUTO_DONE,
      "and every varying identifier fitted is done");
+}
+
+static void test_auto_sweeps_the_second_ecu_only_when_it_answered() {
+  printf("autopilot: the transmission controller\n");
+  AutoFacts withTcm = facts(true, 214, 0, 0, 0);
+  withTcm.tcm = true;
+  eq(autoNext(AUTO_SWEEP, withTcm), AUTO_SWEEP2,
+     "a second ECU that answered gets its own sweep");
+  eq(autoNext(AUTO_SWEEP2, facts(false, 214, 0, 0, 0)), AUTO_SWEEP2,
+     "which runs to completion like the first");
+  eq(autoNext(AUTO_SWEEP2, facts(true, 260, 0, 0, 0)), AUTO_TRIAGE,
+     "and then triage covers both, because the register keys on (ecu, did)");
+
+  // Gated on a POSITIVE answer, which is the opposite of the rule everywhere else
+  // here and deliberate: a sweep of an ECU that is not there does not fail, it
+  // stalls - 25 consecutive timeouts hold position rather than concluding an
+  // unswept range is empty. Right for a sweep, fatal for a pipeline, which would
+  // then wait for an ECU that never speaks with no way to tell that from a car
+  // parked overnight.
+  eq(autoNext(AUTO_SWEEP, facts(true, 214, 0, 0, 0)), AUTO_TRIAGE,
+     "silence at the second address skips it rather than stalling the pipeline");
+
+  // The phase numbers are stored in NVS, so they must not shift when one is added.
+  eq((int)AUTO_SWEEP, 1, "the stored phase numbers are pinned");
+  eq((int)AUTO_TRIAGE, 2, "triage is still 2");
+  eq((int)AUTO_WATCH, 3, "watch is still 3");
+  eq((int)AUTO_DONE, 4, "done is still 4");
+  eq((int)AUTO_SWEEP2, 5, "and a new phase goes on the end, whatever order it runs in");
 }
 
 static void test_auto_needs_every_record_triaged() {
@@ -1925,6 +1953,7 @@ int main() {
   test_corr_stored_form();
 
   test_auto_walks_the_pipeline();
+  test_auto_sweeps_the_second_ecu_only_when_it_answered();
   test_auto_needs_every_record_triaged();
   test_auto_silence_is_not_a_reason_to_restart();
   test_auto_foreign_car_holds();

@@ -19,8 +19,8 @@ npm --prefix web run build      # frontend build + 300 KB budget gate
 web/deploy.sh                   # build, then upload the bundle to 192.168.4.1
 ```
 
-Expected as of v1.17.0: **473** host C++ checks, **285** firmware-source checks,
-**371** frontend checks. All must be 0 failed. (The laptop-dashboard suite was
+Expected as of v1.18.0: **482** host C++ checks, **287** firmware-source checks,
+**382** frontend checks. All must be 0 failed. (The laptop-dashboard suite was
 retired with `tools/dashboard.html` in v1.15.0.)
 
 `npm --prefix web run build` also regenerates `firmware/Obdurate/ui_bundle.h` — the
@@ -64,7 +64,7 @@ Start-Sleep 8; $sp.ReadExisting(); $sp.Close()
 A healthy boot with no car attached:
 
 ```
-[fw] Obdurate 1.17.0
+[fw] Obdurate 1.18.0
 [can] TWAI up @500k
 [ap] Obdurate -> http://192.168.4.1
 [boot] reset=usb wakes=0
@@ -134,6 +134,12 @@ local named `HEX` compiles clean under `g++` — the host shims do not define it
 fails only at `arduino-cli`, which is the slowest place in this project to find a
 typo. Pinned by a check in `test_dashboard.mjs`. The same trap exists for `DEC`,
 `OCT`, `BIN`, `B1`..`B11111111` and `min`/`max`.
+
+**`AutoPhase` numbers are stored in NVS, so they are assigned, not positional.** A
+new phase goes on the END of the enum whatever order it runs in - `AUTO_SWEEP2 = 5`
+runs second. Inserting one in pipeline order renumbers every phase after it, and a
+board that lost power mid-run comes back in a different phase than it left. Pinned
+by checks in both suites.
 
 **One board, one car - and absence is not a mismatch.** `carbind.h` stops every
 recorder when the discovered `vehKey()` differs from the bound one, because two cars'
@@ -205,11 +211,22 @@ claims are labelled.
 
 ---
 
-## Where things stand (v1.17.0)
+## Where things stand (v1.18.0)
 
 Recent work, newest first. `git log` has the reasoning; this is the map.
 
-- **Autopilot** (`autopilot.h`, `/auto`, the Scanner page's top card) - sweep,
+- **Five tabs, not six.** Sweep and Watch merged into **Discover** (`Discover.jsx`,
+  still at `/scan`): they are two halves of one pipeline the autopilot runs end to
+  end. `/watch` redirects to `/#/scan` and stays, because it is in bookmarks and in
+  the nav of any older bundle on a LittleFS. One pill between three pollers, chosen
+  by precedence in `discover/pill.js` - never last-writer, or it flickers between
+  three unrelated sentences.
+- **The pipeline sweeps the TCM too**, but only when discovery's probe at 0x7E9
+  actually answered. This is the one place that gates on a POSITIVE rather than on
+  the absence of a negative, and deliberately: a sweep of an ECU that is not there
+  does not fail, it *stalls* - 25 consecutive timeouts hold position rather than
+  concluding an unswept range is empty. Right for a sweep, fatal for a pipeline.
+- **Autopilot** (`autopilot.h`, `/auto`, Discover's top card) - sweep,
   triage and watch chained, advancing on their own, surviving the ignition in NVS.
   The watch set rotates eight at a time at `tripBegin()` - never mid-drive, because
   that bumps `watchGen` and rotates the trip CSV.

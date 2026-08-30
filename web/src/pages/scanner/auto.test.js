@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   PHASES, phaseInfo, phaseIndex, autoStatus, autoText, autoCounts,
-  drivesLeft, fitText, FIT_NOTE,
+  drivesLeft, fitText, FIT_NOTE, tcmText,
 } from './auto.js';
 
 const SWEEP  = { phase: 'sweep', pct: 31, records: 0, triaged: 0, varying: 0, fitted: 0, watching: 0, rounds: 0, held: '' };
@@ -16,9 +16,9 @@ const TRIAGE = { phase: 'triage', pct: 47, records: 214, triaged: 100, varying: 
 const WATCH  = { phase: 'watch', pct: 18, records: 214, triaged: 214, varying: 66, fitted: 12, watching: 8, rounds: 2, held: '' };
 
 describe('phases', () => {
-  it('are the three the firmware walks, in order', () => {
-    expect(PHASES.map((p) => p.id)).toEqual(['sweep', 'triage', 'watch']);
-    expect(phaseIndex('triage')).toBe(2);
+  it('are the four the firmware walks, in order', () => {
+    expect(PHASES.map((p) => p.id)).toEqual(['sweep', 'sweep2', 'triage', 'watch']);
+    expect(phaseIndex('triage')).toBe(3);
     expect(phaseIndex('off')).toBe(0);
     expect(phaseInfo('nonsense')).toBe(null);
   });
@@ -31,6 +31,34 @@ describe('phases', () => {
     // The one people will not believe unless it is written down.
     expect(phaseInfo('watch').cost).toContain('drive');
     expect(phaseInfo('sweep').cost).toContain('30 minutes');
+    expect(phaseInfo('sweep2').cost).toContain('only when a second ECU actually answered');
+  });
+});
+
+describe('tcmText', () => {
+  it('says when the second ECU is part of the run', () => {
+    expect(tcmText({ phase: 'sweep', tcm: 'yes' })).toContain('swept too');
+  });
+
+  it('says when it is not, and why, rather than leaving a phase to simply not appear', () => {
+    // A sweep of an ECU that is not there stalls rather than finishing - 25
+    // consecutive timeouts hold position, which is right for a sweep and would
+    // hold the pipeline for good.
+    const t = tcmText({ phase: 'sweep', tcm: 'silent' });
+    expect(t).toContain('not being swept');
+    expect(t).toContain('stalls');
+    expect(t).toContain('manual sweep');
+    // And never as proof there is no module: nothing on a CAN bus can say that.
+    expect(t).not.toMatch(/no second ECU|not fitted/);
+  });
+
+  it('distinguishes not-yet-probed from silent', () => {
+    expect(tcmText({ phase: 'sweep', tcm: 'unasked' })).toContain('not been probed');
+  });
+
+  it('says nothing when there is no run', () => {
+    expect(tcmText({ phase: 'off', tcm: 'yes' })).toBe('');
+    expect(tcmText(null)).toBe('');
   });
 });
 

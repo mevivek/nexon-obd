@@ -50,17 +50,24 @@
 // batch of eight, and a drive is the unit of varied conditions that makes a fit
 // worth anything.
 
+// The numbers are stored in NVS, so they are assigned rather than left to position:
+// inserting a phase in pipeline order would renumber every one after it, and a board
+// that lost power mid-run would come back in a different phase than it left. New
+// phases go on the END whatever order they run in.
 enum AutoPhase : uint8_t {
-  AUTO_OFF = 0,   // not running - the state of a board nobody has started
-  AUTO_SWEEP,
-  AUTO_TRIAGE,
-  AUTO_WATCH,
-  AUTO_DONE,      // every varying identifier has been fitted
+  AUTO_OFF    = 0,   // not running - the state of a board nobody has started
+  AUTO_SWEEP  = 1,   // the engine ECU
+  AUTO_TRIAGE = 2,
+  AUTO_WATCH  = 3,
+  AUTO_DONE   = 4,   // every varying identifier has been fitted
+  AUTO_SWEEP2 = 5,   // the second ECU, between the sweep and triage
+  AUTO_PHASE_MAX = AUTO_SWEEP2,
 };
 
 static const char *autoPhaseName(uint8_t p) {
   switch (p) {
     case AUTO_SWEEP:  return "sweep";
+    case AUTO_SWEEP2: return "sweep2";
     case AUTO_TRIAGE: return "triage";
     case AUTO_WATCH:  return "watch";
     case AUTO_DONE:   return "done";
@@ -77,6 +84,21 @@ struct AutoFacts {
   uint16_t varying   = 0;       // records that actually move
   uint16_t fitted    = 0;       // varying records that carry a correlation
   bool     mayRecord = true;    // carMayRecord() - see carbind.h
+
+  // Did a second ECU answer a direct probe? Discovery asks 0x7E9 once per boot.
+  //
+  // This gates a whole extra sweep, and it is gated on a POSITIVE answer rather
+  // than on the absence of a negative one - which is the opposite of the rule
+  // everywhere else here, and deliberate. A sweep of an ECU that is not there does
+  // not fail: it stalls, because 25 consecutive timeouts make the sweep hold
+  // position rather than conclude an unswept range is empty. Holding is right for a
+  // sweep and fatal for a pipeline, which would then wait for an ECU that will
+  // never speak, forever, with no way to tell that from a car parked overnight.
+  //
+  // So: no answer means not swept, and the page says so rather than leaving it to
+  // be inferred from a phase that never appears. The manual sweep still has a TCM
+  // button for anyone who thinks the probe was wrong.
+  bool     tcm       = false;
 };
 
 /**
@@ -99,6 +121,16 @@ static uint8_t autoNext(uint8_t phase, const AutoFacts &f) {
   switch (phase) {
     case AUTO_SWEEP:
       if (!f.sweepDone) return AUTO_SWEEP;
+      // The second ECU is a separate identifier space at a separate address, and
+      // the register keys records by (ecu, did) precisely so both can live in it.
+      // Swept second because the engine is where everything interesting has been
+      // found so far, and a pipeline that spends its first half hour on a
+      // transmission is one nobody waits out.
+      if (f.tcm) return AUTO_SWEEP2;
+      return f.records ? AUTO_TRIAGE : AUTO_DONE;
+
+    case AUTO_SWEEP2:
+      if (!f.sweepDone) return AUTO_SWEEP2;
       return f.records ? AUTO_TRIAGE : AUTO_DONE;
 
     case AUTO_TRIAGE:
@@ -116,7 +148,8 @@ static uint8_t autoNext(uint8_t phase, const AutoFacts &f) {
 /** Progress through the current phase, 0..100, for a bar that does not lie. */
 static uint8_t autoProgress(uint8_t phase, const AutoFacts &f, uint8_t sweepPct) {
   switch (phase) {
-    case AUTO_SWEEP:  return sweepPct;
+    case AUTO_SWEEP:
+    case AUTO_SWEEP2: return sweepPct;
     case AUTO_TRIAGE: return f.records ? (uint8_t)((uint32_t)f.triaged * 100 / f.records) : 0;
     case AUTO_WATCH:  return f.varying ? (uint8_t)((uint32_t)f.fitted * 100 / f.varying) : 0;
     case AUTO_DONE:   return 100;

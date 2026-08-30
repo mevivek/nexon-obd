@@ -28,9 +28,12 @@ const here = dirname(fileURLToPath(import.meta.url));
 const FW_PAGE = join(here, '../../../firmware/Obdurate/ui_html.h');
 
 describe('nav', () => {
-  it('has the six tabs in order', () => {
+  it('has the five tabs in order', () => {
+    // Was six. Sweep and Watch merged into Discover: two halves of one pipeline the
+    // autopilot now runs end to end, so two of six places went on halves of the
+    // same job and the middle of it lived on a screen you had to know to visit.
     expect(ROUTES.map((r) => r.label)).toEqual(
-      ['Live', 'Monitors', 'Trips', 'Watch', 'Scanner', 'Firmware']);
+      ['Live', 'Monitors', 'Trips', 'Discover', 'Firmware']);
   });
 
   it('matches the nav still shipped in flash', () => {
@@ -49,7 +52,7 @@ describe('nav', () => {
       label: (inner.match(/<span>([^<]*)<\/span>/) || [, ''])[1],
     }));
 
-    expect(tabs.length, 'the firmware nav was parsed').toBe(6);
+    expect(tabs.length, 'the firmware nav was parsed').toBe(5);
     expect(tabs.map((t) => t.label)).toEqual(ROUTES.map((r) => r.label));
     expect(tabs.map((t) => t.href)).toEqual(ROUTES.map((r) => r.fw));
   });

@@ -56,7 +56,7 @@ that was built into the firmware rather than to a stub.
 |---|---|
 | `/` | Live gauges — RPM, boost, temps, trims, lambda, catalyst, driver demand |
 | `/monitors` | Mode 06 on-board monitor test results, with the ECU's own limits |
-| `/scan` | UDS service `0x22` identifier sweep, with CSV export |
+| `/scan` | Discover — the autopilot, the sweep, triage and the DID watch |
 | `/update` | Upload a new `.bin` over Wi-Fi |
 | `/dtc` | Stored + pending fault codes as JSON |
 | `/data` | Current sample as JSON, plus firmware version and active transport |
@@ -517,6 +517,12 @@ readings. It advances on its own and keeps its phase in NVS, because the ignitio
 going off is a power cut and this pipeline is measured in drives:
 
 - **Sweep** — about 30 minutes on CAN, the better part of a day over BLE.
+- **Sweep (TCM)** — the same again at the transmission controller, which is a
+  separate identifier space at a separate address. Only when discovery's probe at
+  0x7E9 actually answered: a sweep of an ECU that is not there does not fail, it
+  stalls, and holding position — right for a sweep — would hold the pipeline for
+  good. Silence there is reported as "not swept, and here is why", never as proof
+  there is no module.
 - **Triage** — about an hour of engine-on. This adapter answers roughly half of what
   it is asked, so ten clean reads of every hit needs about twenty passes.
 - **Watch** — one drive per eight identifiers, so eight or nine drives for a
@@ -790,7 +796,7 @@ can be asked about without a board — the `/data` contract, the routing, the ca
 headers, the DID watch wiring, the trip columns, the history constants — is asserted
 against the source under node.
 
-The frontend has its own suite, `npm --prefix web test`: 371 checks over the
+The frontend has its own suite, `npm --prefix web test`: 382 checks over the
 hold-last-value merge, the warning-flag gating, the rate tracker, the mileage
 readouts and each page's logic, run against the modules that implement them. That is
 the point of the split — those used to be JavaScript inside C++ raw string literals,

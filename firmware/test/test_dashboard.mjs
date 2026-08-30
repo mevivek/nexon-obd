@@ -242,11 +242,14 @@ console.log('\nDID watch');
 
   ok(/server\.on\("\/watch\/list",/.test(ino) && /server\.on\("\/watch\/set",/.test(ino),
      'the watch endpoints are routed');
-  // /watch no longer serves a page, but it is a bookmark and it is what the nav on
-  // the flash pages points at, so it has to land somewhere rather than 404.
-  ok(/\{"\/monitors",\s*"\/trips",\s*"\/watch",\s*"\/scan"\}/.test(ino)
-     && /server\.send\(302,/.test(ino),
-     '/watch redirects into the bundle rather than 404ing');
+  // /watch no longer serves a page and no longer has a tab either - sweep and watch
+  // merged into Discover - but it is still a bookmark, it is in the nav of any older
+  // bundle sitting on a LittleFS somewhere, and it may be on a QR code stuck to a
+  // board. So it lands on the merged screen rather than 404ing.
+  ok(/server\.on\("\/watch", \[\]\(\) \{[\s\S]{0,200}?"Location", "\/#\/scan"/.test(ino),
+     '/watch redirects to the screen that absorbed it rather than 404ing');
+  ok(/\{"\/monitors",\s*"\/trips",\s*"\/scan"\}/.test(ino),
+     'and the other flash routes still redirect into the bundle');
   ok(/watchStep\(\);/.test(ino), 'the poller runs in loop()');
 
   // A sweep is already hours long and shares the bus with the sampler; a third
@@ -595,8 +598,13 @@ console.log('\nthe autopilot survives the ignition');
 
   ok(/autoPrefs\.putUChar\("phase"/.test(ino), 'the phase is kept in NVS');
   ok(/g_autoPhase\s+= autoPrefs\.getUChar\("phase"/.test(ino), 'and read back on boot');
-  ok(/if \(g_autoPhase > AUTO_DONE\) g_autoPhase = AUTO_OFF;/.test(ino),
+  ok(/if \(g_autoPhase > AUTO_PHASE_MAX\) g_autoPhase = AUTO_OFF;/.test(ino),
      'a phase NVS does not recognise falls back to off rather than to an index');
+  // The stored numbers are assigned, not positional. Inserting a phase in pipeline
+  // order would renumber every one after it, and a board that lost power mid-run
+  // would come back in a different phase than it left.
+  ok(/AUTO_SWEEP2 = 5/.test(auto) && /AUTO_TRIAGE = 2/.test(auto),
+     'phase numbers are pinned, so a new one cannot renumber a stored run');
 
   // Rotation at boot and nowhere else. Mid-drive it would bump watchGen, which
   // rotates the trip log, and one drive would become a pile of short files.

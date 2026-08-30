@@ -1,4 +1,9 @@
-// The six tabs, in order.
+// The five tabs, in order.
+//
+// Was six. Sweep and Watch merged into Discover in v1.18.0: they are two halves of
+// one pipeline that the autopilot now runs end to end, and spending two of six
+// places on them put the middle of that pipeline on a screen you had to know to go
+// and look at. /watch still exists on the board and redirects here.
 //
 // Plain data in its own module so it can be asserted against the firmware pages'
 // <nav> without pulling in Preact or the build-time defines. That check matters:
@@ -17,7 +22,6 @@ export const ROUTES = [
   { path: '/', label: 'Live', fw: '/', title: 'Live' },
   { path: '/monitors', label: 'Monitors', fw: '/monitors', title: 'Monitors', sub: 'mode 06' },
   { path: '/trips', label: 'Trips', fw: '/trips', title: 'Trips', sub: 'CSV logs' },
-  { path: '/watch', label: 'Watch', fw: '/watch', title: 'DID Watch', sub: 'service 0x22' },
-  { path: '/scan', label: 'Scanner', fw: '/scan', title: 'DID Scanner', sub: 'service 0x22' },
+  { path: '/scan', label: 'Discover', fw: '/scan', title: 'Discover', sub: 'service 0x22' },
   { path: '/update', label: 'Firmware', fw: '/update', title: 'Board' },
 ];

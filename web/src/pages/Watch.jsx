@@ -11,7 +11,6 @@
 
 import { useState, useEffect, useRef } from 'preact/hooks';
 import { useClockSync } from './useClockSync.js';
-import { useShellStatus } from '../shell.jsx';
 import { n, DASH } from '../lib/format.js';
 import { parseCsv, mergeHits, watchName, loadStoredHits, saveStoredHits } from './watch/hits.js';
 import { pushReadings, sparkPoints } from './watch/series.js';
@@ -37,7 +36,7 @@ function Ref({ label, v, d, unit }) {
   );
 }
 
-export function Watch() {
+export function Watch({ onStatus }) {
   useClockSync();
 
   const [data, setData] = useState(null);
@@ -110,7 +109,8 @@ export function Watch() {
   const dids = (data && data.dids) || [];
   const max = (data && data.max) || WATCH_MAX;
   const v = (data && data.v) || {};
-  useShellStatus(watchStatus(data, err));
+  // See the note in Scanner.jsx: one pill, chosen by precedence in discover/pill.js.
+  useEffect(() => { if (onStatus) onStatus(watchStatus(data, err)); }, [data, err]);
   const cost = costText(+period, sel.size);
 
   async function apply(list) {

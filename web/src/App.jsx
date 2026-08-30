@@ -13,14 +13,13 @@ import { ShellStatus, useShellStatusValue } from './shell.jsx';
 import { Live } from './pages/Live.jsx';
 import { Monitors } from './pages/Monitors.jsx';
 import { Trips } from './pages/Trips.jsx';
-import { Watch } from './pages/Watch.jsx';
-import { Scanner } from './pages/Scanner.jsx';
+import { Discover } from './pages/Discover.jsx';
 import { Firmware } from './pages/Firmware.jsx';
 import { TripDetail } from './pages/TripDetail.jsx';
 import { tripFromPath } from './pages/trips/trips.js';
 import { CarBanner } from './pages/board/CarBanner.jsx';
 import {
-  IconGauge, IconPulse, IconRoute, IconTarget, IconSearch, IconChip,
+  IconGauge, IconPulse, IconRoute, IconSearch, IconChip,
 } from './icons.jsx';
 
 // The web bundle carries its own version, independent of the firmware's FW_VERSION.
@@ -32,8 +31,7 @@ const PAGES = {
   '/': Live,
   '/monitors': Monitors,
   '/trips': Trips,
-  '/watch': Watch,
-  '/scan': Scanner,
+  '/scan': Discover,
   '/update': Firmware,
 };
 
@@ -43,7 +41,6 @@ const ICONS = {
   '/': IconGauge,
   '/monitors': IconPulse,
   '/trips': IconRoute,
-  '/watch': IconTarget,
   '/scan': IconSearch,
   '/update': IconChip,
 };

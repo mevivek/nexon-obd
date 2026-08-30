@@ -14,6 +14,7 @@
 import { useState, useEffect } from 'preact/hooks';
 import {
   autoStatus, autoText, autoCounts, drivesLeft, phaseIndex, PHASES, FIT_NOTE,
+  tcmText,
 } from './auto.js';
 
 export function AutoCard({ onStatus }) {
@@ -67,6 +68,7 @@ export function AutoCard({ onStatus }) {
           <div class="msg">{autoText(j)}</div>
           <div class="note">{autoCounts(j)}</div>
           {drivesLeft(j) ? <div class="note">{drivesLeft(j)}</div> : null}
+          {tcmText(j) ? <div class="note">{tcmText(j)}</div> : null}
         </>
       ) : (
         <>

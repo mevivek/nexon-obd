@@ -15,6 +15,9 @@ export const PHASES = [
   { id: 'sweep',  label: 'Sweep',
     what: 'Asking every identifier from 0000 to FFFF whether it exists.',
     cost: 'about 30 minutes on CAN, the better part of a day over BLE' },
+  { id: 'sweep2', label: 'Sweep (TCM)',
+    what: 'The same sweep again at the transmission controller, which is a separate identifier space at a separate address.',
+    cost: 'another 30 minutes, and only when a second ECU actually answered the probe' },
   { id: 'triage', label: 'Triage',
     what: 'Re-reading every hit to find which ones actually move.',
     cost: 'about an hour of engine-on - this adapter answers roughly half of what it is asked, so ten clean reads needs about twenty passes' },
@@ -22,6 +25,24 @@ export const PHASES = [
     what: 'Logging eight identifiers at a time beside the live readings, and fitting them.',
     cost: 'one drive per eight, so eight or nine drives for a typical register' },
 ];
+
+/**
+ * Whether the second ECU is part of this run, said out loud.
+ *
+ * Left to be inferred from a phase that simply never appears, a skipped TCM reads
+ * as a pipeline that quietly dropped something. And the reason matters: silence
+ * from 0x7E9 is not proof there is no module there, it is the only evidence a CAN
+ * bus can offer either way.
+ */
+export function tcmText(j) {
+  if (!j || j.phase === 'off') return '';
+  if (j.tcm === 'yes') return 'A second ECU answered, so the transmission is swept too.';
+  if (j.tcm === 'silent')
+    return 'Nothing answered at the transmission controller address (0x7E9), so it is not being swept - '
+         + 'a sweep of an ECU that is not there stalls rather than finishing, and would hold '
+         + 'the pipeline for good. Use the manual sweep below if you think the probe was wrong.';
+  return 'The second ECU has not been probed yet - that happens once the engine is running.';
+}
 
 export function phaseInfo(id) {
   return PHASES.find((p) => p.id === id) || null;
@@ -77,7 +98,8 @@ export function autoText(j) {
 export function autoCounts(j) {
   if (!j) return '';
   switch (j.phase) {
-    case 'sweep':  return `${j.pct}% of the identifier space asked.`;
+    case 'sweep':
+    case 'sweep2': return `${j.pct}% of the identifier space asked.`;
     case 'triage': return `${j.triaged} of ${j.records} identifiers have enough reads for a verdict.`;
     case 'watch':  return `${j.fitted} of ${j.varying} moving identifiers fitted; `
                         + `${j.watching} on watch now, round ${j.rounds}.`;

@@ -1597,7 +1597,7 @@ static void autoLoad() {
   g_autoPhase  = autoPrefs.getUChar("phase", AUTO_OFF);
   g_autoRounds = autoPrefs.getUShort("rounds", 0);
   autoPrefs.end();
-  if (g_autoPhase > AUTO_DONE) g_autoPhase = AUTO_OFF;
+  if (g_autoPhase > AUTO_PHASE_MAX) g_autoPhase = AUTO_OFF;
 }
 
 static AutoFacts autoGather() {
@@ -1613,6 +1613,9 @@ static AutoFacts autoGather() {
   f.varying   = t.varies;
   f.fitted    = t.fitted;
   f.mayRecord = carMayRecordNow();
+  // Only a module that actually answered. See the note on AutoFacts::tcm for why
+  // this one gates on a positive rather than on the absence of a negative.
+  f.tcm       = g_veh.tcmSeen;
   return f;
 }
 
@@ -1644,13 +1647,21 @@ static void autoEnter(uint8_t phase) {
   Serial.printf("[auto] -> %s\n", autoPhaseName(phase));
   switch (phase) {
     case AUTO_SWEEP:
+    case AUTO_SWEEP2:
       triageSetOn(false);
-      scan.ecu = 0;                    // the engine ECU; see the note on /auto/start
+      scan.ecu = (phase == AUTO_SWEEP2) ? 1 : 0;
       scan.from = 0x0000; scan.to = 0xFFFF; scan.cur = 0;
       scan.tried = 0; scan.negatives = 0; scan.stalled = false;
       scanSilent = 0;
-      scanHitN = 0;
-      if (tripFsUp) LittleFS.remove(SCAN_HITS_FILE);
+      // The first sweep starts a new record; the second ADDS to it. Clearing here
+      // would throw away the engine's hits the moment the transmission's sweep
+      // began - and the hit list is what the register is seeded from, so it would
+      // take the whole first half hour with it. Hits carry their own ecu byte,
+      // which is what lets one file hold both.
+      if (phase == AUTO_SWEEP) {
+        scanHitN = 0;
+        if (tripFsUp) LittleFS.remove(SCAN_HITS_FILE);
+      }
       scan.startedMs = millis();
       scan.running = true;
       g_autoSwept = true;
@@ -1692,6 +1703,9 @@ static void autoStep() {
   const AutoFacts f = autoGather();
   const uint8_t next = autoNext(g_autoPhase, f);
   if (next != g_autoPhase) {
+    // Cleared before the entry action sets it again, so the second sweep cannot
+    // read the first one's "finished" as its own and skip itself in one tick.
+    g_autoSwept = false;
     g_autoPhase = next;
     g_autoSince = millis();
     autoEnter(next);
@@ -2373,6 +2387,12 @@ static void handleAuto() {
   s += f.fitted;
   s += ",\"watching\":";
   s += watchN;
+  // Whether the second ECU is part of this run, and if not, why not. Left to be
+  // inferred from a phase that never appears, it reads as a pipeline that skipped
+  // something.
+  s += ",\"tcm\":\"";
+  s += g_veh.tcmSeen ? "yes" : (g_veh.tcmAsked ? "silent" : "unasked");
+  s += "\"";
   // Why nothing is happening, when nothing is happening. A pipeline measured in
   // drives looks identical to a broken one unless it says which it is.
   s += ",\"held\":\"";
@@ -3153,7 +3173,7 @@ void setup() {
   // The pages these served now live in the bundle, behind hash routes. Redirect
   // rather than 404: these are bookmarks, and the nav on the two pages still built
   // into flash points at them.
-  for (const char *p : {"/monitors", "/trips", "/watch", "/scan"})
+  for (const char *p : {"/monitors", "/trips", "/scan"})
     server.on(p, [p]() {
       // Always into the app now: a dashboard is compiled in, so there is no
       // case where these routes have nowhere to land.
@@ -3161,6 +3181,15 @@ void setup() {
       server.sendHeader("Location", to);
       server.send(302, "text/plain", "");
     });
+
+  // /watch outlived its tab. Sweep and Watch merged into one screen in v1.18.0 -
+  // they are two halves of a pipeline the autopilot now runs end to end - and this
+  // redirect stays because the path is in bookmarks, in QR codes stuck to a board,
+  // and in the nav of any older bundle still sitting on somebody's LittleFS.
+  server.on("/watch", []() {
+    server.sendHeader("Location", "/#/scan");
+    server.send(302, "text/plain", "");
+  });
 
   server.on("/manifest.webmanifest", handlePwaManifest);
   server.on("/icon.svg",    handlePwaIcon);

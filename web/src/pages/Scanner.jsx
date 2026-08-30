@@ -13,7 +13,6 @@
 
 import { useState, useEffect, useRef } from 'preact/hooks';
 import { useClockSync } from './useClockSync.js';
-import { useShellStatus } from '../shell.jsx';
 import { DASH } from '../lib/format.js';
 import {
   ratePerSec, rateText, etaText, percent, progressText, scanStatus, spacedHex,
@@ -22,7 +21,6 @@ import {
 import {
   readRate, readProgress, readsEta, tallyText, CONDITIONS_NOTE,
 } from './scanner/triage.js';
-import { AutoCard } from './scanner/AutoCard.jsx';
 
 // A running sweep is watched; an idle board is left alone. The interval used to be
 // created only inside the firmware's Start handler, so opening the page mid-sweep
@@ -31,7 +29,7 @@ import { AutoCard } from './scanner/AutoCard.jsx';
 const POLL_RUNNING_MS = 1000;
 const POLL_IDLE_MS = 4000;
 
-export function Scanner() {
+export function Scanner({ onStatus }) {
   useClockSync();
 
   const [ecu, setEcu] = useState('0');
@@ -96,7 +94,10 @@ export function Scanner() {
   // that waits a round trip to look pressed gets pressed twice — and Start resets
   // cur, tried, negatives and clears the hit list on the board.
   const running = busy || !!(data && data.running);
-  useShellStatus(scanStatus(data, err));
+  // Reported upward rather than set here. Sweep, triage and the watch are one
+  // screen now and there is one pill between them - see discover/pill.js for which
+  // of the three wins, and why it is a precedence rather than last-writer.
+  useEffect(() => { if (onStatus) onStatus(scanStatus(data, err)); }, [data, err]);
   const rps = data ? ratePerSec(data.tried, data.elapsed) : 0;
 
   const hitCount = hits.length;
@@ -138,7 +139,6 @@ export function Scanner() {
 
   return (
     <>
-      <AutoCard />
       <div class="card scan">
         {/* There are two ECUs, so a dropdown is the wrong control: it hides one of
             the two choices behind a tap and brings the platform's own chrome with
