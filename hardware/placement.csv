@@ -12,9 +12,13 @@
 #
 # Routing is NOT included here and has not been computed.
 variant,designator,part,x_mm,y_mm,rotation_deg,side,placement_rationale
-common,J1,SEP-A-OBD-E2 cap module,0.0,-25.0,0,offboard,"mates to the case mouth; wires to J3. Reference only, not a board part"
-common,J3,5 wire pads,0.0,-18.6,0,top,"five pads across the front edge at x = -17.2, -13.8, -10.4, +13.8, +17.2 - power left, CAN right, as the whole layout is"
-common,F1,polyfuse 500 mA,-17.2,-15.4,0,top,"first in line from J3.1"
+common,J1,SEP-A-OBD-E2 cap module,0.0,-25.0,0,offboard,"mates to the case mouth; wires to W1..W5. Reference only, not a board part"
+common,W1,wire pad V_BATT,-17.2,-18.6,0,top,"power enters front-left and stays in the left half"
+common,W2,wire pad GND,-13.8,-18.6,0,top,ground return
+common,W3,wire pad GND,-10.4,-18.6,0,top,ground return
+common,W4,wire pad CAN_H,13.8,-18.6,0,top,"CAN enters front-right, about 9 mm from U1"
+common,W5,wire pad CAN_L,17.2,-18.6,0,top,"the pair stays together"
+common,F1,polyfuse 500 mA,-17.2,-15.4,0,top,"first in line from W1"
 common,Q1,P-ch MOSFET,-13.2,-15.4,0,top,"reverse polarity, after F1"
 common,D1,SMAJ33A,-8.6,-15.2,0,top,"TVS clamp, after Q1"
 common,D4,15 V zener,-11.2,-18.0,0,top,"clamps Q1 gate-source; must sit at Q1"
@@ -32,7 +36,7 @@ common,R9,EN/UVLO lower,-13.0,-1.5,0,top,divider to GND; tap goes to U2.EN/UVLO
 common,R10,FB upper,-17.6,-4.0,0,top,"feedback divider; ratio differs by variant"
 common,R11,FB lower,-17.6,-1.5,0,top,pairs with R10
 common,R12,RON,-14.6,-2.0,0,top,sets the switching frequency
-common,U1,SN65HVD230DR,14.2,-9.6,0,top,"hugs the CAN pads; ~9 mm from J3.4/J3.5"
+common,U1,SN65HVD230DR,14.2,-9.6,0,top,"hugs the CAN pads; about 9 mm from W4/W5"
 common,CH1,CAN common-mode choke,14.2,-15.4,0,top,in series with CAN H / CAN L at the entry
 common,D2,NUP2105L,17.4,-15.6,0,top,ESD across the pair at the connector end
 common,R7,0 ohm,11.0,-9.6,0,top,U1 Rs to GND; sits beside U1

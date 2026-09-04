@@ -79,9 +79,14 @@ export function checkHardware({ ok, eq, readSrc, here, join }) {
   ok(padOf.get(ledNo) === undefined,
      `xiao-pinmap.csv does not expose GPIO${ledNo} - it is the module's own LED`);
 
-  const NOT_PLACED = new Set(['PCB', 'CASE', 'TP1-TP5']);
-  const expand = (ref) =>
-    ref === 'TP1-TP5' ? ['TP1', 'TP2', 'TP3', 'TP4', 'TP5'] : [ref];
+  // Grouped BOM lines stand for several identical parts. They are placed
+  // individually, so expand them before comparing designator sets.
+  const GROUPS = {
+    'TP1-TP5': ['TP1', 'TP2', 'TP3', 'TP4', 'TP5'],
+    'W1-W5': ['W1', 'W2', 'W3', 'W4', 'W5'],
+  };
+  const NOT_PLACED = new Set(['PCB', 'CASE', ...Object.keys(GROUPS)]);
+  const expand = (ref) => GROUPS[ref] || [ref];
 
   for (const V of VARIANTS) {
     const pick = (all) => all.filter(r => r[0] === 'common' || r[0] === V);

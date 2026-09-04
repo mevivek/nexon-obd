@@ -141,16 +141,63 @@ Unresolved, not overlooked.
   Getting it wrong swaps pins, so check it against Seeed's own footprint before
   sending Gerbers.
 
+## Building the board
+
+[`build_board.py`](build_board.py) turns these CSVs into a real `.kicad_pcb`:
+footprints loaded from the stock libraries, placed per `placement.csv`, nets
+assigned per `netlist.csv`, and the 40 × 40 mm outline drawn on `Edge.Cuts`. Run
+it with KiCad's own Python, which is the one that has `pcbnew`:
+
+```
+"%LOCALAPPDATA%\Programs\KiCad\10.0\bin\python.exe" build_board.py xiao wroom
+```
+
+Current state — both variants build with **every pad resolved**:
+
+| | `-xiao` | `-wroom` |
+|---|---|---|
+| Footprints placed | 36 | 46 |
+| Pads connected | 83 | 137 |
+| Nets | 23 | 30 |
+| Unresolved | 0 | 0 |
+| Copper past the outline | none | none |
+
+The script holds no design data of its own except the **pin name → pad number**
+maps, which cannot live in the CSVs: the CSVs name pins, footprints number pads.
+Those maps come from KiCad's own symbol libraries, read out by `pinout.py`, plus
+`xiao-pinmap.csv` for the XIAO row order and the USB-C Type-C contact
+designations for J2.
+
+Then to look at it or export it:
+
+```
+kicad-cli pcb export glb    --output revA-xiao.glb obdurate-revA-xiao.kicad_pcb
+kicad-cli pcb render        --output iso.png --quality high --perspective \
+                            --zoom 0.75 --rotate "-32,0,22" obdurate-revA-xiao.kicad_pcb
+kicad-cli pcb export gerbers --output gerbers/ obdurate-revA-xiao.kicad_pcb
+```
+
+GLB and PNG outputs are gitignored — they regenerate in about a second and a
+quarter respectively, and there is no reason to carry megabytes of binary that a
+command reproduces.
+
+**Two things the render exposed that nothing else would have.** Stock footprints
+ship their 3D models with `(hide yes)`, so the first render came out as bare pads
+with no parts on it at all. And KiCad ships **no 3D model for any XIAO board** —
+`MCU_Seeed_ESP32C3.step` is referenced but absent — so the `-xiao` render shows
+the land pattern with nothing standing on it. The WROOM's model does exist.
+
+**What still needs doing:** the silkscreen designators collide in the power
+section, which is cosmetic but ugly and worth fixing before Gerbers. Netclasses,
+the ground pour and the `-wroom` keepout zone are not created yet. And nothing is
+routed — the board has a correct netlist and a ratsnest, which is the input to
+routing rather than its output.
+
 ## Getting from here to Gerbers
 
-KiCad 10 is installed. Every footprint in `bom.csv` resolves against the stock
-libraries — including `RF_Module:ESP32-S3-WROOM-1` and, for the XIAO, the shared
-XIAO land pattern that KiCad ships as `RF_Module:MCU_Seeed_ESP32C3`.
-
-1. Build the board with the `pcbnew` Python API: footprints, placement from
-   `placement.csv`, outline from `outline.dxf`, nets from `netlist.csv`.
-2. Netclasses per the CSV, ground pour on an inner layer, keepout on `-wroom`.
-3. Route, DRC, `kicad-cli pcb export gerbers`.
+1. Netclasses per `netlist.csv`, ground pour on an inner layer, keepout on `-wroom`.
+2. Route. The layout was designed so the nets do not need to cross.
+3. DRC, then `kicad-cli pcb export gerbers`.
 
 DRC checks geometry, not whether the circuit is right. The netlist is checked
 against the firmware for the CAN pins and the LED, and against itself for
