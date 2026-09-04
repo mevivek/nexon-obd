@@ -1252,6 +1252,162 @@ console.log('\npower');
      'the hold is long enough to sit out a crank');
 }
 
+// ---------------------------------------------------------------- hardware
+//
+// hardware/ describes a board that does not exist yet, which is precisely when a
+// design drifts away from the firmware that has to run on it. Three pins carry
+// the whole risk: change PIN_CAN_TX in the sketch and the netlist is silently
+// wrong, and nothing about a wrong netlist is observable until a fab has already
+// made the boards.
+//
+// Same shape as the /data contract above - a claim that lives in two places gets
+// checked from one - and the same reason: the two ends have separate build steps,
+// so a rename that once broke loudly would now break quietly.
+//
+// These checks are deliberately relational. Asserting "the netlist says GPIO2"
+// and "the firmware says GPIO2" as two independent facts passes happily after
+// someone changes both to different values. The firmware's number is read out and
+// the netlist is checked against THAT.
+console.log('\nhardware');
+{
+  const hw = (f) => readSrc(join(here, '../../hardware/', f));
+
+  // Minimal CSV: quoted fields may contain commas, nothing else is special.
+  const splitCsv = (line) => {
+    const out = [];
+    let cur = '', q = false;
+    for (const c of line) {
+      if (c === '"') q = !q;
+      else if (c === ',' && !q) { out.push(cur); cur = ''; }
+      else cur += c;
+    }
+    out.push(cur);
+    return out;
+  };
+  const rows = (csv) => csv.split('\n')
+    .filter(l => l.trim() && !l.startsWith('#'))
+    .slice(1)                                    // header
+    .map(splitCsv);
+
+  const ino = readSrc(join(here, '../Obdurate/Obdurate.ino'));
+  const net = rows(hw('netlist.csv'));            // net,netclass,members,notes
+  const bom = rows(hw('bom.csv'));                // designator,qty,mpn,mfr,pkg,status,usd,note
+  const place = rows(hw('placement.csv'));        // designator,part,x,y,rot,side,why
+
+  const members = (name) => {
+    const r = net.find(row => row[0] === name);
+    return r ? r[2].split(';').map(s => s.trim()).filter(Boolean) : [];
+  };
+
+  // --- the firmware's own numbers, read out of the sketch ---
+  const fwNum = (re) => { const m = ino.match(re); return m ? m[1] : null; };
+  const canTx = fwNum(/PIN_CAN_TX\s*=\s*GPIO_NUM_(\d+)/);
+  const canRx = fwNum(/PIN_CAN_RX\s*=\s*GPIO_NUM_(\d+)/);
+  const ledNo = fwNum(/#define\s+LED_BUILTIN\s+(\d+)/);
+
+  ok(canTx !== null, 'firmware declares PIN_CAN_TX');
+  ok(canRx !== null, 'firmware declares PIN_CAN_RX');
+  ok(ledNo !== null, 'firmware declares the LED pin');
+
+  ok(members('CTX').includes(`U3.GPIO${canTx}`),
+     `CTX carries the pin the firmware transmits on (GPIO${canTx})`);
+  ok(members('CRX').includes(`U3.GPIO${canRx}`),
+     `CRX carries the pin the firmware receives on (GPIO${canRx})`);
+  ok(members('LED_K').includes(`U3.GPIO${ledNo}`),
+     `LED_K carries the pin the firmware blinks (GPIO${ledNo})`);
+
+  // Active low means the GPIO sinks, so the LED's anode sits on 3V3 through R1
+  // and its cathode on the GPIO. Flip the firmware to active high and the board
+  // is wrong in a way no amount of reflashing fixes.
+  ok(/digitalWrite\(LED_PIN,\s*on\s*\?\s*LOW\s*:\s*HIGH\)/.test(ino),
+     'firmware drives the LED active low');
+  ok(members('LED_A').some(m => m.startsWith('R1.')),
+     'R1 is on the LED anode net, as active low requires');
+  ok(members('3V3').some(m => m.startsWith('R1.')),
+     'R1 pulls that anode up to 3V3');
+
+  // The bus speed picks the transceiver and the choke, so the hardware notes have
+  // to move if the firmware ever runs a 250 kbit car.
+  const kbits = fwNum(/TWAI_TIMING_CONFIG_(\d+)KBITS/);
+  ok(kbits !== null, 'firmware fixes a CAN bitrate');
+  ok(hw('README.md').includes(`${kbits} kbit`),
+     `hardware/README.md documents the ${kbits} kbit bus`);
+
+  // --- the directory has to agree with itself ---
+  const NOT_PLACED = new Set(['PCB', 'CASE', 'TP1-TP6']);
+  const NOT_IN_BOM = new Set(['KEEPOUT', 'J1']);
+  const TPS = ['TP1', 'TP2', 'TP3', 'TP4', 'TP5', 'TP6'];
+
+  const bomRefs = new Set(bom.map(r => r[0]));
+  if (bomRefs.has('TP1-TP6')) for (const t of TPS) bomRefs.add(t);
+  const placeRefs = new Set(place.map(r => r[0]));
+
+  const netRefs = [...new Set(net.flatMap(r =>
+    r[2].split(';').map(s => s.trim().split('.')[0]).filter(Boolean)))];
+  const unknown = netRefs.filter(r => !bomRefs.has(r));
+  ok(unknown.length === 0,
+     `every netlist designator is in the BOM${unknown.length ? ` (stray: ${unknown.join(', ')})` : ''}`);
+
+  const unplaced = [...bomRefs].filter(r => !NOT_PLACED.has(r) && !placeRefs.has(r));
+  ok(unplaced.length === 0,
+     `every BOM part has a placement${unplaced.length ? ` (missing: ${unplaced.join(', ')})` : ''}`);
+
+  const orphan = [...placeRefs].filter(r => !NOT_IN_BOM.has(r) && !bomRefs.has(r));
+  ok(orphan.length === 0,
+     `every placement is in the BOM${orphan.length ? ` (orphan: ${orphan.join(', ')})` : ''}`);
+
+  ok(bom.every(r => ['spec', 'class', 'estimate'].includes(r[5])),
+     'every BOM row is tagged spec, class or estimate');
+  // The honesty convention, enforced rather than remembered: a line claiming to be
+  // a settled part has to name one.
+  const thinSpec = bom.filter(r => r[5] === 'spec' && (!r[2].trim() || !r[3].trim())).map(r => r[0]);
+  ok(thinSpec.length === 0,
+     `every 'spec' line names a part and a maker${thinSpec.length ? ` (thin: ${thinSpec.join(', ')})` : ''}`);
+
+  // --- the outline, and everything inside it ---
+  const dxf = hw('outline.dxf').split('\n').map(s => s.trim());
+  const xs = [], ys = [];
+  let ent = null, cur = {};
+  const flush = () => {
+    if (ent === 'LINE') { xs.push(cur[10], cur[11]); ys.push(cur[20], cur[21]); }
+    if (ent === 'ARC') {
+      xs.push(cur[10] - cur[40], cur[10] + cur[40]);
+      ys.push(cur[20] - cur[40], cur[20] + cur[40]);
+    }
+  };
+  for (let i = 0; i + 1 < dxf.length; i += 2) {
+    const code = dxf[i], val = dxf[i + 1];
+    if (code === '0') { flush(); ent = val; cur = {}; }
+    else if (['10', '11', '20', '21', '40'].includes(code)) cur[+code] = parseFloat(val);
+  }
+  flush();
+  const halfX = Math.max(...xs.map(Math.abs)), halfY = Math.max(...ys.map(Math.abs));
+  eq(halfX * 2, 40, 'outline.dxf is 40 mm wide');
+  eq(halfY * 2, 40, 'outline.dxf is 40 mm tall');
+
+  const outside = place
+    .filter(r => r[0] !== 'J1')                   // the case cap module, not a board part
+    .filter(r => Math.abs(parseFloat(r[2])) > halfX || Math.abs(parseFloat(r[3])) > halfY)
+    .map(r => r[0]);
+  ok(outside.length === 0,
+     `every placement sits inside the outline${outside.length ? ` (outside: ${outside.join(', ')})` : ''}`);
+
+  // Nothing may sit in the antenna keepout - not copper, not parts.
+  const kz = place.find(r => r[0] === 'KEEPOUT');
+  ok(!!kz, 'placement.csv declares the antenna keepout');
+  if (kz) {
+    const kw = 19.4, kh = 6.6;
+    const kx = parseFloat(kz[2]), ky = parseFloat(kz[3]);
+    const inZone = place
+      .filter(r => r[0] !== 'KEEPOUT' && r[0] !== 'J1')
+      .filter(r => Math.abs(parseFloat(r[2]) - kx) < kw / 2 &&
+                   Math.abs(parseFloat(r[3]) - ky) < kh / 2)
+      .map(r => r[0]);
+    ok(inZone.length === 0,
+       `nothing is placed in the antenna keepout${inZone.length ? ` (in zone: ${inZone.join(', ')})` : ''}`);
+  }
+}
+
 // ---------------------------------------------------------------- syntax
 //
 // The firmware pages are JavaScript inside C++ raw string literals, so nothing in

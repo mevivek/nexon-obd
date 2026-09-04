@@ -2,7 +2,8 @@
 
 A read-only OBD-II black box on a Seeed XIAO ESP32S3. Firmware in `firmware/Obdurate/`,
 host tests in `firmware/test/`, a Preact frontend in `web/` that deploys separately onto
-the board's filesystem.
+the board's filesystem, and a custom-board design in `hardware/` that has never been
+fabricated.
 
 Read this before building. Everything below was learned the hard way at least once.
 
@@ -19,9 +20,10 @@ npm --prefix web run build      # frontend build + 300 KB budget gate
 web/deploy.sh                   # build, then upload the bundle to 192.168.4.1
 ```
 
-Expected as of v1.18.0: **482** host C++ checks, **287** firmware-source checks,
+Expected as of v1.18.0: **482** host C++ checks, **308** firmware-source checks,
 **382** frontend checks. All must be 0 failed. (The laptop-dashboard suite was
-retired with `tools/dashboard.html` in v1.15.0.)
+retired with `tools/dashboard.html` in v1.15.0. The firmware-source count went
+287 → 308 when the `hardware/` checks landed; no firmware changed.)
 
 `npm --prefix web run build` also regenerates `firmware/Obdurate/ui_bundle.h` — the
 dashboard is compiled into the firmware, so **a UI change needs a reflash unless you
@@ -122,6 +124,16 @@ reported; `q` (sampling quality) and `boot` (reset reason, uptime, wakes) are **
 `v`, never members** — a number inside `v` goes through the hold-last-value merge and the
 warning gating with the real readings.
 
+**`hardware/` is pinned to three GPIO numbers.** `hardware/netlist.csv` says the CAN
+transceiver hangs off `U3.GPIO2`/`U3.GPIO3` and the LED off `U3.GPIO21`, because that
+is what `PIN_CAN_TX`, `PIN_CAN_RX` and `LED_PIN` already are — which is why a custom
+board runs the existing image unmodified. `test_dashboard.mjs` reads the number out of
+the sketch and checks the netlist against *that*, so moving a pin fails the build
+instead of failing a fab run. The LED check is the sharp one: the firmware drives it
+**active low**, so the anode is on 3V3 through R1; flipping that in firmware makes the
+board wrong in a way reflashing cannot fix. Same shape as the `/data` contract, same
+reason — a claim in two places with a check in neither is a claim that drifts.
+
 **A periodic task must have a call site.** `tripTick()` was written, documented, given CSV
 columns and a rotation policy — and never called, on any board, for the project's whole
 life. `test_dashboard.mjs` now asserts every `*Tick`/`*Step` is called. Recorders belong in
@@ -214,6 +226,16 @@ claims are labelled.
 ## Where things stand (v1.18.0)
 
 Recent work, newest first. `git log` has the reasoning; this is the map.
+
+- **`hardware/` — a board design, not a board.** One 40 × 40 mm four-layer PCB
+  carrying the ESP32-S3 module, an SN65HVD230 and a 100 V-tolerant power chain,
+  in a clear Minitools case whose OBD-II connector is a matched module. The
+  netlist, placement, BOM, outline DXF and fab settings are there; **there is no
+  schematic, no layout and no Gerbers**, and nothing has been fabricated. The
+  case's 43 × 21 mm cap interface is what fixes the board at 40 mm across. Open
+  questions are listed in `hardware/README.md` and are real: whether the case
+  ships in clear polycarbonate at this size, and whether GPIO3 being an ESP32-S3
+  strapping pin matters when a CAN transceiver drives it.
 
 - **Five tabs, not six.** Sweep and Watch merged into **Discover** (`Discover.jsx`,
   still at `/scan`): they are two halves of one pipeline the autopilot runs end to

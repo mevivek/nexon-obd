@@ -1,0 +1,40 @@
+# Obdurate Rev A netlist. One row per net.
+#
+# members are REF.PIN, semicolon separated. Pin NAMES are used where the part
+# has meaningful ones (U1, U2, U3) rather than numbers, because the numbers come
+# off the datasheet at layout time and a wrong number here would look right.
+#
+# netclass drives the layout rules: POWER is wide, CAN is a routed pair, SIGNAL
+# is default, GND is a plane on an inner layer and is not routed at all.
+#
+# Checked against firmware/Obdurate/Obdurate.ino by test_dashboard.mjs: the
+# three nets carrying GPIO2, GPIO3 and GPIO21 must match what the firmware
+# drives, or the build fails. That is the whole reason this file is data.
+net,netclass,members,notes
+V_BATT,POWER,J1.16;F1.1;TP1.1,"OBD-II pin 16 - permanently live, present with the ignition off"
+VF,POWER,F1.2;Q1.S;D4.C,"after the fuse; zener cathode to source clamps Q1 Vgs"
+VGATE,SIGNAL,Q1.G;R2.1;D4.A,"gate pulled to GND through R2, clamped by D4 - 40 V on the rail would otherwise exceed Vgs"
+V_IN,POWER,Q1.D;D1.1;C1.1;C2.1;C8.1;U2.VIN;R8.1,"reverse-polarity protected input to the converter"
+UVLO,SIGNAL,R8.2;R9.1;U2.EN,"divider sets the hardware floor near 6.5 V - BELOW the firmware's 11.8 V cutoff, so software always acts first"
+SW,POWER,U2.SW;L1.1,"switching node - shortest and widest trace on the board, kept away from U3's antenna"
+3V3,POWER,L1.2;C3.1;C4.1;C5.1;C6.1;U3.3V3;U1.VCC;D3.C;R1.1;R3.1;R4.1;TP4.1,"C5 10 uF + C6 0.1 uF sit at U3's own pin per Espressif's guidelines"
+V_BUS,POWER,J2.VBUS;U4.IN;U4.EN,"USB 5 V. Cannot feed U2 - the LM5164 input range starts at 6 V"
+LDO_OUT,POWER,U4.OUT;D3.A,"3.3 V from USB, diode-OR'd into the rail so the buck wins when both are present"
+GND,GND,J1.4;J1.5;D1.2;R2.2;C1.2;C2.2;C8.2;U2.GND;C3.2;C4.2;C5.2;C6.2;C7.2;U3.GND;U1.GND;R7.2;R9.2;D2.2;J2.GND;J2.SHELL;U4.GND;R5.2;R6.2;TP5.1,"plane on an inner layer, stitched with vias - densest at SW and along the CAN pair"
+CAN_H,CAN,J1.6;CH1.1;D2.1;TP2.1,"OBD-II pin 6"
+CAN_H_F,CAN,CH1.2;U1.CANH,"filtered side of the common-mode choke"
+CAN_L,CAN,J1.14;CH1.3;D2.3;TP3.1,"OBD-II pin 14"
+CAN_L_F,CAN,CH1.4;U1.CANL,"filtered side of the common-mode choke"
+CTX,SIGNAL,U1.D;U3.GPIO2,"TWAI transmit. Firmware: PIN_CAN_TX = GPIO_NUM_2"
+CRX,SIGNAL,U1.R;U3.GPIO3,"TWAI receive. Firmware: PIN_CAN_RX = GPIO_NUM_3. NOTE - GPIO3 is an ESP32-S3 strapping pin; confirm before ordering"
+RS,SIGNAL,U1.Rs;R7.1,"R7 is 0 ohm to GND for high-speed mode"
+VREF,SIGNAL,U1.Vref,"left unconnected"
+LED_A,SIGNAL,R1.2;LED1.A,"anode side, fed from 3V3 through R1"
+LED_K,SIGNAL,LED1.C;U3.GPIO21,"cathode to the GPIO. Firmware drives the LED ACTIVE LOW - the pin sinks"
+USB_DM,SIGNAL,J2.DM;U3.GPIO19,"native USB"
+USB_DP,SIGNAL,J2.DP;U3.GPIO20,"native USB"
+CC1,SIGNAL,J2.CC1;R5.1,"5.1k to GND"
+CC2,SIGNAL,J2.CC2;R6.1,"5.1k to GND"
+BOOT,SIGNAL,U3.GPIO0;R3.2;TP6.1,"10k pull-up to 3V3, brought out to a pogo pad"
+RESET,SIGNAL,U3.EN;R4.2;C7.1,"10k + 1 uF RC"
+NC_J1,,J1.1;J1.2;J1.3;J1.7;J1.8;J1.9;J1.10;J1.11;J1.12;J1.13;J1.15,"deliberately not connected. Pin 7 K-line footprint may be routed but is not populated; nothing here is a write path"

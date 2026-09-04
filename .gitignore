@@ -5,6 +5,15 @@ obd_log.csv
 did_hits.csv
 ecm_did_hits.csv
 
+# hardware/ carries board design data, not vehicle data, so three files are let
+# back in — BY NAME, never as hardware/*.csv. A glob there would silently admit
+# anything later dropped in that directory, including a scan dump with a VIN in
+# it, which is the exact thing the rule above exists to stop. Adding a fourth
+# design CSV means adding a fourth line here, deliberately.
+!hardware/netlist.csv
+!hardware/bom.csv
+!hardware/placement.csv
+
 # Build output
 build/
 *.bin
