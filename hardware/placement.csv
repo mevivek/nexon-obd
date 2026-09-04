@@ -41,7 +41,10 @@ common,TP2,test pad CANH,18.0,-2.0,0,top,
 common,TP3,test pad CANL,18.0,0.6,0,top,
 common,TP4,test pad 3V3,18.0,3.1,0,top,
 common,TP5,test pad GND,18.0,5.6,0,top,
-xiao,U3,XIAO ESP32S3,2.0,9.5,0,top,"21 x 17.5 mm on the shared XIAO land pattern; spans X -6.75..10.75, Y -1.0..20.0. Nothing underneath - it stands on castellated pads about 1 mm off the board. U.FL antenna is a flying part positioned inside the case, so this variant needs no board keepout"
+xiao,U3,XIAO ESP32S3,2.0,9.5,0,top,"21 x 17.5 mm on the shared XIAO land pattern; spans X -6.75..10.75, Y -1.0..20.0. Nothing underneath - it stands on castellated pads about 1 mm off the board. Right-column pads sit at X 10.5: 3V3 at Y 12.0, GND at Y 14.6, 5V at Y 17.1. U.FL antenna is a flying part positioned inside the case, so this variant needs no board keepout"
+xiao,D5,Schottky 1 A,13.5,17.0,0,top,"right beside the module's 5V pad at (10.5, 17.1) - the reverse-blocking diode Seeed's guidance requires"
+xiao,R13,0 ohm link,13.5,12.0,0,top,"beside the module's 3V3 pad at (10.5, 12.0); links it to U1"
+xiao,U5,AP2112K-3.3 (DNP),-9.5,8.0,0,top,"unpopulated fallback LDO, clear of the module's left edge at X -6.75"
 wroom,U3,ESP32-S3-WROOM-1-N8R8,2.5,7.5,0,top,"spans Y -5.25 to +20.25 - deliberately overhangs the rear edge by 0.25 mm so the antenna clears board copper"
 wroom,KEEPOUT,antenna keepout zone,2.7,16.5,0,all,"19.4 x 6.6 mm spanning Y 13.2 to 19.8 - no copper on any layer, no parts, no ground pour"
 wroom,J2,USB-C receptacle,-13.5,16.4,0,top,"rear edge, opposite the connector"

@@ -108,9 +108,21 @@ Unresolved, not overlooked.
   verifiable in stock listings are the narrower `-N-PC` and `-L-PC` boxes, not the
   48 mm-wide `-M` this board needs. The answer changes the outline, so it comes
   before the layout.
-- **Is the XIAO's 5V pad diode-isolated from VBUS?** If not, feeding it from our
-  buck back-powers a connected USB host. `-xiao` only.
-- **Does the XIAO's LDO have headroom for U1's ~70 mA?** `-xiao` only.
+### Answered
+
+- **Is the XIAO's 5V pad diode-isolated from VBUS? No — it is not.** Seeed's own
+  expansion-board guidance is explicit that an external supply into the 5V pad
+  needs a series Schottky, anode to the supply. Without it, plugging USB in
+  back-powers whatever is feeding that pad. **D5 exists because of this**, and it
+  is not optional. It costs ~0.3 V, leaving ~4.7 V into the module, which its
+  regulator handles comfortably.
+- **Does the XIAO's regulator have headroom for U1's ~70 mA?** Not published for
+  the S3. The C3's 3V3 pad is rated 700 mA and the S3 schematic names the part
+  `SGM6029CYG`, but I will not plan against a rating I cannot source. Resolved by
+  design instead: **R13** links the module's 3V3 to U1 on Rev A, and **U5** is an
+  unpopulated local LDO on the same net. Fit one or the other, never both. Then
+  measure it in Phase 1, which is already the first hardware action. An
+  unpopulated footprint costs nothing next to a board spin.
 - **GPIO3 is an ESP32-S3 strapping pin** (JTAG source select), driven here by
   U1's receive output, which idles high because recessive is the bus's resting
   state. Almost certainly fine, and exactly the kind of "almost certainly" that
