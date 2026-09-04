@@ -20,10 +20,11 @@ npm --prefix web run build      # frontend build + 300 KB budget gate
 web/deploy.sh                   # build, then upload the bundle to 192.168.4.1
 ```
 
-Expected as of v1.18.0: **482** host C++ checks, **308** firmware-source checks,
+Expected as of v1.18.0: **482** host C++ checks, **324** firmware-source checks,
 **382** frontend checks. All must be 0 failed. (The laptop-dashboard suite was
 retired with `tools/dashboard.html` in v1.15.0. The firmware-source count went
-287 → 308 when the `hardware/` checks landed; no firmware changed.)
+287 → 308 when the `hardware/` checks landed and 308 → 324 when they grew a
+second board variant; no firmware changed for either.)
 
 `npm --prefix web run build` also regenerates `firmware/Obdurate/ui_bundle.h` — the
 dashboard is compiled into the firmware, so **a UI change needs a reflash unless you
@@ -124,15 +125,22 @@ reported; `q` (sampling quality) and `boot` (reset reason, uptime, wakes) are **
 `v`, never members** — a number inside `v` goes through the hold-last-value merge and the
 warning gating with the real readings.
 
-**`hardware/` is pinned to three GPIO numbers.** `hardware/netlist.csv` says the CAN
-transceiver hangs off `U3.GPIO2`/`U3.GPIO3` and the LED off `U3.GPIO21`, because that
-is what `PIN_CAN_TX`, `PIN_CAN_RX` and `LED_PIN` already are — which is why a custom
-board runs the existing image unmodified. `test_dashboard.mjs` reads the number out of
-the sketch and checks the netlist against *that*, so moving a pin fails the build
-instead of failing a fab run. The LED check is the sharp one: the firmware drives it
-**active low**, so the anode is on 3V3 through R1; flipping that in firmware makes the
-board wrong in a way reflashing cannot fix. Same shape as the `/data` contract, same
-reason — a claim in two places with a check in neither is a claim that drifts.
+**`hardware/` is pinned to three GPIO numbers, and the pin NAMES differ per variant.**
+`PIN_CAN_TX`, `PIN_CAN_RX` and `LED_PIN` are why a custom board runs the existing
+image unmodified, so `hardware/netlist.csv` is checked against the sketch by
+`firmware/test/hardware.mjs` — which reads the number *out of* the sketch and checks
+the netlist against that, per variant. The names are not interchangeable: GPIO2 is
+pad `IO2` on a bare WROOM-1 and pad `D1` on a XIAO, and a pin name that exists on no
+pad maps to nothing, silently. `hardware/xiao-pinmap.csv` holds that translation,
+row by row, with a source and a confirmed/unverified flag.
+
+Two traps in there. The firmware drives the LED **active low**, so on `-wroom` the
+anode is on the rail through R1 — flip the firmware and that board is wrong in a way
+reflashing cannot fix. And on `-xiao` there must be **no** board LED at all: GPIO21
+is not on a XIAO pad, it is the module's own onboard LED, which is what
+`LED_BUILTIN 21` has always meant. Adding one puts two things on one pin. Both are
+asserted. Same shape as the `/data` contract, same reason — a claim in two places
+with a check in neither is a claim that drifts.
 
 **A periodic task must have a call site.** `tripTick()` was written, documented, given CSV
 columns and a rotation policy — and never called, on any board, for the project's whole
@@ -227,14 +235,19 @@ claims are labelled.
 
 Recent work, newest first. `git log` has the reasoning; this is the map.
 
-- **`hardware/` — a board design, not a board.** One 40 × 40 mm four-layer PCB
-  carrying the ESP32-S3 module, an SN65HVD230 and a 100 V-tolerant power chain,
-  in a clear Minitools case whose OBD-II connector is a matched module. The
-  netlist, placement, BOM, outline DXF and fab settings are there; **there is no
-  schematic, no layout and no Gerbers**, and nothing has been fabricated. The
-  case's 43 × 21 mm cap interface is what fixes the board at 40 mm across. Open
-  questions are listed in `hardware/README.md` and are real: whether the case
-  ships in clear polycarbonate at this size, and whether GPIO3 being an ESP32-S3
+- **`hardware/` — a board design, not a board.** One 40 × 40 mm four-layer
+  carrier holding the CAN transceiver, a 100 V-tolerant power chain and the test
+  points, in a clear Minitools case whose OBD-II connector is a matched module.
+  **Two variants of which MCU module**, sharing one circuit: `-xiao` reflows a
+  Seeed XIAO ESP32S3 (Rev A — ~25 parts, 1.27 mm finest pitch, and the module
+  brings its own USB, LDO and LED, whose onboard LED *is* GPIO21), `-wroom` uses
+  a bare ESP32-S3-WROOM-1 (~38 parts, cheaper at volume, 0.5 mm pitch at its
+  USB-C). Every CSV carries a `variant` column of `common`/`xiao`/`wroom` and the
+  build checks both. **There is no schematic, no layout and no Gerbers**, and
+  nothing has been fabricated. The case's 43 × 21 mm cap interface is what fixes
+  the board at 40 mm across. Open questions in `hardware/README.md` are real:
+  whether the case ships in clear polycarbonate at this size, whether the XIAO's
+  5V pad is diode-isolated from VBUS, and whether GPIO3 being an ESP32-S3
   strapping pin matters when a CAN transceiver drives it.
 
 - **Five tabs, not six.** Sweep and Watch merged into **Discover** (`Discover.jsx`,

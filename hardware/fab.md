@@ -1,10 +1,17 @@
 # Ordering Rev A
 
+**Order the `-xiao` variant.** Same board outline and the same fab settings as
+`-wroom`, so everything below applies to either — but the XIAO variant's finest
+pitch is 1.27 mm rather than 0.5 mm, which is the difference between a board you
+can hand-assemble with hot air and one you would rather not.
+
 Fabrication only — none of these vendors' PCB pages include assembly. Bare
 boards cover the ~$0.60 PCB line in the plan's BOM, not the ~$2.60 assembly
-line. Five prototypes are hand-solderable: SOIC-8, 0603 and a castellated
-module are all within reach of hot air. For 300 units you need turnkey PCBA with
-component sourcing, and [`bom.csv`](bom.csv) is the file they will ask for.
+line. Five `-xiao` prototypes are genuinely hand-solderable: SOIC-8, 0603, 1210
+and a castellated module are all within reach of hot air, and the XIAO removes
+the USB-C, the LDO and the LED from the job. For 300 units you need turnkey PCBA
+with component sourcing, and [`bom.csv`](bom.csv) is the file they will ask for —
+filter it to `common` plus the variant you are building.
 
 ## Quantity
 
@@ -63,7 +70,7 @@ Taken from Robu's order form. The reasoning generalises to any fab.
 | Board outline tolerance | ±0.2 mm — comfortable against 1.5 mm case clearance per side |
 | Minimum silkscreen text | **1.2 mm.** The concept model used 1.05 mm for `TP1`–`TP6`, which is at the fab floor — raise it before exporting |
 | Minimum trace / clearance | 0.15 mm is available; nothing here needs finer than 0.25 mm |
-| Finest pitch on the board | 0.5 mm, at J2's USB-C pads — this is what sets the fab class |
+| Finest pitch on the board | **`-xiao`: 1.27 mm** at U1/U2's SOIC-8. `-wroom`: 0.5 mm at J2's USB-C, which is what would set that variant's fab class |
 | Copper | 1 oz outer |
 
 ## Lead time

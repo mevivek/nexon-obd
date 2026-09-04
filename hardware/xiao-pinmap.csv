@@ -1,0 +1,35 @@
+# XIAO form-factor pad map, for the -xiao variant.
+#
+# All XIAO boards share one 21 x 17.5 mm land pattern with 14 castellated pads on
+# 2.54 mm pitch, which is why KiCad's RF_Module:MCU_Seeed_ESP32C3 footprint fits
+# the ESP32S3 board. Pads 1-7 run down the left edge (top to bottom), 8-14 back up
+# the right edge.
+#
+# The pad -> silkscreen name order is from the XIAO form factor; the name -> GPIO
+# column is the ESP32S3 board specifically, and differs on other XIAO boards.
+#
+# status: confirmed  = corroborated by this repo (README wiring table / boot log)
+#         unverified = from the XIAO form factor, needs checking against Seeed's
+#                      own footprint before Gerbers are sent
+#
+# Getting this wrong swaps pins, so it is data with a source rather than a number
+# written into a layout.
+pad,name,gpio,status,source
+1,D0,GPIO1,unverified,XIAO form factor
+2,D1,GPIO2,confirmed,"README hardware table: D1 (GPIO2) -> CTX; matches PIN_CAN_TX"
+3,D2,GPIO3,confirmed,"README hardware table: D2 (GPIO3) -> CRX; matches PIN_CAN_RX"
+4,D3,GPIO4,unverified,XIAO form factor
+5,D4,GPIO5,unverified,XIAO form factor
+6,D5,GPIO6,unverified,XIAO form factor
+7,D6,GPIO43,unverified,XIAO form factor
+8,D7,GPIO44,unverified,XIAO form factor
+9,D8,GPIO7,unverified,XIAO form factor
+10,D9,GPIO8,unverified,XIAO form factor
+11,D10,GPIO9,unverified,XIAO form factor
+12,3V3,,confirmed,"output of the XIAO's own LDO; feeds U1 in this variant"
+13,GND,,confirmed,XIAO form factor
+14,5V,,unverified,"input from our buck. CHECK whether it is diode-isolated from VBUS before feeding it"
+# GPIO21 is NOT on a XIAO pad. It drives the XIAO's own onboard LED, active low,
+# which is exactly what LED_BUILTIN 21 in the firmware refers to. The -xiao
+# variant therefore carries no board LED at all, and adding one would fight the
+# module's. test_dashboard.mjs asserts that.

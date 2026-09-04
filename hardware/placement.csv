@@ -1,49 +1,59 @@
-# Obdurate Rev A - component placement, board-local millimetres.
-# Origin at board centre. +X to the right viewed from the top; +Y toward the
-# REAR of the board (the antenna / USB end). Front edge (connector side) is
-# Y = -20, rear edge Y = +20. All parts on the top side; the bottom is bare.
+# Obdurate Rev A placement, board-local millimetres. variant is common, xiao or wroom.
 #
-# This placement is the defensible part of the concept model: it comes from
-# datasheet outlines and two rules - the 12 V chain stays in the left half and
-# never crosses the CAN pair, and the module's antenna sits at the rear edge
-# inside a copper keepout. Routing is NOT included and was never computed.
-designator,part,x_mm,y_mm,rotation_deg,side,placement_rationale
-J1,SEP-A-OBD-E2 cap module,0.0,-25.0,0,edge,"mates to the case mouth; not a board part - reference only"
-U3,ESP32-S3-WROOM-1-N8R8,2.5,7.5,0,top,"spans Y -5.25 to +20.25 - deliberately overhangs the rear edge by 0.25 mm so the antenna clears board copper; faces the cabin"
-U2,LM5164QDDARQ1,-14.5,-7.0,0,top,"beside the 12 V entry; switching node kept short to L1"
-L1,33 uH inductor,-6.8,-6.8,0,top,"adjacent to U2 SW pin"
-C1,2.2 uF 100 V,-17.4,-11.6,0,top,"VIN bulk, close to U2"
-C2,2.2 uF 100 V,-13.6,-11.6,0,top,"VIN bulk"
-C3,22 uF 16 V,-6.8,-1.6,0,top,"3V3 output"
-C4,22 uF 16 V,-3.2,-1.6,0,top,"3V3 output"
-F1,polyfuse 500 mA,-17.2,-15.4,0,top,"first in line from pin 16"
-Q1,P-ch MOSFET,-13.2,-15.4,0,top,"reverse polarity, after F1"
-D1,SMAJ33A,-8.6,-15.2,0,top,"TVS clamp, after Q1"
-U1,SN65HVD230DR,14.2,-9.6,0,top,"hugs pins 6 and 14; ~9 mm from the connector pads"
-CH1,CAN common-mode choke,14.2,-15.4,0,top,"in series with CAN H / CAN L at the entry"
-D2,NUP2105L,17.4,-15.6,0,top,"ESD across the pair at the connector end"
-J2,USB-C receptacle,-13.5,16.4,0,top,"rear edge, opposite the connector"
-U4,AP2112K-3.3,-17.2,9.5,0,top,"near J2, feeds the OR diode"
-D3,BAT54C,-13.0,9.5,0,top,"OR-s the USB rail into 3V3"
-R1,1 k,16.2,9.8,0,top,"LED1 series resistor"
-LED1,LED 0603,16.2,13.0,0,top,"visible through the clear case"
-D4,15 V zener,-11.2,-18.0,0,top,"clamps Q1 gate-source; must sit at Q1"
-R2,100 k,-15.5,-18.0,0,top,"Q1 gate to GND"
-C8,0.1 uF 100 V,-17.4,-8.6,0,top,"VIN high-frequency bypass, at U2's VIN pin"
-R8,EN/UVLO upper,-11.5,-4.5,0,top,"divider from V_IN"
-R9,EN/UVLO lower,-11.5,-2.5,0,top,"divider to GND; tap goes to U2.EN"
-C6,0.1 uF,-8.8,1.6,0,top,"at U3's own 3V3 pin, per Espressif's guidelines"
-C5,10 uF,-8.8,3.4,0,top,"at U3's own 3V3 pin"
-C7,1 uF,-8.8,5.2,0,top,"EN reset RC"
-R4,10 k,-8.8,7.0,0,top,"EN pull-up"
-R7,0 ohm,11.0,-9.6,0,top,"U1 Rs to GND - high-speed mode; sits beside U1"
-R3,10 k,14.5,6.5,0,top,"GPIO0 pull-up, near TP6"
-R6,5.1 k,-7.8,15.8,0,top,"USB-C CC2 pulldown; clear of J2's body and of the keepout"
-R5,5.1 k,-7.8,17.8,0,top,"USB-C CC1 pulldown"
-TP1,test pad 12V,18.0,-4.5,0,top,"pogo row, 2.54 mm pitch, clear of the module"
-TP2,test pad CANH,18.0,-2.0,0,top,
-TP3,test pad CANL,18.0,0.6,0,top,
-TP4,test pad 3V3,18.0,3.1,0,top,
-TP5,test pad GND,18.0,5.6,0,top,
-TP6,test pad BOOT,18.0,8.2,0,top,
-KEEPOUT,antenna keepout zone,2.7,16.5,0,all,"19.4 x 6.6 mm spanning Y 13.2 to 19.8 - no copper on any layer, no parts, no ground pour"
+# Origin at board centre. +X to the right viewed from the top; +Y toward the REAR
+# (the module / antenna end). Front edge (connector side) is Y = -20, rear Y = +20.
+# All parts on the top side; the bottom is bare.
+#
+# The placement is the defensible part of this design: it comes from datasheet
+# outlines and two rules - the 12 V chain stays in the left half and never crosses
+# the CAN pair, and the module sits at the rear with nothing under it. The common
+# rows are positioned to clear BOTH module footprints, so the power and CAN
+# sections do not move between variants.
+#
+# Routing is NOT included here and has not been computed.
+variant,designator,part,x_mm,y_mm,rotation_deg,side,placement_rationale
+common,J1,SEP-A-OBD-E2 cap module,0.0,-25.0,0,offboard,"mates to the case mouth; wires to J3. Reference only, not a board part"
+common,J3,5 wire pads,0.0,-18.6,0,top,"five pads across the front edge at x = -17.2, -13.8, -10.4, +13.8, +17.2 - power left, CAN right, as the whole layout is"
+common,F1,polyfuse 500 mA,-17.2,-15.4,0,top,"first in line from J3.1"
+common,Q1,P-ch MOSFET,-13.2,-15.4,0,top,"reverse polarity, after F1"
+common,D1,SMAJ33A,-8.6,-15.2,0,top,"TVS clamp, after Q1"
+common,D4,15 V zener,-11.2,-18.0,0,top,"clamps Q1 gate-source; must sit at Q1"
+common,R2,100 k,-15.5,-18.0,0,top,Q1 gate to GND
+common,C1,2.2 uF 100 V,-17.4,-11.6,0,top,"VIN bulk, close to U2"
+common,C2,2.2 uF 100 V,-13.6,-11.6,0,top,VIN bulk
+common,C8,0.1 uF 100 V,-17.4,-8.6,0,top,"VIN high-frequency bypass at U2's pin"
+common,U2,LM5164-Q1,-14.5,-7.0,0,top,"beside the 12 V entry; switching node kept short to L1"
+common,C9,0.1 uF bootstrap,-10.6,-8.6,0,top,"BST to SW - must be right at U2"
+common,L1,33 uH inductor,-6.8,-6.8,0,top,adjacent to U2's SW pin
+common,C3,22 uF,-9.2,-2.0,0,top,"buck output; clear of both module footprints"
+common,C4,22 uF,-9.2,0.6,0,top,buck output
+common,R8,EN/UVLO upper,-13.0,-4.0,0,top,divider from V_IN
+common,R9,EN/UVLO lower,-13.0,-1.5,0,top,divider to GND; tap goes to U2.EN/UVLO
+common,R10,FB upper,-17.6,-4.0,0,top,"feedback divider; ratio differs by variant"
+common,R11,FB lower,-17.6,-1.5,0,top,pairs with R10
+common,R12,RON,-14.6,-2.0,0,top,sets the switching frequency
+common,U1,SN65HVD230DR,14.2,-9.6,0,top,"hugs the CAN pads; ~9 mm from J3.4/J3.5"
+common,CH1,CAN common-mode choke,14.2,-15.4,0,top,in series with CAN H / CAN L at the entry
+common,D2,NUP2105L,17.4,-15.6,0,top,ESD across the pair at the connector end
+common,R7,0 ohm,11.0,-9.6,0,top,U1 Rs to GND; sits beside U1
+common,TP1,test pad 12V,18.0,-4.5,0,top,"pogo row, 2.54 mm pitch, clear of both modules"
+common,TP2,test pad CANH,18.0,-2.0,0,top,
+common,TP3,test pad CANL,18.0,0.6,0,top,
+common,TP4,test pad 3V3,18.0,3.1,0,top,
+common,TP5,test pad GND,18.0,5.6,0,top,
+xiao,U3,XIAO ESP32S3,2.0,9.5,0,top,"21 x 17.5 mm on the shared XIAO land pattern; spans X -6.75..10.75, Y -1.0..20.0. Nothing underneath - it stands on castellated pads about 1 mm off the board. U.FL antenna is a flying part positioned inside the case, so this variant needs no board keepout"
+wroom,U3,ESP32-S3-WROOM-1-N8R8,2.5,7.5,0,top,"spans Y -5.25 to +20.25 - deliberately overhangs the rear edge by 0.25 mm so the antenna clears board copper"
+wroom,KEEPOUT,antenna keepout zone,2.7,16.5,0,all,"19.4 x 6.6 mm spanning Y 13.2 to 19.8 - no copper on any layer, no parts, no ground pour"
+wroom,J2,USB-C receptacle,-13.5,16.4,0,top,"rear edge, opposite the connector"
+wroom,U4,AP2112K-3.3,-17.2,9.5,0,top,"near J2, feeds the OR diode"
+wroom,D3,BAT54,-13.0,9.5,0,top,ORs the USB rail into 3V3
+wroom,C5,10 uF,-8.8,3.4,0,top,"at U3's own 3V3 pin, per Espressif's guidelines"
+wroom,C6,0.1 uF,-8.8,1.6,0,top,at U3's own 3V3 pin
+wroom,C7,1 uF,-8.8,5.2,0,top,EN reset RC
+wroom,R4,10 k,-8.8,7.0,0,top,EN pull-up
+wroom,R3,10 k,14.5,6.5,0,top,"IO0 pull-up, near TP6"
+wroom,R5,5.1 k,-7.8,17.8,0,top,"USB-C CC1 pulldown; clear of J2's body and of the keepout"
+wroom,R6,5.1 k,-7.8,15.8,0,top,USB-C CC2 pulldown
+wroom,R1,1 k,16.2,9.8,0,top,LED1 series resistor
+wroom,LED1,LED 0603,16.2,13.0,0,top,"visible through the clear case. The xiao variant has none - the module's own LED is GPIO21"
+wroom,TP6,test pad BOOT,18.0,8.2,0,top,"the xiao variant has a BOOT button on the module instead"

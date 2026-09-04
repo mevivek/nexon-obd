@@ -1,36 +1,48 @@
-designator,qty,value_or_mpn,manufacturer,package,status,usd_each,note
-U3,1,ESP32-S3-WROOM-1-N8R8,Espressif,"module 18.0 x 25.5 x 3.1",spec,3.20,"PCB antenna; needs host keepout; place at board edge"
-U1,1,SN65HVD230DR,Texas Instruments,SOIC-8,spec,0.90,"3.3 V CAN transceiver; Rs to GND for high-speed; no split termination"
-U2,1,LM5164QDDARQ1,Texas Instruments,SO PowerPAD-8,spec,2.60,"6-100 V in, 1 A, 10 uA standby Iq, AEC-Q100; $2.28 at 1k for non-Q1"
-U4,1,AP2112K-3.3TRG1,Diodes Inc,SOT-23-5,class,0.15,"USB 5 V rail; the buck cannot run from 5 V"
-J1,1,SEP-A-OBD-E2,Minitools,"43 x 21 cap module",spec,2.60,"OBD-II male, J1962, 16 pin, 5 used; $2.60 at 50+"
-J2,1,USB-C receptacle 16-pin,,SMD,class,0.30,"0.5 mm pitch - finest on the board, sets fab class"
-L1,1,33 uH shielded power inductor,,"6.0 x 6.0 x 3.0",class,0.55,"value to confirm against LM5164 datasheet app circuit"
-CH1,1,CAN common-mode choke,,"4.5 x 3.2",class,0.15,"series in CAN H / CAN L"
-D1,1,SMAJ33A,,DO-214AC (SMA),class,0.12,"TVS clamp to GND"
-D2,1,NUP2105L,onsemi,SOT-23,class,0.11,"CAN ESD array"
-D3,1,BAT54 single Schottky,,SOD-323,class,0.05,"OR-s the USB rail into 3V3; single diode not the BAT54C dual - the buck feeds the rail directly and wins. See README open question on the ~3.05 V USB-only rail"
-D4,1,15 V zener,,SOD-323,class,0.04,"clamps Q1 gate - 40 V on the rail would exceed VGS"
-Q1,1,P-channel MOSFET 40 V,,SOT-23,class,0.08,"reverse-polarity protection"
-F1,1,polyfuse 500 mA hold,,1206,class,0.10,"resettable"
-C1,1,2.2 uF 100 V X7R,,1210,class,0.22,"VIN bulk - 100 V rating caps practical value per part"
-C2,1,2.2 uF 100 V X7R,,1210,class,0.22,"VIN bulk"
-C3,1,22 uF 16 V X7R,,1210,class,0.09,"3V3 output"
-C4,1,22 uF 16 V X7R,,1210,class,0.09,"3V3 output"
-C5,1,10 uF 16 V X7R,,0603,class,0.02,"at U3 3V3 pin, per Espressif guidelines"
-C6,1,0.1 uF 16 V X7R,,0603,class,0.01,"at U3 3V3 pin"
-C7,1,1 uF 16 V X7R,,0603,class,0.01,"EN reset RC"
-C8,1,0.1 uF 100 V X7R,,0603,class,0.02,"VIN high-frequency bypass"
-R1,1,1 k 1%,,0603,class,0.01,"LED1 series; GPIO21 is active low so the pin sinks"
-R2,1,100 k 1%,,0603,class,0.01,"Q1 gate"
-R3,1,10 k 1%,,0603,class,0.01,"GPIO0 BOOT pull-up, brought out to TP6"
-R4,1,10 k 1%,,0603,class,0.01,"EN pull-up"
-R5,1,5.1 k 1%,,0603,class,0.01,"USB-C CC1"
-R6,1,5.1 k 1%,,0603,class,0.01,"USB-C CC2"
-R7,1,0 ohm,,0603,class,0.01,"U1 Rs to GND - high-speed mode"
-R8,1,EN/UVLO divider upper,,0603,class,0.01,"set hardware floor near 6.5 V, below the firmware 11.8 V cutoff"
-R9,1,EN/UVLO divider lower,,0603,class,0.01,"pairs with R8"
-LED1,1,LED green 0603,,0603,class,0.04,"status; firmware drives it active low"
-TP1-TP6,6,test pad 2.1 mm,,"copper, ENIG",class,0.00,"12V / CANH / CANL / 3V3 / GND / BOOT - pogo targets"
-PCB,1,"40 x 40 mm, 4 layer, 1.6 mm",,"FR-4 TG150+, ENIG",class,0.60,"green for protos; colour is a product decision behind a clear case"
-CASE,1,SEP-A-OBD-M + SEP-A-OBD-B,Minitools,"50 x 48 x 24",estimate,4.20,"clear PC variant unconfirmed for -M; price needs a quote"
+# Obdurate Rev A bill of materials. variant is common, xiao or wroom.
+# The buildable BOM for a variant is every 'common' row plus that variant's rows.
+# status: spec = a real part number whose datasheet outline is settled
+#         class = the envelope is right, the SKU is still open
+#         estimate = the price needs a quote before it can be planned against
+variant,designator,qty,value_or_mpn,manufacturer,package,footprint,status,usd_each,note
+common,J3,5,wire pad 2.0 mm,,SMD pad,TestPoint:TestPoint_Pad_2.0x2.0mm,class,0.00,"the five used J1 contacts land here; the connector module's wire interface is unconfirmed"
+common,U1,1,SN65HVD230DR,Texas Instruments,SOIC-8,Package_SO:SOIC-8_3.9x4.9mm_P1.27mm,spec,0.90,"3.3 V CAN transceiver; Rs to GND for high-speed; no split termination"
+common,U2,1,LM5164QDDARQ1,Texas Instruments,SO PowerPAD-8,Package_SO:SOIC-8-1EP_3.9x4.9mm_P1.27mm_EP2.29x3mm,spec,2.60,"6-100 V in, 1 A, 10 uA standby Iq, AEC-Q100. $2.28 at 1k for the non-Q1"
+common,L1,1,33 uH shielded power inductor,,6.0 x 6.0 x 3.0,Inductor_SMD:L_Bourns_SRN6045TA,class,0.55,"value to confirm against the LM5164 application circuit; its height sets minimum internal clearance"
+common,CH1,1,CAN common-mode choke,,1812 (4.5 x 3.2),Inductor_SMD:L_CommonModeChoke_Coilcraft_1812CAN,class,0.15,"1812 CAN part - correct size and application"
+common,D1,1,SMAJ33A,,DO-214AC (SMA),Diode_SMD:D_SMA,class,0.12,"TVS clamp to GND"
+common,D2,1,NUP2105L,onsemi,SOT-23,Package_TO_SOT_SMD:SOT-23,class,0.11,"CAN ESD array"
+common,D4,1,15 V zener,,SOD-323,Diode_SMD:D_SOD-323,class,0.04,"clamps Q1 gate-source - 40 V on the rail would otherwise exceed Vgs"
+common,Q1,1,P-channel MOSFET 40 V,,SOT-23,Package_TO_SOT_SMD:SOT-23,class,0.08,"reverse-polarity protection"
+common,F1,1,polyfuse 500 mA hold,,1206,Fuse:Fuse_1206_3216Metric,class,0.10,resettable
+common,C1,1,2.2 uF 100 V X7R,,1210,Capacitor_SMD:C_1210_3225Metric,class,0.22,"VIN bulk - the 100 V rating caps practical value per part"
+common,C2,1,2.2 uF 100 V X7R,,1210,Capacitor_SMD:C_1210_3225Metric,class,0.22,VIN bulk
+common,C3,1,22 uF X7R,,1210,Capacitor_SMD:C_1210_3225Metric,class,0.09,"buck output; voltage rating per variant"
+common,C4,1,22 uF X7R,,1210,Capacitor_SMD:C_1210_3225Metric,class,0.09,buck output
+common,C8,1,0.1 uF 100 V X7R,,0603,Capacitor_SMD:C_0603_1608Metric,class,0.02,"VIN high-frequency bypass at U2's pin"
+common,C9,1,0.1 uF bootstrap,,0603,Capacitor_SMD:C_0603_1608Metric,class,0.01,"BST to SW. Without it the high-side FET never fully turns on"
+common,R2,1,100 k,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,Q1 gate to GND
+common,R7,1,0 ohm,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,U1 Rs to GND
+common,R8,1,EN/UVLO upper,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,"sets the hardware floor near 6.5 V"
+common,R9,1,EN/UVLO lower,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,pairs with R8
+common,R10,1,FB upper,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,"ratio differs by variant: 5 V for xiao, 3.3 V for wroom"
+common,R11,1,FB lower,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,pairs with R10
+common,R12,1,RON,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,"sets the on-time and so the switching frequency"
+common,TP1-TP5,5,test pad 2.0 mm,,copper ENIG,TestPoint:TestPoint_Pad_2.0x2.0mm,class,0.00,"12V / CANH / CANL / 3V3 / GND pogo targets"
+common,PCB,1,40 x 40 mm 4 layer 1.6 mm,,FR-4 TG150+ ENIG,,class,0.60,"colour is a product decision behind a clear case"
+common,CASE,1,SEP-A-OBD-M + SEP-A-OBD-B,Minitools,50 x 48 x 24,,estimate,4.20,"clear PC variant unconfirmed for -M; needs a quote"
+common,J1,1,SEP-A-OBD-E2,Minitools,43 x 21 module,,spec,2.60,"OBD-II male J1962, 16 pin, 5 used. Off-board: wires to J3. $2.60 at 50+"
+xiao,U3,1,XIAO ESP32S3,Seeed Studio,21 x 17.5 module,RF_Module:MCU_Seeed_ESP32C3,spec,7.00,"8 MB PSRAM + 8 MB flash, U.FL antenna included. Footprint is the shared XIAO land pattern. Retail ~$7; needs a Seeed volume quote"
+wroom,U3,1,ESP32-S3-WROOM-1-N8R8,Espressif,18.0 x 25.5 x 3.1,RF_Module:ESP32-S3-WROOM-1,spec,3.20,"PCB antenna; needs a host keepout; place at the board edge"
+wroom,J2,1,USB-C receptacle 16-pin,,SMD,Connector_USB:USB_C_Receptacle_HRO_TYPE-C-31-M-12,class,0.30,"0.5 mm pitch - the finest on this variant, and what sets its fab class"
+wroom,U4,1,AP2112K-3.3TRG1,Diodes Inc,SOT-23-5,Package_TO_SOT_SMD:SOT-23-5,class,0.15,"USB 5 V rail; the buck cannot run from 5 V"
+wroom,D3,1,BAT54 single Schottky,,SOD-323,Diode_SMD:D_SOD-323,class,0.05,"ORs the USB rail into 3V3. Leaves the USB-only rail near 3.05 V - see README"
+wroom,C5,1,10 uF X7R,,0603,Capacitor_SMD:C_0603_1608Metric,class,0.02,"at U3's own 3V3 pin per Espressif's guidelines"
+wroom,C6,1,0.1 uF X7R,,0603,Capacitor_SMD:C_0603_1608Metric,class,0.01,at U3's own 3V3 pin
+wroom,C7,1,1 uF X7R,,0603,Capacitor_SMD:C_0603_1608Metric,class,0.01,EN reset RC
+wroom,R1,1,1 k,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,"LED1 series. GPIO21 is active low so the pin sinks"
+wroom,R3,1,10 k,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,IO0 BOOT pull-up
+wroom,R4,1,10 k,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,EN pull-up
+wroom,R5,1,5.1 k,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,USB-C CC1
+wroom,R6,1,5.1 k,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,USB-C CC2
+wroom,LED1,1,LED 0603,,0603,LED_SMD:LED_0603_1608Metric,class,0.04,"status. The xiao variant needs none - the module's own LED IS GPIO21"
+wroom,TP6,1,test pad 2.0 mm,,copper ENIG,TestPoint:TestPoint_Pad_2.0x2.0mm,class,0.00,"BOOT. The xiao variant has a BOOT button on the module"

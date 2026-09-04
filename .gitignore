@@ -13,6 +13,7 @@ ecm_did_hits.csv
 !hardware/netlist.csv
 !hardware/bom.csv
 !hardware/placement.csv
+!hardware/xiao-pinmap.csv
 
 # Build output
 build/
