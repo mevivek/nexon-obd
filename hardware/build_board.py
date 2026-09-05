@@ -69,9 +69,16 @@ def mm(v):
     return pcbnew.FromMM(float(v))
 
 
+# Board centre in KiCad page coordinates. The design is centred on its own
+# origin, but Gerbers whose coordinates go negative upset some fab DFM tools, so
+# the whole board is shifted into the positive quadrant on the way out.
+ORIGIN = (100.0, 100.0)
+
+
 def vec(x_mm, y_mm):
     """Board-local mm (+Y toward the rear) into KiCad nm (+Y downward)."""
-    return pcbnew.VECTOR2I(mm(x_mm), mm(-float(y_mm)))
+    return pcbnew.VECTOR2I(mm(ORIGIN[0] + float(x_mm)),
+                           mm(ORIGIN[1] - float(y_mm)))
 
 
 def pads_for(ref, pin, variant):
@@ -127,7 +134,7 @@ def outline(board):
         board.Add(sh)
 
 
-def build(variant):
+def build(variant, layers=4):
     keep = ('common', variant)
     bom = [r for r in rows('bom.csv') if r['variant'] in keep]
     plc = [r for r in rows('placement.csv') if r['variant'] in keep]
@@ -140,7 +147,7 @@ def build(variant):
                 fp_of[ref] = r['footprint'].strip()
 
     board = pcbnew.BOARD()
-    board.SetCopperLayerCount(4)
+    board.SetCopperLayerCount(layers)
     outline(board)
 
     placed = {}
@@ -206,6 +213,40 @@ def build(variant):
     # Does anything hang off the board? The render makes this look obvious and
     # perspective makes it lie, so measure the courtyards against the 40 x 40
     # outline instead of squinting at a picture.
+    # GND is declared a plane in netlist.csv, so make it one. Without this both
+    # inner layers ship as empty artwork, which is a legitimate DFM failure on a
+    # 4-layer order - a fab is entitled to ask whether you meant 2 layers.
+    gnd = nets.get('GND')
+    if gnd is not None:
+        made = 0
+        planes = ((pcbnew.In1_Cu, pcbnew.In2_Cu) if layers >= 4
+                  else (pcbnew.B_Cu,))
+        for layer in planes:
+            try:
+                z = pcbnew.ZONE(board)
+                z.SetLayer(layer)
+                z.SetNetCode(gnd.GetNetCode())
+                z.SetAssignedPriority(0)
+                pts = pcbnew.VECTOR_VECTOR2I()
+                inset = 0.3                      # pull back from the board edge
+                a = 20.0 - inset
+                for x, y in ((-a, -a), (a, -a), (a, a), (-a, a)):
+                    pts.append(vec(x, y))
+                z.AddPolygon(pts)
+                board.Add(z)
+                made += 1
+            except Exception as e:               # noqa - report, do not abort
+                print('  zone on layer %d failed: %s' % (layer, e))
+        if made:
+            try:
+                pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+                print('  filled %d GND pour(s) on %s'
+                  % (made, 'the inner layers' if layers >= 4 else 'B.Cu'))
+            except Exception as e:
+                print('  zone fill failed: %s' % e)
+    else:
+        print('  no GND net, so no plane')
+
     # PADS only. A footprint's bounding box includes its silkscreen text and,
     # for the WROOM, the antenna keepout graphics that are SUPPOSED to extend
     # past the board - so a whole-footprint box reports overhang that is either
@@ -215,13 +256,13 @@ def build(variant):
     for ref, fp in sorted(placed.items()):
         for pad in fp.Pads():
             bb = pad.GetBoundingBox()
-            for edge, val in (('left', pcbnew.ToMM(bb.GetLeft())),
-                              ('right', pcbnew.ToMM(bb.GetRight())),
-                              ('top', pcbnew.ToMM(bb.GetTop())),
-                              ('bottom', pcbnew.ToMM(bb.GetBottom()))):
-                if abs(val) > 20.0 + 0.01:
+            for edge, val, o in (('left', pcbnew.ToMM(bb.GetLeft()), ORIGIN[0]),
+                                 ('right', pcbnew.ToMM(bb.GetRight()), ORIGIN[0]),
+                                 ('top', pcbnew.ToMM(bb.GetTop()), ORIGIN[1]),
+                                 ('bottom', pcbnew.ToMM(bb.GetBottom()), ORIGIN[1])):
+                if abs(val - o) > 20.0 + 0.01:
                     over.append((ref + '.' + pad.GetNumber(), edge,
-                                 round(abs(val) - 20.0, 2)))
+                                 round(abs(val - o) - 20.0, 2)))
     if over:
         print('  %d footprint edge(s) past the outline:' % len(over))
         for ref, edge, by in over:
@@ -229,16 +270,20 @@ def build(variant):
     else:
         print('  nothing overhangs the board outline')
 
-    out = os.path.join(HERE, 'obdurate-revA-%s.kicad_pcb' % variant)
+    tag = variant if layers == 4 else '%s-%dL' % (variant, layers)
+    out = os.path.join(HERE, 'obdurate-revA-%s.kicad_pcb' % tag)
     pcbnew.SaveBoard(out, board)
     print('  wrote', os.path.basename(out))
     return missed
 
 
 if __name__ == '__main__':
-    which = sys.argv[1:] or ['xiao']
+    # variant[:layers] - e.g. "xiao:2 wroom:4"
+    which = sys.argv[1:] or ['xiao:2']
     bad = 0
-    for v in which:
-        print(v + ':')
-        bad += build(v)
+    for spec in which:
+        v, _, n = spec.partition(':')
+        layers = int(n) if n else 4
+        print('%s, %d layer:' % (v, layers))
+        bad += build(v, layers)
     sys.exit(1 if bad else 0)

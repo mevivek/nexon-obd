@@ -1,51 +1,64 @@
 # Obdurate Rev A bill of materials. variant is common, xiao or wroom.
 # The buildable BOM for a variant is every 'common' row plus that variant's rows.
+#
 # status: spec = a real part number whose datasheet outline is settled
 #         class = the envelope is right, the SKU is still open
 #         estimate = the price needs a quote before it can be planned against
-variant,designator,qty,value_or_mpn,manufacturer,package,footprint,status,usd_each,note
-common,W1-W5,5,wire pad 2.0 mm,,SMD pad,TestPoint:TestPoint_Pad_2.0x2.0mm,class,0.00,"the five used J1 contacts land here; the connector module's wire interface is unconfirmed"
-common,U1,1,SN65HVD230DR,Texas Instruments,SOIC-8,Package_SO:SOIC-8_3.9x4.9mm_P1.27mm,spec,0.90,"3.3 V CAN transceiver; Rs to GND for high-speed; no split termination"
-common,U2,1,LM5164QDDARQ1,Texas Instruments,SO PowerPAD-8,Package_SO:SOIC-8-1EP_3.9x4.9mm_P1.27mm_EP2.29x3mm,spec,2.60,"6-100 V in, 1 A, 10 uA standby Iq, AEC-Q100. $2.28 at 1k for the non-Q1"
-common,L1,1,33 uH shielded power inductor,,6.0 x 6.0 x 3.0,Inductor_SMD:L_Bourns_SRN6045TA,class,0.55,"value to confirm against the LM5164 application circuit; its height sets minimum internal clearance"
-common,CH1,1,CAN common-mode choke,,4.5 x 3.2 (ACM4532),Inductor_SMD:L_CommonModeChoke_Coilank_ACM4532,class,0.15,"4-terminal automotive CAN choke at the size the layout assumes. Chosen over the Coilcraft 1812CAN footprint because that one ships without a 3D model, and a part missing from the render is a part nobody checks"
-common,D1,1,SMAJ33A,,DO-214AC (SMA),Diode_SMD:D_SMA,class,0.12,"TVS clamp to GND"
-common,D2,1,NUP2105L,onsemi,SOT-23,Package_TO_SOT_SMD:SOT-23,class,0.11,"CAN ESD array"
-common,D4,1,15 V zener,,SOD-323,Diode_SMD:D_SOD-323,class,0.04,"clamps Q1 gate-source - 40 V on the rail would otherwise exceed Vgs"
-common,Q1,1,P-channel MOSFET 40 V,,SOT-23,Package_TO_SOT_SMD:SOT-23,class,0.08,"reverse-polarity protection"
-common,F1,1,polyfuse 500 mA hold,,1206,Fuse:Fuse_1206_3216Metric,class,0.10,resettable
-common,C1,1,2.2 uF 100 V X7R,,1210,Capacitor_SMD:C_1210_3225Metric,class,0.22,"VIN bulk - the 100 V rating caps practical value per part"
-common,C2,1,2.2 uF 100 V X7R,,1210,Capacitor_SMD:C_1210_3225Metric,class,0.22,VIN bulk
-common,C3,1,22 uF X7R,,1210,Capacitor_SMD:C_1210_3225Metric,class,0.09,"buck output; voltage rating per variant"
-common,C4,1,22 uF X7R,,1210,Capacitor_SMD:C_1210_3225Metric,class,0.09,buck output
-common,C8,1,0.1 uF 100 V X7R,,0603,Capacitor_SMD:C_0603_1608Metric,class,0.02,"VIN high-frequency bypass at U2's pin"
-common,C9,1,0.1 uF bootstrap,,0603,Capacitor_SMD:C_0603_1608Metric,class,0.01,"BST to SW. Without it the high-side FET never fully turns on"
-common,R2,1,100 k,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,Q1 gate to GND
-common,R7,1,0 ohm,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,U1 Rs to GND
-common,R8,1,EN/UVLO upper,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,"sets the hardware floor near 6.5 V"
-common,R9,1,EN/UVLO lower,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,pairs with R8
-common,R10,1,FB upper,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,"ratio differs by variant: 5 V for xiao, 3.3 V for wroom"
-common,R11,1,FB lower,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,pairs with R10
-common,R12,1,RON,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,"sets the on-time and so the switching frequency"
-common,TP1-TP5,5,test pad 2.0 mm,,copper ENIG,TestPoint:TestPoint_Pad_2.0x2.0mm,class,0.00,"12V / CANH / CANL / 3V3 / GND pogo targets"
-common,PCB,1,40 x 40 mm 4 layer 1.6 mm,,FR-4 TG150+ ENIG,,class,0.60,"colour is a product decision behind a clear case"
-common,CASE,1,SEP-A-OBD-M + SEP-A-OBD-B,Minitools,50 x 48 x 24,,estimate,4.20,"clear PC variant unconfirmed for -M; needs a quote"
-common,J1,1,SEP-A-OBD-E2,Minitools,43 x 21 module,,spec,2.60,"OBD-II male J1962, 16 pin, 5 used. Off-board: wires to W1..W5. $2.60 at 50+"
-xiao,U3,1,XIAO ESP32S3,Seeed Studio,21 x 17.5 module,RF_Module:MCU_Seeed_ESP32C3,spec,7.00,"8 MB PSRAM + 8 MB flash, U.FL antenna included. Footprint is the shared XIAO land pattern. Retail ~$7; needs a Seeed volume quote"
-xiao,D5,1,Schottky 1 A 40 V,,SOD-123,Diode_SMD:D_SOD-123,class,0.08,"REQUIRED. The 5V pad is not diode-isolated from VBUS; without this, USB back-powers the host. Per Seeed's own expansion-board guidance"
-xiao,R13,1,0 ohm,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,"links the module's 3V3 out to U1. Fit this OR U5, never both"
-xiao,U5,1,AP2112K-3.3TRG1,Diodes Inc,SOT-23-5,Package_TO_SOT_SMD:SOT-23-5,class,0.00,"DNP on Rev A - footprint only. Fit instead of R13 if the module regulator turns out to lack headroom for U1's ~70 mA, which is not a published number"
-wroom,U3,1,ESP32-S3-WROOM-1-N8R8,Espressif,18.0 x 25.5 x 3.1,RF_Module:ESP32-S3-WROOM-1,spec,3.20,"PCB antenna; needs a host keepout; place at the board edge"
-wroom,J2,1,USB-C receptacle 16-pin,,SMD,Connector_USB:USB_C_Receptacle_GCT_USB4085,class,0.30,"0.5 mm pitch - the finest on this variant, and what sets its fab class. GCT part chosen over the HRO one because it ships with a 3D model"
-wroom,U4,1,AP2112K-3.3TRG1,Diodes Inc,SOT-23-5,Package_TO_SOT_SMD:SOT-23-5,class,0.15,"USB 5 V rail; the buck cannot run from 5 V"
-wroom,D3,1,BAT54 single Schottky,,SOD-323,Diode_SMD:D_SOD-323,class,0.05,"ORs the USB rail into 3V3. Leaves the USB-only rail near 3.05 V - see README"
-wroom,C5,1,10 uF X7R,,0603,Capacitor_SMD:C_0603_1608Metric,class,0.02,"at U3's own 3V3 pin per Espressif's guidelines"
-wroom,C6,1,0.1 uF X7R,,0603,Capacitor_SMD:C_0603_1608Metric,class,0.01,at U3's own 3V3 pin
-wroom,C7,1,1 uF X7R,,0603,Capacitor_SMD:C_0603_1608Metric,class,0.01,EN reset RC
-wroom,R1,1,1 k,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,"LED1 series. GPIO21 is active low so the pin sinks"
-wroom,R3,1,10 k,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,IO0 BOOT pull-up
-wroom,R4,1,10 k,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,EN pull-up
-wroom,R5,1,5.1 k,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,USB-C CC1
-wroom,R6,1,5.1 k,,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,USB-C CC2
-wroom,LED1,1,LED 0603,,0603,LED_SMD:LED_0603_1608Metric,class,0.04,"status. The xiao variant needs none - the module's own LED IS GPIO21"
-wroom,TP6,1,test pad 2.0 mm,,copper ENIG,TestPoint:TestPoint_Pad_2.0x2.0mm,class,0.00,"BOOT. The xiao variant has a BOOT button on the module"
+#
+# mpn/mfr are what a turnkey assembler actually needs; they were added because an
+# automated BOM matcher cannot price "2.2 uF 100 V X7R". Parts chosen for wide
+# availability rather than optimality - substitute freely EXCEPT where the note
+# says otherwise.
+#
+# dnp = do not populate. asm = n means it is not a component at all (bare copper,
+# the PCB itself, the case, the off-board connector) and must be kept out of any
+# assembly BOM, or the matcher goes looking for a part called "test pad".
+#
+# value_tbd = the value comes off a datasheet and the one here is a placeholder
+# good enough to quote against but NOT to build. Flagged in the note.
+variant,designator,qty,value_or_mpn,manufacturer,package,footprint,status,usd_each,note,mpn,dnp,asm
+common,W1-W5,5,wire pad 2.0 mm,,SMD pad,TestPoint:TestPoint_Pad_2.0x2.0mm,class,0.00,"the five used J1 contacts land here; bare copper, nothing is placed on it",,n,n
+common,TP1-TP5,5,test pad 2.0 mm,,copper ENIG,TestPoint:TestPoint_Pad_2.0x2.0mm,class,0.00,"12V / CANH / CANL / 3V3 / GND pogo targets; bare copper",,n,n
+common,PCB,1,40 x 40 mm 4 layer 1.6 mm,,FR-4 TG150+ ENIG,,class,0.60,"colour is a product decision behind a clear case",,n,n
+common,CASE,1,SEP-A-OBD-M + SEP-A-OBD-B,Minitools,50 x 48 x 24,,estimate,4.20,"clear PC variant unconfirmed for -M; needs a quote",,n,n
+common,J1,1,SEP-A-OBD-E2,Minitools,43 x 21 module,,spec,2.60,"OBD-II male J1962, 16 pin, 5 used. Off-board: wires to W1..W5",SEP-A-OBD-E2,n,n
+common,U1,1,SN65HVD230DR,Texas Instruments,SOIC-8,Package_SO:SOIC-8_3.9x4.9mm_P1.27mm,spec,0.90,"3.3 V CAN transceiver; Rs to GND for high-speed; no split termination",SN65HVD230DR,n,y
+common,U2,1,LM5164QDDARQ1,Texas Instruments,SO PowerPAD-8,Package_SO:SOIC-8-1EP_3.9x4.9mm_P1.27mm_EP2.29x3mm,spec,2.60,"NO SUBSTITUTION. It is here for 100 V tolerance and 10 uA idle; a swap to a 36 V part fails a load dump silently. AVAILABLE in India - LionCircuits quoted it at INR 539 at qty 1, so the earlier note about consigning it was wrong",LM5164QDDARQ1,n,y
+common,L1,1,33 uH shielded,Bourns,6.0 x 6.0 x 4.5,Inductor_SMD:L_Bourns_SRN6045TA,class,0.55,"value_tbd - confirm against the LM5164 application circuit. 4.5 mm tall, which sets minimum internal clearance",SRN6045TA-330M,n,y
+common,CH1,1,CAN common-mode choke,TDK,4.5 x 3.2 (ACM4532),Inductor_SMD:L_CommonModeChoke_Coilank_ACM4532,class,0.15,"4-terminal automotive CAN choke",ACM4532-231-2P-T,n,y
+common,D1,1,SMAJ33A,Littelfuse,DO-214AC (SMA),Diode_SMD:D_SMA,class,0.12,"TVS clamp to GND",SMAJ33A,n,y
+common,D2,1,NUP2105LT1G,onsemi,SOT-23,Package_TO_SOT_SMD:SOT-23,class,0.11,"CAN ESD array",NUP2105LT1G,n,y
+common,D4,1,10 V zener,Diodes Inc,SOD-323,Diode_SMD:D_SOD-323,class,0.04,"10 V not 15 V: it clamps Q1 gate-source, and AO3401A is rated +-12 V Vgs. A 15 V zener would exceed the gate rating",BZT52C10-7-F,n,y
+common,Q1,1,AO3401A,Alpha & Omega,SOT-23,Package_TO_SOT_SMD:SOT-23,class,0.08,"reverse-polarity P-FET. -30 V Vds is ample: it blocks a reversed battery, and U2 handles the load dump. Widely stocked in India",AO3401A,n,y
+common,F1,1,polyfuse 0.5 A hold,Littelfuse,1206,Fuse:Fuse_1206_3216Metric,class,0.10,resettable,1206L050YR,n,y
+common,C1,1,1 uF 100 V X7R,Murata,1210,Capacitor_SMD:C_1210_3225Metric,class,0.14,"VIN bulk. 1 uF not 2.2 uF: 2.2 uF at 100 V in 1210 is a specialty size that BOTH vendors failed to identify, while 1 uF 100 V is commodity. Two of these give 2 uF, and the 100 V rating is what matters here - it is for load-dump survival, not capacitance precision. ANY equivalent 1 uF 100 V X7R 1210 is fine",GRM32DR72A105KA01L,n,y
+common,C2,1,1 uF 100 V X7R,Murata,1210,Capacitor_SMD:C_1210_3225Metric,class,0.14,"VIN bulk, pairs with C1. Substitution welcome - this is not a NO SUBSTITUTION line",GRM32DR72A105KA01L,n,y
+common,C3,1,22 uF 25 V X7R,Murata,1210,Capacitor_SMD:C_1210_3225Metric,class,0.09,"buck output. 25 V part suits the 5 V xiao rail and is over-rated for wroom's 3.3 V, which is fine",GRM32ER71E226KE15L,n,y
+common,C4,1,22 uF 25 V X7R,Murata,1210,Capacitor_SMD:C_1210_3225Metric,class,0.09,buck output,GRM32ER71E226KE15L,n,y
+common,C8,1,0.1 uF 100 V X7R,Murata,0603,Capacitor_SMD:C_0603_1608Metric,class,0.02,"VIN high-frequency bypass at U2's pin",GRM188R72A104KA35D,n,y
+common,C9,1,0.1 uF 50 V X7R,Murata,0603,Capacitor_SMD:C_0603_1608Metric,class,0.01,"BST to SW bootstrap. Without it the high-side FET never fully turns on",GRM188R71H104KA93D,n,y
+common,R2,1,100 k 1%,Yageo,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,Q1 gate to GND,RC0603FR-07100KL,n,y
+common,R7,1,0 ohm,Yageo,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,U1 Rs to GND for high-speed mode,RC0603JR-070RL,n,y
+common,R8,1,100 k 1%,Yageo,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,"value_tbd - EN/UVLO upper. 100k/22k trips near 7 V against a 1.26 V reference; confirm the reference from the datasheet",RC0603FR-07100KL,n,y
+common,R9,1,22 k 1%,Yageo,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,"value_tbd - EN/UVLO lower, pairs with R8",RC0603FR-0722KL,n,y
+common,R10,1,52.3 k 1%,Yageo,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,"value_tbd - FB upper. 52.3k/10k gives 5 V against a 0.8 V reference, which is the XIAO variant. The wroom variant needs a different ratio for 3.3 V",RC0603FR-0752K3L,n,y
+common,R11,1,10 k 1%,Yageo,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,"value_tbd - FB lower, pairs with R10",RC0603FR-0710KL,n,y
+common,R12,1,100 k 1%,Yageo,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,"value_tbd - RON sets the on-time and so the switching frequency. Straight off the datasheet",RC0603FR-07100KL,n,y
+xiao,U3,1,XIAO ESP32S3,Seeed Studio,21 x 17.5 module,RF_Module:MCU_Seeed_ESP32C3,spec,7.00,"8 MB PSRAM + 8 MB flash, U.FL antenna included. Footprint is the shared XIAO land pattern. Stocked by Indian distributors - consider consigning",102010551,n,y
+xiao,D5,1,1N5819HW-7-F,Diodes Inc,SOD-123,Diode_SMD:D_SOD-123,class,0.08,"REQUIRED, 1 A 40 V Schottky. The XIAO's 5V pad is not diode-isolated from VBUS; without this, USB back-powers the host",1N5819HW-7-F,n,y
+xiao,R13,1,0 ohm,Yageo,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,"links the module's 3V3 out to U1. Fit this OR U5, never both",RC0603JR-070RL,n,y
+xiao,U5,1,AP2112K-3.3TRG1,Diodes Inc,SOT-23-5,Package_TO_SOT_SMD:SOT-23-5,class,0.00,"DO NOT POPULATE on Rev A - footprint only. Fit instead of R13 if the module regulator lacks headroom for U1's ~70 mA",AP2112K-3.3TRG1,y,y
+wroom,U3,1,ESP32-S3-WROOM-1-N8R8,Espressif,18.0 x 25.5 x 3.1,RF_Module:ESP32-S3-WROOM-1,spec,3.20,"PCB antenna; needs a host keepout; place at the board edge",ESP32-S3-WROOM-1-N8R8,n,y
+wroom,J2,1,USB-C receptacle 16P,GCT,SMD,Connector_USB:USB_C_Receptacle_GCT_USB4085,class,0.30,"0.5 mm pitch - the finest on this variant, and what sets its fab class",USB4085-GF-A,n,y
+wroom,U4,1,AP2112K-3.3TRG1,Diodes Inc,SOT-23-5,Package_TO_SOT_SMD:SOT-23-5,class,0.15,"USB 5 V rail; the buck cannot run from 5 V",AP2112K-3.3TRG1,n,y
+wroom,D3,1,BAT54,Diodes Inc,SOD-323,Diode_SMD:D_SOD-323,class,0.05,"ORs the USB rail into 3V3. Leaves the USB-only rail near 3.05 V - see README",BAT54W-7-F,n,y
+wroom,C5,1,10 uF 16 V X7R,Murata,0603,Capacitor_SMD:C_0603_1608Metric,class,0.02,"at U3's own 3V3 pin per Espressif's guidelines",GRM188R61C106MA73D,n,y
+wroom,C6,1,0.1 uF 50 V X7R,Murata,0603,Capacitor_SMD:C_0603_1608Metric,class,0.01,at U3's own 3V3 pin,GRM188R71H104KA93D,n,y
+wroom,C7,1,1 uF 16 V X7R,Murata,0603,Capacitor_SMD:C_0603_1608Metric,class,0.01,EN reset RC,GRM188R71C105KA12D,n,y
+wroom,R1,1,1 k 1%,Yageo,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,"LED1 series. GPIO21 is active low so the pin sinks",RC0603FR-071KL,n,y
+wroom,R3,1,10 k 1%,Yageo,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,IO0 BOOT pull-up,RC0603FR-0710KL,n,y
+wroom,R4,1,10 k 1%,Yageo,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,EN pull-up,RC0603FR-0710KL,n,y
+wroom,R5,1,5.1 k 1%,Yageo,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,USB-C CC1,RC0603FR-075K1L,n,y
+wroom,R6,1,5.1 k 1%,Yageo,0603,Resistor_SMD:R_0603_1608Metric,class,0.01,USB-C CC2,RC0603FR-075K1L,n,y
+wroom,LED1,1,LED green 0603,Wurth,0603,LED_SMD:LED_0603_1608Metric,class,0.04,"status. The xiao variant needs none - the module's own LED IS GPIO21",150060GS75000,n,y
+wroom,TP6,1,test pad 2.0 mm,,copper ENIG,TestPoint:TestPoint_Pad_2.0x2.0mm,class,0.00,"BOOT. Bare copper, nothing is placed on it",,n,n

@@ -1,0 +1,81 @@
+DRAFT - review before sending. Not sent by anyone but you.
+
+To:      pcb.india@pcbpower.com   (and/or sales@lioncircuits.com)
+Subject: Turnkey quote request - Obdurate Rev A - 2 layer, 40x40mm, qty 5
+
+Attachments (4):
+  obdurate-revA-xiao-2L-QUOTE-ONLY-do-not-fabricate.zip   Gerbers + drill
+  obdurate-revA-xiao-2L-pickandplace.xlsx                 25 placements, top side
+  obdurate-revA-xiao-2L-powerbom.csv                      20 unique parts
+  obdurate-revA-xiao-2L-assembly-bom.csv                  same BOM, per-designator
+
+---
+
+Hello,
+
+I would like a turnkey quote (fabrication + component sourcing + assembly) for a
+prototype run. Files attached.
+
+BOARD
+  Size            40.0 x 40.0 mm, 2 mm corner radii
+  Layers          2
+  Thickness       1.6 mm
+  Material        TG150 or higher, please quote the upcharge separately
+  Surface finish  ENIG (RoHS) - NOT leaded HASL
+  Silkscreen      white, top side only
+  Copper          1 oz outer
+  Min via         0.30 mm drill
+  Quantity        5
+
+ASSEMBLY
+  25 placements, ALL top side. No bottom-side placement required.
+  20 unique parts. Finest pitch is 1.27 mm (SOIC-8). No BGA, no fine pitch.
+  One footprint (U5, AP2112K-3.3TRG1) is DO NOT POPULATE and is deliberately
+  absent from the BOM. Please leave those pads bare.
+
+TWO NOTES ON THE BOM
+
+1. U2, LM5164QDDARQ1 - NO SUBSTITUTION, please.
+   It is specified for its 100 V input rating and 10 uA standby current. A
+   substitution to a lower-voltage part will pass your testing and fail in a
+   vehicle months later, so I would rather delay than substitute. If it is
+   long-lead, tell me and I will consign it.
+
+2. Five resistors (R8, R9, R10, R11, R12) carry a "value_tbd" note.
+   The values shown are placeholders pending a datasheet calculation. They are
+   all 0603 1% so the price should not move, but please do not build from them
+   without a confirmed revision from me.
+
+PARTS I EXPECT MAY BE HARD TO SOURCE
+
+  GRM32DR72A105KA01L   1 uF 100 V X7R 1210
+      Any equivalent 1 uF 100 V X7R in 1210 is fine. Substitution welcome.
+      Please keep the 100 V rating - it is there for automotive load-dump
+      survival, not for capacitance accuracy. Do not drop to 50 V.
+
+  ACM4532-231-2P-T     CAN common-mode choke, 4.5 x 3.2, 4 terminal
+      Any equivalent 4-terminal CAN choke on the same land pattern is fine.
+      If unavailable, LEAVE IT UNPOPULATED and I will bridge pads 1-2 and 3-4
+      by hand. It is an EMC part, not a functional one - the board works
+      without it.
+
+  102010551            Seeed Studio XIAO ESP32S3 module
+      If you do not carry Seeed parts I will consign these. It is widely
+      stocked in India.
+
+WHAT I WOULD LIKE IN THE QUOTE
+
+  1. Fabrication cost for 5 boards, with the ENIG and TG150 upcharges shown
+     separately so I can see what they cost.
+  2. Assembly cost for 5 boards, 25 placements.
+  3. Component cost, with any minimum-order overhang called out - at this
+     quantity the MOQs matter more than the unit prices.
+  4. Lead time, split into component sourcing and build.
+  5. Which lines you CANNOT source. That answer is more useful to me than the
+     total, because it tells me what to redesign.
+
+An indicative price for 100 and 300 units of the same board would also help my
+planning, if that is easy to produce.
+
+Thank you,
+Vivek Kumar
